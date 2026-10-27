@@ -22,7 +22,24 @@ valley mud.
 
 ---
 
-## Quick start
+## Now playable in 3D
+
+The engine has a game layer — **[`game/`](game/)** — a third-person western
+weather sandbox (Next.js + three.js) that ports the same physics to real
+time and puts you inside the catchment: run the valley road while a
+thunderstorm passes over, slow down as the clay wets, sink half a metre in
+liquid mud, and watch the parked wagon go PASSABLE → MARGINAL → **BOGGED**
+with a 70 cm rut.
+
+![storm peak](game/docs/screenshot-storm-peak.jpg)
+
+Target device: MacBook Air M1 base at 30 fps (auto quality scaling).
+Quick start, controls and the physics-to-renderer mapping live in
+[`game/README.md`](game/README.md).
+
+---
+
+## Quick start (Python engine)
 
 ```bash
 cd rain-weather-engine
@@ -169,6 +186,7 @@ rwengine/
   visuals_more.py   profiles, geotech curves, DSD plots, comparison, GIF
 run_simulation.py   CLI (--preset / --demo / --hours / --no-gif)
 validate_physics.py physics sanity suite
+game/               the playable 3D layer (Next.js + three.js, real-time port)
 ```
 
 ## Limitations (by design, "approximately simulates")

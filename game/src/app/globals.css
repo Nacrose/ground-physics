@@ -1,0 +1,167 @@
+/* ================= STORMCOUNTRY — standalone game styles (no framework) ==== */
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+body { background: #05070a; overflow: hidden; }
+
+/* ============================ STORMCOUNTRY GAME HUD ============================ */
+
+.game-root {
+  position: fixed;
+  inset: 0;
+  background: #05070a;
+  overflow: hidden;
+  font-family: Georgia, 'Times New Roman', serif;
+}
+.game-mount { position: absolute; inset: 0; }
+.game-canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+.game-boot-fallback {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 1rem;
+  background: #0a0d12; color: #e8d9b5;
+}
+.game-error {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 0.8rem; text-align: center;
+  background: rgba(5,7,10,0.94); color: #e8d9b5; padding: 2rem;
+}
+.game-error-title { font-size: 1.6rem; letter-spacing: 0.35em; color: #e0685c; }
+.game-error-msg { font-size: 1rem; opacity: 0.9; }
+.game-error-sub { font-size: 0.85rem; opacity: 0.55; }
+
+.hud { position: absolute; inset: 0; pointer-events: none; z-index: 10; color: #f0e6d2; }
+.hud * { user-select: none; }
+
+/* ---- minimap ---- */
+.hud-map {
+  position: absolute; left: 26px; bottom: 24px; width: 188px; height: 188px;
+  border-radius: 50%;
+  border: 2px solid rgba(240,230,210,0.35);
+  box-shadow: 0 0 0 4px rgba(0,0,0,0.45), 0 6px 24px rgba(0,0,0,0.5);
+  overflow: hidden;
+  background: rgba(10,10,8,0.5);
+}
+.hud-map canvas { width: 100%; height: 100%; display: block; }
+.hud-map-n {
+  position: absolute; top: 4px; left: 50%; transform: translateX(-50%);
+  font-size: 10px; letter-spacing: 0.2em; color: rgba(240,230,210,0.75);
+  text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+}
+
+/* ---- weather panel ---- */
+.hud-weather {
+  position: absolute; right: 26px; bottom: 24px; min-width: 250px;
+  padding: 14px 18px;
+  background: rgba(12,10,8,0.55);
+  border: 1px solid rgba(240,230,210,0.18);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+}
+.hud-weather-word {
+  font-size: 1.25rem; letter-spacing: 0.30em; font-weight: 600;
+  color: #f7edd3; text-shadow: 0 2px 8px rgba(0,0,0,0.7);
+  margin-bottom: 2px;
+}
+.hud-weather-word[data-state="drizzle"] { color: #cfd8bc; }
+.hud-weather-word[data-state="rain"] { color: #a9c1cf; }
+.hud-weather-word[data-state="heavy"] { color: #8fb7d4; }
+.hud-time { font-size: 0.78rem; letter-spacing: 0.22em; opacity: 0.85; margin-bottom: 8px; }
+.hud-meta { display: flex; flex-direction: column; gap: 3px; }
+.hud-line { font-size: 0.72rem; letter-spacing: 0.14em; opacity: 0.75; }
+.hud-dim { opacity: 0.45; }
+.hud-wagon { margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(240,230,210,0.14); letter-spacing: 0.16em; }
+.hud-wagon[data-v="ok"] { color: #9fc97a; opacity: 1; }
+.hud-wagon[data-v="mar"] { color: #e3c268; opacity: 1; }
+.hud-wagon[data-v="bog"] { color: #e0685c; opacity: 1; }
+.hud-fps { position: absolute; top: 6px; right: 10px; font-size: 0.6rem; opacity: 0.4; }
+
+/* ---- soil inspector ---- */
+.hud-inspector {
+  position: absolute; top: 22px; right: 26px; width: 300px;
+  padding: 14px 16px;
+  background: rgba(14,11,8,0.72);
+  border: 1px solid rgba(240,230,210,0.22);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  box-shadow: 0 8px 30px rgba(0,0,0,0.45);
+}
+.hud-insp-title { font-size: 1.05rem; letter-spacing: 0.30em; color: #f4e5c0; }
+.hud-insp-sub { font-size: 0.65rem; letter-spacing: 0.18em; opacity: 0.5; margin: 2px 0 10px; }
+.hud-insp-row {
+  display: flex; justify-content: space-between; gap: 10px;
+  font-size: 0.72rem; letter-spacing: 0.08em; padding: 3.5px 0;
+  border-bottom: 1px dotted rgba(240,230,210,0.12);
+}
+.hud-insp-row span:first-child { opacity: 0.55; }
+.hud-insp-row span:last-child { font-variant-numeric: tabular-nums; }
+.hud-insp-foot { margin-top: 10px; font-size: 0.6rem; letter-spacing: 0.14em; opacity: 0.4; }
+
+/* ---- cinematic overlays ---- */
+.hud-vignette {
+  position: absolute; inset: 0;
+  background: radial-gradient(ellipse at center, transparent 52%, rgba(0,0,0,0.42) 100%);
+}
+.hud-grain {
+  position: absolute; inset: -100px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
+  opacity: 0.055; mix-blend-mode: overlay;
+  animation: grain-shift 0.9s steps(4) infinite;
+}
+@keyframes grain-shift {
+  0% { transform: translate(0, 0); }
+  25% { transform: translate(-38px, 22px); }
+  50% { transform: translate(24px, -30px); }
+  75% { transform: translate(-16px, -14px); }
+  100% { transform: translate(0, 0); }
+}
+.hud-flash {
+  position: absolute; inset: 0; background: #dfe9f5; opacity: 0;
+  mix-blend-mode: screen;
+}
+.hud-bar-top, .hud-bar-bottom {
+  position: absolute; left: 0; right: 0; height: 0; background: #000;
+  transition: height 0.8s cubic-bezier(0.6,0,0.2,1);
+}
+.hud-bar-top { top: 0; }
+.hud-bar-bottom { bottom: 0; }
+.hud.cine .hud-bar-top, .hud.cine .hud-bar-bottom { height: 8vh; }
+
+/* ---- controls hint ---- */
+.hud-hint {
+  position: absolute; top: 22px; left: 26px; padding: 12px 16px;
+  background: rgba(12,10,8,0.5);
+  border: 1px solid rgba(240,230,210,0.15);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  animation: hint-fade 1s ease 26s forwards;
+}
+@keyframes hint-fade { to { opacity: 0; } }
+.hud-hint-title { font-size: 0.72rem; letter-spacing: 0.3em; opacity: 0.7; margin-bottom: 8px; }
+.hud-hint-grid {
+  display: grid; grid-template-columns: auto auto; gap: 3px 14px;
+  font-size: 0.68rem; letter-spacing: 0.08em;
+}
+.hud-hint-grid span:nth-child(odd) { color: #e8c987; opacity: 0.9; }
+.hud-hint-grid span:nth-child(even) { opacity: 0.6; }
+.hud-hint-sub { margin-top: 9px; font-size: 0.62rem; font-style: italic; opacity: 0.45; max-width: 230px; }
+
+/* ---- boot screen ---- */
+.hud-boot {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 14px;
+  background: radial-gradient(ellipse at 50% 42%, rgba(28,24,18,0.88), rgba(5,6,8,0.96));
+  transition: opacity 1.2s ease; z-index: 20;
+}
+.hud-boot.gone { opacity: 0; pointer-events: none; }
+.hud-boot-title {
+  font-size: 3.2rem; letter-spacing: 0.45em; color: #f0dfb8;
+  text-shadow: 0 4px 30px rgba(0,0,0,0.8);
+  padding-left: 0.45em; /* balance letter-spacing */
+}
+.hud-boot-sub { font-size: 0.9rem; letter-spacing: 0.28em; color: #b9a985; }
+.hud-boot-ctl {
+  margin-top: 34px; font-size: 0.85rem; letter-spacing: 0.35em; color: #e8c987;
+  border: 1px solid rgba(232,201,135,0.4); padding: 12px 28px 12px 34px;
+  animation: boot-pulse 2.2s ease-in-out infinite;
+}
+@keyframes boot-pulse { 0%,100% { opacity: 0.75; } 50% { opacity: 1; } }
