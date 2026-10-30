@@ -85,10 +85,23 @@ export class Ground {
   disturbed = new Uint8Array(N); // dig/till disturbance: crust broken, layers mixed
   /** compaction accumulator (fine-grained footfall memory; traffic = floor) */
   private compAcc = new Float32Array(N);
-  /** per-step infiltration flux [m] — branch flips on the NET water tendency */
-  private wetFlux = new Float32Array(N);
+  /** per-step infiltration flux [m] — branch flips on the NET water tendency
+   *  (the contact tier writes its film infiltration here too — one truth) */
+  wetFlux = new Float32Array(N);
   /** sub-grid basin outflow ledger [m3] (depression-cap spillover, spec §4) */
   basinOutflowM3 = 0;
+  /** contact-tier water on loan: display depth per cell (minimap/texture stay
+   *  honest while the micro window owns the actual film mass, spec §9) */
+  loanPond = new Float32Array(N);
+  /** suspended sediment load per fine cell [kg] (spec §10) */
+  sedKg = new Float32Array(N);
+  /** sediment ledger for the fine tier (closes to the kg with micro handoffs) */
+  sedLedger = {
+    detachedKg: 0,
+    depositedKg: 0,
+    exportedKg: 0, // left the domain via basin outflow / map edge
+    importedKg: 0, // arrived from the contact tier (window handoffs)
+  };
   // spatial pattern state
   private blobPhase = 0;
   private bandX = -0.35; // band centre, fraction of world
@@ -114,6 +127,32 @@ export class Ground {
       this.wetFlux[k] = 0;
     }
     this.basinOutflowM3 = 0;
+    this.loanPond.fill(0);
+    this.sedKg.fill(0);
+    this.sedLedger.detachedKg = 0;
+    this.sedLedger.depositedKg = 0;
+    this.sedLedger.exportedKg = 0;
+    this.sedLedger.importedKg = 0;
+  }
+
+  /** node-grid terrain height (the D8 routing datum) for the micro tier */
+  nodeH(i: number, j: number): number {
+    const gi = Math.max(0, Math.min(GRID - 1, i));
+    const gj = Math.max(0, Math.min(GRID - 1, j));
+    return this.terrain.height[(gj + 1) * (GRID + 1) + gi + 1];
+  }
+
+  /** the contact tier returns loaned water (window scrolled away / reset) */
+  returnWater(volM3: number, x: number, z: number) {
+    const k = cellIndex(x, z);
+    this.hPond[k] += volM3 / (CELL * CELL);
+  }
+
+  /** the contact tier hands back suspended load (window scrolled away) */
+  returnSediment(kg: number, x: number, z: number) {
+    const k = cellIndex(x, z);
+    this.sedKg[k] += kg;
+    this.sedLedger.importedKg += kg;
   }
 
   /** saturation vapor pressure [kPa] (Magnus, ported spirit of Bolton) */
@@ -546,7 +585,7 @@ export class Ground {
     const d = this.texData;
     for (let k = 0; k < N; k++) {
       d[k * 4 + 0] = Math.min(255, this.wetness[k] * 255) | 0;
-      d[k * 4 + 1] = Math.min(255, Math.min(this.hPond[k] / 0.12, 1) * 255) | 0;
+      d[k * 4 + 1] = Math.min(255, Math.min(Math.max(this.hPond[k], this.loanPond[k]) / 0.12, 1) * 255) | 0;
       d[k * 4 + 2] = Math.min(255, this.mudFactor[k] * 255) | 0;
       d[k * 4 + 3] = Math.min(255, road[k] * 255) | 0;
     }

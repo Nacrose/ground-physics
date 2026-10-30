@@ -161,8 +161,14 @@ export class Player {
     this.mud = sample.mud;
     this.pondM = sample.pondM;
     const mudSlow = sample.slow;
+    // the sub-grid film counts too: water in your dug hole wades like a pond
+    const filmDepth = this.micro.waterAt(this.pos.x, this.pos.z);
+    if (filmDepth > this.pondM) this.pondM = filmDepth;
+    const filmSlow = Math.min(filmDepth / 0.25, 1) * 0.45;
+    const slow = Math.max(0.18, 1 - 0.68 * this.mud - Math.max(
+      Math.min(this.pondM / 0.25, 1) * 0.45, filmSlow));
     const baseSpeed = input.sprint ? 7.2 : 4.1;
-    const maxSpeed = baseSpeed * mudSlow;
+    const maxSpeed = baseSpeed * slow;
 
     const cy = input.yaw;
     const fwd = new THREE.Vector3(Math.sin(cy), 0, Math.cos(cy));

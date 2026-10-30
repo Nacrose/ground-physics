@@ -59,7 +59,7 @@ export class Game {
   // spade stroke state machine
   private digging = false;
   private digTimer = 0;
-  private digDur = 0.95;
+  private digDur = 0.5; // a full swing every half second — substantial digging
   private digApplied = false;
   private digCooldown = 0;
 
@@ -237,6 +237,8 @@ export class Game {
         playerX: this.player.pos.x,
         playerZ: this.player.pos.z,
       });
+      // the film rides the same clock while time skips forward
+      this.micro.coupleGround(60, { tempC: now2.tempC, rh: now2.rh, windMs: now2.windMs, sw: now2.sw });
     }
     this.ground.packTexture(this.terrain.road);
     this.world.refreshGroundTexture();
@@ -500,7 +502,20 @@ export class Game {
       ...a,
       massErrKg: Math.abs(a.massInKg - a.massOutKg),
       volNetM3: a.spoilBulkM3 - a.removedBulkM3, // positive: ground got bulkier (loosened)
+      persistedEdits: this.micro.persistedEdits(),
     };
+  }
+
+  /** QA: water-film conservation ledger (loan / edge / evap / infilt) */
+  waterAudit() {
+    return this.micro.waterAudit();
+  }
+
+  /** QA: sediment conservation ledger (detached / deposited / handoff / load) */
+  sedAudit() {
+    const m = this.micro.sedAudit();
+    const f = this.ground.sedLedger;
+    return { micro: m, fine: { ...f, loadNowKg: this.ground.sedKg.reduce((s, x) => s + x, 0) } };
   }
 
   /** QA: tunnel station graph + conservation ledger */
@@ -608,6 +623,11 @@ export class Game {
         playerZ: this.player.pos.z,
       });
       this.groundAccum = 0;
+      // contact tier: the sub-grid film couples to the grid pond it just
+      // updated (loan relax → route → infiltrate → erode), same dtGame
+      this.micro.coupleGround(dtGame, {
+        tempC: now2.tempC, rh: now2.rh, windMs: now2.windMs, sw: now2.sw,
+      });
       this.ground.packTexture(this.terrain.road);
       this.world.refreshGroundTexture();
       this.fx.rebuildPuddles();

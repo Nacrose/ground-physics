@@ -563,6 +563,13 @@ export class StormFX {
     pm.uniforms.uCamPos.value.copy(camPos);
     void playerPos;
 
+    // the contact-tier film sheet rides the same sky/sun/fog environment
+    if (this.micro) {
+      this.micro.setWaterEnv(elapsed, Math.min(rainAtPlayer / 50, 1), camPos, sunDir,
+        pm.uniforms.uSky.value as THREE.Color, pm.uniforms.uSun.value as THREE.Color,
+        fogColor, fogDensity);
+    }
+
     // audio levels
     if (this.rainGain && !this.muted) {
       const target = Math.min(rainAtPlayer / 90, 1) * 0.24;
