@@ -4,7 +4,7 @@
  * quality auto-scaler (30 fps).
  */
 import * as THREE from "three";
-import { buildTerrain, TerrainData, WORLD_SIZE } from "./terrain";
+import { buildTerrain, TerrainData, WORLD_SIZE, sampleHeight } from "./terrain";
 import { Ground } from "./ground";
 import { World } from "./world";
 import { StormFX } from "./fx";
@@ -13,6 +13,7 @@ import { HUD } from "./hud";
 import { WeatherPlayer } from "./weather";
 import { PRESETS, WeatherEntry } from "./params";
 import { MicroTerrain } from "./contact";
+import { Tunnel } from "./tunnel";
 
 const HALF = WORLD_SIZE / 2;
 const TS_STEPS = [1, 4, 8, 16, 32, 64];
@@ -42,6 +43,9 @@ export class Game {
   private fx!: StormFX;
   private player!: Player;
   private hud!: HUD;
+  /** the driven adit — station graph, portal cut, live Terzaghi FS */
+  tunnel: Tunnel | null = null;
+  private tunnelRounds = 0; // mining rounds fired at the face (hard-rate gate)
   private weather: WeatherPlayer | null = null;
   private timelines = new Map<string, WeatherEntry[]>();
 
@@ -117,11 +121,13 @@ export class Game {
     this.micro = new MicroTerrain(this.scene, this.terrain, this.ground);
     this.world = new World(this.scene, this.terrain, this.ground, 52000, this.micro);
     this.fx = new StormFX(this.scene, this.terrain, this.ground, 5600, this.micro);
+    this.tunnel = new Tunnel(this.scene, this.terrain, this.ground);
     // spawn on the road near the wagon
     const spawnZ = (0.30 + 0.08 * Math.sin((20 / WORLD_SIZE) * Math.PI * 1.7 + 0.4)) * WORLD_SIZE;
     this.player = new Player(this.scene, this.terrain, this.ground, this.fx, this.micro,
       20 - HALF, spawnZ - HALF,
       (x, z, r, mode) => this.world.crushGrass(x, z, r, mode));
+    this.player.tunnel = this.tunnel;
     this.hud = new HUD(this.container, this.terrain);
     this.wagonBaseY = this.world.wagon.position.y;
 
@@ -172,6 +178,10 @@ export class Game {
       this.micro.reset();
       this.world.wagon.position.y = this.wagonBaseY;
       this.world.wagon.rotation.z = 0;
+      // the adit is carved from this world's hill — a fresh world has no adit
+      this.tunnel?.reset();
+      this.world.setPortalBox(0, 0, 0, 0, 0, 0, 1);
+      this.micro.setPortalBox(0, 0, 0, 0, 0, 0, 1);
     }
     this.ground.packTexture(this.terrain.road);
     this.world.refreshGroundTexture();
@@ -262,6 +272,8 @@ export class Game {
       this.qualityIdx = (this.qualityIdx + 1) % QUALITY.length;
       this.applyQuality(QUALITY[this.qualityIdx]);
     }
+    if (code === "KeyB") this.tryBeginAdit();
+    if (code === "KeyR") this.tryPlaceTimber();
     const presetKeys = ["Digit1", "Digit2", "Digit3", "Digit4", "Digit5"];
     const pi = presetKeys.indexOf(code);
     if (pi >= 0) {
@@ -330,11 +342,32 @@ export class Game {
       ["DIG STATE", rep.disturbed ? "DISTURBED (loosened)" : "intact"],
       ["RAIN HERE", `${rainHere.toFixed(1)} mm/h`],
     ];
+    // the driven adit: station graph + live Terzaghi panel (design §8)
+    const t = this.tunnel;
+    let fsRowIdx = -1;
+    let fsRowColor = "#e0685c";
+    if (t?.active) {
+      const r = t.report();
+      const fs = t.fsAt(p.x, p.z);
+      const inside = t.insideTube(p.x, p.z);
+      rows.push(["ADIT LENGTH", `${r.lengthM.toFixed(1)} m · ${r.stations} stations`]);
+      rows.push(["TIMBER SETS", `${r.supported} set · ${r.unsupported} bare`]);
+      if (fs) {
+        rows.push(["COVER AT CROWN", `${fs.coverM.toFixed(1)} m`]);
+        rows.push(["CROWN LOAD", `${fs.loadKpa.toFixed(0)} kPa ${fs.coverM > 2 * 2.0 ? "(Terzaghi silo)" : "(full column)"}`]);
+        rows.push(["SUPPORT CAP", `${fs.capKpa.toFixed(0)} kPa ${fs.supported ? "· timber 300" : "· Nc·c_eff only"}`]);
+        rows.push([inside ? "FACTOR OF SAFETY" : "FS (nearest stn)", `${fs.fs.toFixed(2)}${fs.fs < 1 ? " — SET TIMBER (R)!" : ""}`]);
+        fsRowIdx = rows.length - 1;
+        fsRowColor = fs.fs >= 1.5 ? "#9fc97a" : fs.fs >= 1.0 ? "#e3c268" : "#e0685c";
+      }
+      rows.push(["MUCK LEDGER", `${r.excavatedM3.toFixed(1)} m³ out · ${r.spoilBulkM3.toFixed(1)} m³ heaped`]);
+      if (r.muckPendingM3 > 0.05) rows.push(["MUCK PENDING", `${r.muckPendingM3.toFixed(1)} m³ (portal off-window)`]);
+    }
     const html = `
       <div class="hud-insp-title">SOIL SURVEY</div>
       <div class="hud-insp-sub">Terzaghi · Fredlund · Atterberg — live</div>
       ${rows.map(([k, v], i) => `
-        <div class="hud-insp-row"${i === 2 ? ` style="color:${stateColor}"` : ""}>
+        <div class="hud-insp-row"${i === 2 ? ` style="color:${stateColor}"` : i === fsRowIdx ? ` style="color:${fsRowColor}"` : ""}>
           <span>${k}</span><span>${v}</span>
         </div>`).join("")}
       <div class="hud-insp-foot">Green-Ampt column · 4 layers · dual-branch retention · micro 6.25 cm</div>`;
@@ -342,6 +375,48 @@ export class Game {
   }
 
   // -------------------------------------------------------------- spade strokes
+  /** B: cut an adit mouth into the hillside the player faces */
+  private tryBeginAdit(): { ok: boolean; reason?: string } {
+    if (!this.tunnel || !this.player || !this.started) return { ok: false, reason: "click to ride first" };
+    const dirX = Math.sin(this.input.yaw);
+    const dirZ = Math.cos(this.input.yaw);
+    const aimX = this.player.pos.x + dirX * 1.35;
+    const aimZ = this.player.pos.z + dirZ * 1.35;
+    const res = this.tunnel.create(aimX, aimZ, dirX, dirZ);
+    if (!res.ok) {
+      this.hud.toast(res.reason ?? "NO ADIT HERE");
+      this.fx.playDigHit("hard");
+      return res;
+    }
+    // open the hillside: both shader boxes + the cut kills its vegetation
+    const b = this.tunnel.portalBox();
+    const d = this.tunnel.dirVec();
+    this.world.setPortalBox(b.cx, b.cz, b.halfAlong, b.halfAcross, b.push, d.x, d.z);
+    this.micro.setPortalBox(b.cx, b.cz, b.halfAlong, b.halfAcross, b.push, d.x, d.z);
+    this.world.crushGrass(b.cx, b.cz, Math.max(b.halfAlong, b.halfAcross) * 1.7, "dig");
+    this.tunnelRounds = 0;
+    // the cut throws its own dust — a real write into the world
+    const cutY = sampleHeight(this.terrain, b.cx + HALF, b.cz + HALF) - b.push * 0.4;
+    for (let i = 0; i < 4; i++) {
+      this.fx.spawnDust(b.cx + (Math.random() - 0.5) * 2.4, cutY, b.cz + (Math.random() - 0.5) * 2.4);
+    }
+    this.hud.toast(`ADIT CUT — ${Math.round(b.push * 100)} CM INTO THE HILLSIDE`);
+    return { ok: true };
+  }
+
+  /** R: raise a timber set at the station the player stands in */
+  private tryPlaceTimber(): { ok: boolean; reason?: string; index?: number } {
+    if (!this.tunnel || !this.player || !this.started) return { ok: false, reason: "click to ride first" };
+    const res = this.tunnel.placeTimber(this.player.pos.x, this.player.pos.z);
+    if (res.ok) {
+      this.hud.toast(`TIMBER SET — STATION ${res.index}`);
+      this.fx.playDigHit("spoil");
+    } else {
+      this.hud.toast((res.reason ?? "CANNOT SET TIMBER HERE").toUpperCase());
+    }
+    return res;
+  }
+
   /** one fixed-step tick of the dig state machine (hold F) */
   private updateDig(dt: number) {
     if (this.digCooldown > 0) {
@@ -375,6 +450,33 @@ export class Game {
     const dirZ = Math.cos(this.input.yaw);
     const aimX = this.player.pos.x + dirX * 1.35;
     const aimZ = this.player.pos.z + dirZ * 1.35;
+
+    // ---- tunnel drivage: F at the face is a MINING ROUND, not a spade crater.
+    // No heightfield crater (the face is under virgin hill — a crater there
+    // would ghost onto the surface above); volume + muck route through the
+    // tunnel's own ledger and land at the portal as real spoil.
+    if (this.tunnel?.active && this.tunnel.nearFace(this.player.pos.x, this.player.pos.z, 1.15)) {
+      const probe = this.tunnel.probeFace();
+      this.tunnelRounds++;
+      // dry dense clay refuses half the rounds (pick-work, not spade-work);
+      // saturated fines cost extraction time — the stroke machine waits
+      if (probe.hard && this.tunnelRounds % 2 !== 0) {
+        this.fx.playDigHit("hard");
+        return;
+      }
+      const st = this.tunnel.advance(this.micro);
+      const f = this.tunnel.facePos();
+      this.fx.playDigHit(st.suction ? "suck" : "cut");
+      if (probe.suction) this.digCooldown = 0.35;
+      // muck breath at the face (dry ground only — wet rounds don't dust)
+      const faceSoil = this.micro.touchAt(f.x, f.z);
+      if (faceSoil.wetness < 0.35 && faceSoil.mud < 0.2) {
+        this.fx.spawnDust(f.x, f.y, f.z);
+        this.fx.spawnDust(f.x - this.tunnel.dirVec().x * 0.3, f.y - 0.4, f.z - this.tunnel.dirVec().z * 0.3);
+      }
+      return;
+    }
+
     const res = this.micro.digStroke(aimX, aimZ, dirX, dirZ);
     // grass dies where the crater and the spoil land
     this.world.crushGrass(aimX, aimZ, 0.32, "dig");
@@ -399,6 +501,29 @@ export class Game {
       massErrKg: Math.abs(a.massInKg - a.massOutKg),
       volNetM3: a.spoilBulkM3 - a.removedBulkM3, // positive: ground got bulkier (loosened)
     };
+  }
+
+  /** QA: tunnel station graph + conservation ledger */
+  tunnelAudit() {
+    return this.tunnel?.report() ?? null;
+  }
+
+  /** QA/debug: terrain height at a world position (site scouting in evals) */
+  sampleGroundH(x: number, z: number): number {
+    return sampleHeight(this.terrain, x + HALF, z + HALF);
+  }
+
+  /** HUD status line for a driven adit (null when none) */
+  private tunnelHudLine(): string | null {
+    const t = this.tunnel;
+    if (!t || !t.active) return null;
+    const r = t.report();
+    const fs = t.fsAt(this.player.pos.x, this.player.pos.z);
+    let line = `ADIT — ${r.lengthM.toFixed(1)} M · ${r.stations} STATIONS · TIMBER ${r.supported}`;
+    line += ` · MUCK ${(r.excavatedM3).toFixed(1)} M\u00b3`;
+    if (r.muckPendingM3 > 0.05) line += ` (+${r.muckPendingM3.toFixed(1)} PENDING)`;
+    if (fs) line += ` · FS ${fs.fs.toFixed(1)}`;
+    return line;
   }
 
   // -------------------------------------------------------------------- loop
@@ -459,6 +584,8 @@ export class Game {
     // ---- micro tier: scroll window, relax slopes, upload texture -----------------
     this.micro.update(dtReal, this.player.pos.x, this.player.pos.z);
     this.world.updateDigWindow();
+    // muck mined while the portal was outside the micro window lands now
+    this.tunnel?.flushMuck(this.micro);
 
     // ---- ground physics tick (0.5 s real → dtGame seconds) ------------------------
     this.groundAccum += dtReal;
@@ -542,6 +669,7 @@ export class Game {
         wagonVerdict: this.wagonVerdict,
         wagonRutCm: this.wagonRutCm,
         mudHere: this.player.mud,
+        tunnelLine: this.tunnelHudLine(),
       });
       if (this.inspectorOpen && Math.floor(now2.tMin * 2) % 2 === 0) {
         this.renderInspector();
@@ -558,6 +686,7 @@ export class Game {
     window.removeEventListener("keyup", this.onKeyUp);
     window.removeEventListener("resize", this.resize);
     this.world?.dispose();
+    this.tunnel?.dispose();
     this.micro?.dispose();
     this.renderer?.dispose();
     if (this.renderer?.domElement.parentElement) {

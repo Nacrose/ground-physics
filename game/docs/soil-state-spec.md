@@ -113,3 +113,36 @@ reduction orders). Footfall/stroke outcomes are pure functions of
 - [ ] Repeated walking one line: grass trampled, traffic counter rises,
       compaction reduces sink (desire-path seed, Section 30)
 - [ ] Console clean; ≥ 30 fps on the QA scene (quality scaler untouched)
+
+## 8. Tunnels — the station-node graph (batch A)
+
+A tunnel is the one case where ground stops being a heightfield: crown and
+invert share a column. It is neither voxels nor a heightfield edit — it is a
+**station graph**: every 0.5 m of drivage is a node carrying position,
+support state and a live handle on the fine-tier soil state.
+
+- **Geometry**: bore 2.0 m span × 0.85 m walls + semicircular crown (1.85 m);
+  invert = portal grade − 2.40 m (0.55 m minimum crown cover at the mouth);
+  the portal mouth is a rotated smoothstep cut pushed down in BOTH the base
+  terrain and the contact overlay shaders (world-anchored — it stays open at
+  any distance; the micro window only owns the muck heaps and prints).
+- **Drivage**: F at the face is a mining round — one round advances one
+  station. No heightfield crater at the face (it would ghost onto the surface
+  above); dry dense clay refuses half the rounds, saturated fines add the
+  suction cooldown. The four resistances read the live fine-tier column.
+- **Conservation (rule 4 extended)**: each round books `area × 0.5` bank m³
+  and the same dry mass lands as loose spoil (fill 0.8, +25 % bulk) at the
+  portal through the micro-tier pile writer. Muck mined while the portal is
+  outside the 16 m micro window waits in `muckPendingM3` and is flushed when
+  the window returns — the ledger never forgets.
+- **Support**: R raises a timber set (posts + collar + roof lagging) at the
+  station the player stands in — allowable 300 kPa.
+- **Live Terzaghi panel**: crown load = silo-arched γB/2K·φ cap vs full
+  column below 2 spans of cover; capacity = timber + 5.14·c_eff from the
+  CURRENT fine state — a storm is a live FS degradation, not a script.
+- **The player underground**: the tube owns the floor inside its footprint
+  (height-gated so surface walkers above a drive keep the terrain floor);
+  the camera pulls in and clamps into the bore; a miner's lantern fades in.
+- **Batch A scope note**: FS is computed and displayed only — stand-up
+  timers, steel arch sets, seepage/piping and collapse carving arrive with
+  batches B–D (`carveRect` on the micro tier is the collapse writer).

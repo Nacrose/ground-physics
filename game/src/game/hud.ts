@@ -24,6 +24,8 @@ export interface HUDState {
   wagonVerdict: string;
   wagonRutCm: number;
   mudHere: number;
+  /** adit status line, or null when no tunnel is driven */
+  tunnelLine: string | null;
 }
 
 const MM = 188; // minimap px
@@ -39,6 +41,9 @@ export class HUD {
   private windEl!: HTMLElement;
   private tempEl!: HTMLElement;
   private presetEl!: HTMLElement;
+  private tunnelEl!: HTMLElement;
+  private toastEl!: HTMLElement;
+  private toastTimer: ReturnType<typeof setTimeout> | null = null;
   private tsEl!: HTMLElement;
   private fpsEl!: HTMLElement;
   private wagonEl!: HTMLElement;
@@ -79,13 +84,15 @@ export class HUD {
     const meta = document.createElement("div");
     meta.className = "hud-meta";
     this.presetEl = div("hud-line", "");
+    this.tunnelEl = div("hud-line hud-wagon", "");
+    this.tunnelEl.style.display = "none";
     this.rainEl = div("hud-line", "");
     this.windEl = div("hud-line", "");
     this.tempEl = div("hud-line", "");
     this.tsEl = div("hud-line hud-dim", "");
     this.wagonEl = div("hud-line hud-wagon", "");
     this.fpsEl = div("hud-fps", "");
-    meta.append(this.presetEl, this.rainEl, this.windEl, this.tempEl, this.tsEl, this.wagonEl);
+    meta.append(this.presetEl, this.rainEl, this.windEl, this.tempEl, this.tsEl, this.wagonEl, this.tunnelEl);
     panel.append(this.weatherWordEl, this.timeEl, meta, this.fpsEl);
     this.root.appendChild(panel);
 
@@ -121,7 +128,9 @@ export class HUD {
         <span>SPACE</span><span>jump</span>
         <span>MOUSE</span><span>look (click to capture)</span>
         <span>SCROLL</span><span>camera zoom</span>
-        <span>F</span><span>dig (hold) — spade</span>
+        <span>F</span><span>dig (hold) — spade / drive the face</span>
+        <span>B</span><span>cut an adit into a hillside</span>
+        <span>R</span><span>raise a timber set in the adit</span>
         <span>E</span><span>inspect soil</span>
         <span>1 – 5</span><span>weather front over this ground</span>
         <span>Shift + 1 – 5</span><span>fresh scenario world</span>
@@ -205,6 +214,21 @@ export class HUD {
     this.inspectorEl.style.display = "block";
   }
 
+  /** transient centre-screen notice (adit feedback, refusal reasons) */
+  toast(msg: string) {
+    if (!this.toastEl) {
+      this.toastEl = document.createElement("div");
+      this.toastEl.className = "hud-toast";
+      this.root.appendChild(this.toastEl);
+    }
+    this.toastEl.textContent = msg;
+    this.toastEl.classList.add("show");
+    if (this.toastTimer) clearTimeout(this.toastTimer);
+    this.toastTimer = setTimeout(() => {
+      this.toastEl?.classList.remove("show");
+    }, 2600);
+  }
+
   update(dt: number, s: HUDState) {
     // ---- weather panel text (throttled to ~4 Hz) -------------------------
     this.overlayTimer += dt;
@@ -228,6 +252,13 @@ export class HUD {
       this.wagonEl.textContent = `WAGON — ${s.wagonVerdict}${s.wagonRutCm > 1 ? ` · ${Math.round(s.wagonRutCm)} CM RUT` : ""}`;
       this.wagonEl.dataset.v = s.wagonVerdict.startsWith("BOGGED") ? "bog" :
         s.wagonVerdict.startsWith("MARGINAL") ? "mar" : "ok";
+      if (s.tunnelLine) {
+        this.tunnelEl.style.display = "";
+        this.tunnelEl.textContent = s.tunnelLine;
+        this.tunnelEl.dataset.v = "ok";
+      } else {
+        this.tunnelEl.style.display = "none";
+      }
     }
 
     // ---- minimap (every frame: cheap) ------------------------------------

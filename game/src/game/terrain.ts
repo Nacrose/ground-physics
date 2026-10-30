@@ -64,6 +64,10 @@ export function buildTerrain(seed = 7): TerrainData {
       z -= 5.5 * gauss(x, y, S * 0.5, S * 0.30, 110, 200); // northern valley axis
       z += 7.0 * gauss(x, y, S * 0.33, S * 0.45, 90, 80); // western hill
       z += 5.0 * gauss(x, y, S * 0.72, S * 0.42, 100, 85); // eastern hill
+      // the clay bank — a steep little knoll north of the road bend (45 m off
+      // the corridor, clear of the wagon story): the one piece of ground steep
+      // enough to drive an adit into (~17° flanks vs the ≤10° regional slopes)
+      z += 4.5 * gauss(x, y, S * 0.3125, S * 0.4297, 11, 9);
       // fractal detail (3 octaves)
       z += 1.6 * n1(x / 96, y / 96) + 0.8 * n2(x / 48, y / 48) + 0.4 * n3(x / 24, y / 24);
       height[j * (GRID + 1) + i] = z;

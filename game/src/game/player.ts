@@ -9,6 +9,7 @@ import { TerrainData, sampleHeight, terrainNormal } from "./terrain";
 import { Ground } from "./ground";
 import { StormFX, StepKind } from "./fx";
 import { MicroTerrain, SoilTouch } from "./contact";
+import type { Tunnel } from "./tunnel";
 
 export interface InputState {
   forward: number; // -1..1
@@ -50,8 +51,12 @@ export class Player {
   camera: THREE.PerspectiveCamera;
   private camPitch = 0.18;
   private camZoom = 6.2;
+  /** miner's lantern — the only light underground */
+  private lantern: THREE.PointLight | null = null;
   /** spade swing animation phase 0..1, or null when idle */
   digPhase: number | null = null;
+  /** tunnel the player can enter (wired by the engine after creation) */
+  tunnel: Tunnel | null = null;
 
   constructor(scene: THREE.Scene, private terrain: TerrainData, private ground: Ground,
     private fx: StormFX, private micro: MicroTerrain, spawnX: number, spawnZ: number,
@@ -97,6 +102,11 @@ export class Player {
     this.armR.position.set(-0.29, 1.38, 0);
 
     this.group.add(this.torso, head, hatTop, hatBrim, scarf, this.legL, this.legR, this.armL, this.armR);
+    // lantern on the chest — warm, short-range, off in daylight
+    this.lantern = new THREE.PointLight(0xffb066, 0, 9, 1.8);
+    this.lantern.position.set(0, 1.35, 0.25);
+    this.lantern.visible = false;
+    this.group.add(this.lantern);
     scene.add(this.group);
 
     // ---- footprints (instanced dark ellipses) ------------------------------
@@ -125,9 +135,16 @@ export class Player {
   addPitch(d: number) { this.camPitch = Math.max(-0.5, Math.min(0.9, this.camPitch + d)); }
   addZoom(d: number) { this.camZoom = Math.max(2.8, Math.min(14, this.camZoom + d)); }
 
-  /** ground height incl. micro deformations (prints, craters, spoil) */
+  /** ground height incl. micro deformations (prints, craters, spoil) and the tunnel invert */
   groundHeightAt(x: number, z: number): number {
-    return sampleHeight(this.terrain, x + 384, z + 384) + this.micro.sampleDelta(x, z);
+    const th = sampleHeight(this.terrain, x + 384, z + 384);
+    if (this.tunnel) {
+      // the height gate keeps surface walkers above a drive on the terrain
+      // floor; inside the tube (or the portal cut) the tunnel owns the floor
+      const f = this.tunnel.floorAt(x, z, th, this.pos.y);
+      if (f != null) return f;
+    }
+    return th + this.micro.sampleDelta(x, z);
   }
 
   /** footfall classification from the live soil state */
@@ -223,6 +240,13 @@ export class Player {
     this.pos.x = Math.max(-LIM, Math.min(LIM, this.pos.x));
     this.pos.z = Math.max(-LIM, Math.min(LIM, this.pos.z));
 
+    // tunnel walls + face: clamp into the tube cross-section
+    if (this.tunnel && this.tunnel.insideTube(this.pos.x, this.pos.z)
+        && this.pos.y < this.tunnel.crownY() + 0.4) {
+      const c = this.tunnel.clampToTube(this.pos.x, this.pos.z);
+      this.pos.x = c.x; this.pos.z = c.z;
+    }
+
     // ----- walk cycle & footprints --------------------------------------------
     const spd = this.speed;
     this.walkPhase += dt * (2.2 + spd * 1.35);
@@ -281,14 +305,30 @@ export class Player {
 
     // ----- camera: over-the-shoulder follow -----------------------------------
     const camTargetY = this.pos.y + 1.5;
-    const dist = this.camZoom;
-    const pitch = this.camPitch;
+    // a 1.85 m bore can't host a 6 m crane shot — pull in tight underground
+    const inTunnel = !!this.tunnel && this.tunnel.insideTube(this.pos.x, this.pos.z)
+      && this.pos.y < this.tunnel.crownY() + 0.4;
+    const dist = inTunnel ? Math.min(this.camZoom, 1.9) : this.camZoom;
+    const pitch = inTunnel ? Math.max(this.camPitch, -0.08) : this.camPitch;
     const cx = this.pos.x - Math.sin(this.yaw === undefined ? 0 : input.yaw) * Math.cos(pitch) * dist * 0.96;
     const cz = this.pos.z - Math.cos(input.yaw) * Math.cos(pitch) * dist * 0.96;
-    const cyPos = camTargetY + Math.sin(pitch) * dist;
-    // camera stays above terrain (micro deformations included)
-    const camGround = this.groundHeightAt(cx, cz) + 0.55;
-    this.camera.position.set(cx, Math.max(cyPos, camGround), cz);
+    let cyPos = camTargetY + Math.sin(pitch) * dist;
+    if (inTunnel) {
+      // keep the rig inside the bore: walls, roof, mouth — a yaw swing must
+      // never push the camera under virgin ground (the void behind the hill)
+      const c = this.tunnel!.clampPointToTube(cx, cyPos, cz);
+      this.camera.position.set(c.x, c.y, c.z);
+    } else {
+      // camera stays above terrain (micro deformations included)
+      const camGround = this.groundHeightAt(cx, cz) + 0.55;
+      this.camera.position.set(cx, Math.max(cyPos, camGround), cz);
+    }
+    // miner's lantern: fades in underground, out in daylight
+    if (this.lantern) {
+      const target = inTunnel ? 9 : 0;
+      this.lantern.intensity += (target - this.lantern.intensity) * Math.min(dt * 3, 1);
+      this.lantern.visible = this.lantern.intensity > 0.05;
+    }
     const look = new THREE.Vector3(this.pos.x, this.pos.y + 1.35, this.pos.z);
     const side = new THREE.Vector3(Math.cos(input.yaw), 0, -Math.sin(input.yaw)).multiplyScalar(0.5);
     look.add(side);
