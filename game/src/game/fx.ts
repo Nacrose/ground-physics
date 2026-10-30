@@ -327,9 +327,12 @@ export class StormFX {
           float glint = pow(max(dot(reflect(-v, n), normalize(uSunDir)), 0.0), 90.0);
           vec3 col = mix(uWet, uSky * (0.60 + 0.90 * fres), dN);
           col += uSun * glint * 1.6;
-          // alpha grows with optical depth; the vertex-interpolated depth
-          // feathers the waterline, vWin hands off to the contact film sheet
-          float alpha = (0.34 + 0.50 * dN) * smoothstep(0.0006, 0.005, vDepth) * vWin;
+          // depth-gated veil MATCHING the contact film sheet's ramp: thin
+          // films are wet ground (the terrain shading owns that), real
+          // accumulation gets the veil — so water looks the same on either
+          // side of the contact-window edge (no wet square following you)
+          float veil = smoothstep(0.0008, 0.009, vDepth);
+          float alpha = veil * (0.30 + 0.58 * dN) * vWin;
           if (alpha < 0.004) discard;
           float fogF = 1.0 - exp(-uFogDensity * uFogDensity * dot(uCamPos - vWorld, uCamPos - vWorld));
           col = mix(col, uFogColor, clamp(fogF, 0.0, 1.0));
@@ -370,19 +373,23 @@ export class StormFX {
       return c > 0 ? s / c : 0;
     };
     // ground height (terrain + fine dynamic lift + micro relief) at a corner —
-    // the same stack the contact overlay renders, so film and ground agree
+    // the same stack the contact overlay renders, so film and ground agree.
+    // Outside the micro window the relief comes from the far-field edit
+    // cache, so pond sheets drape into ditches you dug far away too.
     const micro = this.micro;
     const cornerGround = (i: number, j: number): number => {
       const x = i * cell - HALF, z = j * cell - HALF;
+      const microD = micro ? micro.sampleDelta(x, z) : 0;
+      const worldD = micro && microD === 0 ? micro.sampleWorldDelta(x, z) : 0;
       return sampleHeight(this.terrain, i * cell, j * cell)
         + this.ground.dynLiftAt(x, z)
-        + (micro ? micro.sampleDelta(x, z) : 0);
+        + microD + worldD;
     };
     for (let j = 0; j < GRID; j++) {
       for (let i = 0; i < GRID; i++) {
         const k = j * GRID + i;
         const depth = hPond[k] + ruts[k] * 0.35;
-        if (depth < 0.0012) continue; // ~1.2 mm minimum film
+        if (depth < 0.0009) continue; // ~0.9 mm minimum film (matches the contact sheet)
         const x0 = i * cell - HALF, x1 = x0 + cell;
         const z0 = j * cell - HALF, z1 = z0 + cell;
         const d00 = cornerDepth(i, j), d10 = cornerDepth(i + 1, j);
@@ -747,6 +754,14 @@ export class StormFX {
     pm.uniforms.uFogColor.value.copy(fogColor);
     pm.uniforms.uFogDensity.value = fogDensity;
     pm.uniforms.uCamPos.value.copy(camPos);
+
+    // the mud sheen rides the SAME sky/sun environment, on the contact
+    // overlay too — every frame, film or no film (mud still glows after
+    // the water dries into it)
+    if (this.micro) {
+      this.micro.setSkySheen(
+        pm.uniforms.uSky.value as THREE.Color, sunDir, pm.uniforms.uSun.value as THREE.Color);
+    }
 
     // the contact-tier film sheet rides the same sky/sun/fog environment
     if (this.micro) {

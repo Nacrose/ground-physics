@@ -1,0 +1,111 @@
+/**
+ * Shared GLSL fragments — the ONE place the ground-surface look is defined.
+ *
+ * Both the static terrain mesh (world.ts) and the contact-tier overlay
+ * (contact.ts) inject these so a hole, a churned trail or a field of mud
+ * shades EXACTLY the same on either surface: no visible seam where the
+ * deformable window hands back to the world mesh.
+ *
+ * Nothing here knows about physics — wet/mud/churn values arrive as plain
+ * 0..1 floats from the ground DataTexture; this is pure surface look.
+ */
+
+/** cheap deterministic value noise + 2-octave fbm on world-metre coords */
+export const NOISE_GLSL = /* glsl */ `
+float shHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float shNoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(shHash(i), shHash(i + vec2(1.0, 0.0)), u.x),
+             mix(shHash(i + vec2(0.0, 1.0)), shHash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+float shFbm(vec2 p) { return 0.55 * shNoise(p) + 0.30 * shNoise(p * 2.7) + 0.15 * shNoise(p * 6.3); }
+`;
+/**
+ * The mud / wet-soil surface. CALLER CONTRACT (all must be in scope):
+ *   vec2  vGroundUv  — 0..1 across the world
+ *   float uWorldSizeM — world extent in metres (uniform or constant)
+ * and afterwards USES: none (works on col/rough in place).
+ *
+ * Look, layer by layer:
+ *   wet   — soil darkens ~2 stops, hue kept (wet earth, not paint)
+ *   mud   — PATCHY coverage (1.8 m noise fields break the 4 m physics-cell
+ *           blobs into dry islands and wet hollows), dark umber body with
+ *           9 cm grain and 34 cm mottle, never a flat tint
+ *   dry   — mud that outlives its wetness grows a cracked crust (14 cm
+ *           contour net, gated by a 80 cm mask so it comes in sheets)
+ * rough — wet sheen 0.22 → patchy mud gloss → dry matte 0.96
+ */
+export const MUD_SURFACE_GLSL = /* glsl */ `
+void mudSurface(inout vec3 col, inout float rough, vec2 wuv, float wet, float mud, float worldSizeM) {
+  vec2 mp = wuv * worldSizeM;
+  float nP = shNoise(mp * 0.55);            // ~1.8 m coverage patches
+  float nM = shNoise(mp * 2.9);             // ~34 cm mottle
+  float nG = shNoise(mp * 11.0);            // ~9 cm grain
+  // patchy coverage: mud never covers a cell uniformly
+  float cov = clamp(mud * (0.55 + 0.60 * nP) * (0.82 + 0.18 * nM), 0.0, 1.0);
+  // wet soil: darkens, hue kept
+  vec3 wetSoil = col * mix(1.0, 0.40, wet);
+  // mud body: umber with real contrast between mottle and grain — bright
+  // enough to read as SOIL even under a black storm sky
+  vec3 mudCol = mix(vec3(0.145, 0.105, 0.075), vec3(0.268, 0.200, 0.138), 0.30 + 0.70 * nM);
+  mudCol *= 0.76 + 0.48 * nG;
+  col = mix(col, wetSoil, clamp(wet, 0.0, 1.0));
+  col = mix(col, mudCol, cov * 0.88);
+  // drying crust: cracked skin where mud outlives the surface wetness
+  float dryM = clamp((0.55 - wet) * 2.2, 0.0, 1.0) * cov;
+  float cN = shNoise(mp * 7.0);             // ~14 cm crack net
+  float crack = smoothstep(0.05, 0.0, abs(cN - 0.5)) * smoothstep(0.30, 0.65, shNoise(mp * 1.25));
+  col *= 1.0 - crack * dryM * 0.55;
+  // roughness: wet sheen -> patchy mud gloss -> dry matte
+  float gloss = mix(0.20, 0.50, nP) * (0.82 + 0.18 * nG);
+  rough = mix(rough, 0.20, clamp(wet, 0.0, 1.0) * 0.9);
+  rough = mix(rough, gloss, cov);
+}
+`;
+
+/**
+ * Micro-relief normal perturbation for glisten: soft fbm undulation whose
+ * amplitude grows with mud (ripple creep) and wetness (rain-pocked sheen).
+ * CALLER CONTRACT: objectNormal in scope, vGroundUv + uWorldSizeM as above,
+ * wet + mud floats in scope. Appends to objectNormal — call AFTER the
+ * base+delta gradient is already folded in.
+ */
+export const MUD_NORMAL_GLSL = /* glsl */ `
+void mudNormal(inout vec3 nrm, vec2 wuv, float wet, float mud, float worldSizeM) {
+  float amp = 0.030 * mud + 0.018 * wet;
+  if (amp < 1e-4) return;
+  vec2 mp = wuv * worldSizeM;
+  float e = 0.05;
+  float c0 = shFbm(mp * 6.0);
+  float cx = shFbm((mp + vec2(e, 0.0)) * 6.0);
+  float cz = shFbm((mp + vec2(0.0, e)) * 6.0);
+  nrm = normalize(nrm + vec3(-(cx - c0) / e * amp, 0.0, -(cz - c0) / e * amp));
+}
+`;
+
+/**
+ * The wet/mud SHEEN — the piece MeshStandardMaterial can't give without an
+ * environment map: a fresnel reflection of the sky hemisphere (reads even
+ * under a black storm sky, grows at grazing angles like real wet ground)
+ * plus a tight sun glint off the perturbed normal (sparkles when the sun
+ * is out). CALLER CONTRACT: call AFTER mudNormal so the glint rides the
+ * micro-relief; needs vWpos (world position varying), cameraPosition
+ * (three.js built-in), sky/sun colours + sun direction as uniforms.
+ */
+export const MUD_SHEEN_GLSL = /* glsl */ `
+void mudSheen(inout vec3 col, vec3 nrm, vec3 wpos, float wet, float mud,
+              vec3 skyCol, vec3 sunDir, vec3 sunCol) {
+  float sheen = clamp(wet * 0.75 + mud * 0.55, 0.0, 1.0);
+  if (sheen < 0.01) return;
+  vec3 vDir = normalize(wpos - cameraPosition);
+  float ndv = max(dot(nrm, -vDir), 0.0);
+  // sky sheen: soft fresnel — subtle looking straight down, strong at
+  // grazing, exactly how wet earth catches the sky
+  float fres = pow(1.0 - ndv, 2.2);
+  col += skyCol * fres * sheen * 1.15;
+  // sun glint: tight lobe, perturbed normal gives it sparkle
+  float glint = pow(max(dot(reflect(vDir, nrm), normalize(sunDir)), 0.0), 60.0);
+  col += sunCol * glint * sheen * 0.9;
+}
+`;

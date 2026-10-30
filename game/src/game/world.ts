@@ -7,7 +7,8 @@
 import * as THREE from "three";
 import { GRID, MESH_SEG, WORLD_SIZE, TerrainData, sampleHeight, terrainNormal } from "./terrain";
 import { Ground } from "./ground";
-import { MicroTerrain, MICRO_SIZE, MICRO_HALF, DELTA_ENCODE } from "./contact";
+import { MicroTerrain, MICRO_SIZE, MICRO_HALF, DELTA_ENCODE, WTEXEL } from "./contact";
+import { NOISE_GLSL, MUD_SURFACE_GLSL, MUD_NORMAL_GLSL, MUD_SHEEN_GLSL } from "./shaderlib";
 
 const HALF = WORLD_SIZE / 2;
 const GRASS_BUCKET = 4; // m — spatial hash cell for trample queries
@@ -21,6 +22,10 @@ export interface WorldUniforms {
   sunColor: { value: THREE.Color };
   sunIntensity: { value: number };
   cloudiness: { value: number };
+  /** sky-hemisphere colour the wet/mud sheen reflects (shaderlib MUD_SHEEN) */
+  skySheen: { value: THREE.Color };
+  /** sun colour for the mud glint (dimmed floor — a glint survives haze) */
+  sheenSun: { value: THREE.Color };
 }
 
 export class World {
@@ -70,6 +75,8 @@ export class World {
       sunColor: { value: new THREE.Color(0xffd9a8) },
       sunIntensity: { value: 1.0 },
       cloudiness: { value: 0.1 },
+      skySheen: { value: new THREE.Color(0x8fa3b5) },
+      sheenSun: { value: new THREE.Color(0xffd9a8) },
     };
 
     // ---- ground data texture (R wetness, G pond, B mud, A road) ----------
@@ -123,58 +130,118 @@ export class World {
     nrm.needsUpdate = true;
 
     const mat = new THREE.MeshStandardMaterial({
-      vertexColors: true, roughness: 0.96, metalness: 0.0,
+      vertexColors: true, roughness: 0.96, metalness: 0.0, dithering: true,
     });
+    // neutral stand-in when no contact tier is wired (tests): flat, no edits
+    const neutralEdit = new THREE.DataTexture(new Uint8Array([128, 0, 0, 0]), 1, 1, THREE.RGBAFormat);
     const u = this.uniforms;
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uGroundTex = { value: this.groundTex };
       shader.uniforms.uWorldSize = { value: WORLD_SIZE };
+      // the far-field edit cache: every hole, pile and trail you ever made,
+      // visible from anywhere in the world (same field the overlay's rim
+      // blends into — one continuous surface across the window edge)
+      shader.uniforms.uWorldEditTex = { value: this.micro ? this.micro.worldTex : neutralEdit };
       shader.uniforms.uDigBox = { value: new THREE.Vector4(0, 0, 0, 0) }; // xy centre, z half, w sink
       // tunnel portal cut: vec4(x, z, halfAlong, halfAcross), separate push
       shader.uniforms.uPortal = { value: new THREE.Vector4(0, 0, 0, 0) };
       shader.uniforms.uPortalDir = { value: new THREE.Vector2(0, 1) };
       shader.uniforms.uPortalPush = { value: 0 };
+      // sheen environment (shared instances — always current)
+      shader.uniforms.uSkySheen = u.skySheen;
+      shader.uniforms.uSunDirSheen = u.sunDir;
+      shader.uniforms.uSunColSheen = u.sheenSun;
       this.terrainShader = shader;
       shader.vertexShader = shader.vertexShader
         .replace("#include <common>", `#include <common>
 varying vec2 vGroundUv;
+varying vec3 vWpos;
 uniform vec4 uDigBox;
 uniform vec4 uPortal;
 uniform vec2 uPortalDir;
-uniform float uPortalPush;`)
+uniform float uPortalPush;
+uniform sampler2D uWorldEditTex;
+// quadratic decode of the far-field edit cache — identical to the contact
+// overlay's worldD(), so both meshes read the exact same height field
+float worldD(in vec2 wuv){
+  float b = texture2D(uWorldEditTex, clamp(wuv, 0.0, 1.0)).r;
+  return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
+}`)
+        .replace("#include <beginnormal_vertex>", `#include <beginnormal_vertex>
+          vGroundUv = vec2(position.x / ${WORLD_SIZE.toFixed(1)} + 0.5, position.z / ${WORLD_SIZE.toFixed(1)} + 0.5);
+          // ditch / pile shading: fold the edit-field gradient into the baked
+          // analytic normals, so far-away edits SHADE like the real thing
+          float wte = ${(WTEXEL / WORLD_SIZE).toFixed(8)};
+          float wdX = (worldD(vGroundUv + vec2(wte, 0.0)) - worldD(vGroundUv - vec2(wte, 0.0))) / ${(2 * WTEXEL).toFixed(3)};
+          float wdZ = (worldD(vGroundUv + vec2(0.0, wte)) - worldD(vGroundUv - vec2(0.0, wte))) / ${(2 * WTEXEL).toFixed(3)};
+          objectNormal = normalize(normal + vec3(-wdX, 0.0, -wdZ));`)
         .replace("#include <begin_vertex>",
           `#include <begin_vertex>
-           vGroundUv = vec2(position.x / ${WORLD_SIZE.toFixed(1)} + 0.5, position.z / ${WORLD_SIZE.toFixed(1)} + 0.5);
-           // the micro window owns geometry here: push the static mesh 2.5 m down
-           vec2 dwb = abs(position.xz - uDigBox.xy);
-           float inDig = 1.0 - smoothstep(uDigBox.z - 0.6, uDigBox.z, max(dwb.x, dwb.y));
-           transformed.y -= uDigBox.w * inDig;
+           // world-visible edits: the blurred micro field displaces the whole
+           // world mesh — dig a ditch, walk 100 m away, look back: it's there
+           float wdel = worldD(vGroundUv);
+           transformed.y += wdel;
            // tunnel portal cut — rotated anisotropic box (along × across), 0.6 m edge
            vec2 prel = position.xz - uPortal.xy;
            vec2 prot = vec2(prel.x * uPortalDir.x + prel.y * uPortalDir.y,
                             -prel.x * uPortalDir.y + prel.y * uPortalDir.x);
            vec2 dpo = vec2(abs(prot.x) - uPortal.z, abs(prot.y) - uPortal.w);
            float inPortal = 1.0 - smoothstep(0.0, 0.6, max(dpo.x, dpo.y));
-           transformed.y -= uPortalPush * inPortal;`);
+           transformed.y -= uPortalPush * inPortal;
+           vWpos = vec3(position.x, transformed.y, position.z);`);
       shader.fragmentShader = shader.fragmentShader
         .replace("#include <common>", `#include <common>
           uniform sampler2D uGroundTex;
+          uniform sampler2D uWorldEditTex;
+          uniform vec4 uDigBox;
+          uniform vec3 uSkySheen;
+          uniform vec3 uSunDirSheen;
+          uniform vec3 uSunColSheen;
           varying vec2 vGroundUv;
-          vec3 lerp3(vec3 a, vec3 b, float t){ return a + (b-a)*t; }`)
+          varying vec3 vWpos;
+          vec3 lerp3(vec3 a, vec3 b, float t){ return a + (b-a)*t; }
+          ${NOISE_GLSL}
+          ${MUD_SURFACE_GLSL}
+          ${MUD_NORMAL_GLSL}
+          ${MUD_SHEEN_GLSL}`)
         .replace("#include <color_fragment>", `#include <color_fragment>
+          // the contact window OWNS this ground: the overlay mesh renders the
+          // real surface here, so the static mesh simply steps aside (a 0.1 m
+          // overlap ring keeps the handoff gapless — both surfaces show the
+          // same world field there, the overlay wins by 8 mm + polygon
+          // offset). No push-down sink exists anywhere — the sink's
+          // resurfacing ring on the coarse 1.5 m vertex lattice was the
+          // "square moat" that used to follow the player
+          vec2 dwb2 = (vGroundUv - 0.5) * ${WORLD_SIZE.toFixed(1)} - uDigBox.xy;
+          if (max(abs(dwb2.x), abs(dwb2.y)) < uDigBox.z - 0.1) discard;
           vec4 gcell = texture2D(uGroundTex, vGroundUv);
           float wet = gcell.r; float pond = gcell.g; float mud = gcell.b; float road = gcell.a;
-          // rain darkening (freshly wetted ground goes 2-3 stops darker)
-          diffuseColor.rgb *= mix(1.0, 0.46, wet);
-          // mud: blend to dark saturated clay
-          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.11, 0.085, 0.06), mud * 0.65);
+          // wet + mud: the shared surface look (identical to the overlay)
+          float surfRough = 0.96;
+          mudSurface(diffuseColor.rgb, surfRough, vGroundUv, wet, mud, ${WORLD_SIZE.toFixed(1)});
           // dirt road: dusty brown track
           diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.42, 0.335, 0.24) * mix(1.0, 0.5, wet), road * 0.75);
           // water-tinted where ponded
-          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.19, 0.22, 0.20), clamp(pond * 1.4, 0.0, 0.55));`)
+          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.19, 0.22, 0.20), clamp(pond * 1.4, 0.0, 0.55));
+          // the far-field edit channels: churned trails + spoil heaps keep
+          // their disturbed-earth tint outside the contact window (the SAME
+          // tints the overlay uses — the trail doesn't change colour at the rim)
+          vec4 we = texture2D(uWorldEditTex, vGroundUv);
+          vec3 churnCol = mix(diffuseColor.rgb * 1.14 + 0.014, diffuseColor.rgb * 0.66, wet);
+          diffuseColor.rgb = lerp3(diffuseColor.rgb, churnCol, we.g * 0.6);
+          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.32, 0.25, 0.18) * mix(1.0, 0.55, wet), we.b * 0.55);
+          surfRough = mix(surfRough, 0.97, we.g * (1.0 - wet) * 0.7);
+          surfRough = mix(surfRough, 0.98, we.b * 0.8);`)
         .replace("#include <roughnessmap_fragment>", `#include <roughnessmap_fragment>
-          roughnessFactor = mix(roughnessFactor, 0.20, wet * 0.85);
-          roughnessFactor = mix(roughnessFactor, 0.32, mud);`);
+          roughnessFactor = surfRough;`)
+        .replace("#include <normal_fragment_begin>", `#include <normal_fragment_begin>
+          // micro-relief glisten: mud creep + rain-pocked sheen (same
+          // function, same inputs as the contact overlay)
+          mudNormal(normal, vGroundUv, gcell.r, gcell.b, ${WORLD_SIZE.toFixed(1)});
+          // wet-earth sheen: sky fresnel + sun glint on the perturbed normal
+          // (emissive — a reflection is there even in shadow)
+          mudSheen(totalEmissiveRadiance, normal, vWpos, gcell.r, gcell.b,
+                   uSkySheen, uSunDirSheen, uSunColSheen);`);
     };
     const mesh = new THREE.Mesh(geo, mat);
     mesh.receiveShadow = true;
@@ -335,6 +402,7 @@ uniform float uPortalPush;`)
         uGroundTex: { value: this.groundTex },
         uWorldSize: { value: WORLD_SIZE },
         uMicroTex: { value: this.micro ? this.micro.tex : new THREE.DataTexture(new Uint8Array([128, 128, 128, 128]), 1, 1, THREE.RGBAFormat) },
+        uWorldEditTex: { value: this.micro ? this.micro.worldTex : new THREE.DataTexture(new Uint8Array([128, 0, 0, 255]), 1, 1, THREE.RGBAFormat) },
         uMicroOrigin: { value: new THREE.Vector2(0, 0) },
         uFogColor: { value: new THREE.Color(0xe6d2ac) },
         uFogDensity: { value: 0.0026 },
@@ -345,12 +413,13 @@ uniform float uPortalPush;`)
         uniform float uTime, uWind, uWorldSize, uFadeR;
         uniform vec2 uWindDir, uMicroOrigin;
         uniform vec3 uCamPos;
-        uniform sampler2D uGroundTex, uMicroTex;
+        uniform sampler2D uGroundTex, uMicroTex, uWorldEditTex;
         varying vec2 vUv;
         varying float vRand;
         varying float vWet;
         varying float vWind;
         varying float vViewDist;
+        varying float vTrample;
         void main(){
           vUv = uv; vRand = aRand;
           vec4 ipos = instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
@@ -361,6 +430,18 @@ uniform float uPortalPush;`)
           vec2 muv = (ipos.xz - uMicroOrigin + vec2(${MICRO_HALF.toFixed(1)})) / ${MICRO_SIZE.toFixed(1)};
           float mb = texture2D(uMicroTex, clamp(muv, 0.0, 1.0)).r;
           float mdlt = sign(mb - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(mb - 0.5) * 2.0, 2.0);
+          // ...and with the far-field cache everywhere else — blades ride in
+          // ditches you dug on the other side of the world too
+          float wb = texture2D(uWorldEditTex, guv).r;
+          float wdlt = sign(wb - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(wb - 0.5) * 2.0, 2.0);
+          vec2 lpos = ipos.xz - uMicroOrigin;
+          float inWin = 1.0 - smoothstep(6.4, 7.2, max(abs(lpos.x), abs(lpos.y)));
+          float sinkD = min(mdlt * inWin, wdlt);
+          // trampled trails: churned ground reads THROUGH the grass — blades
+          // on churned texels shrink and desaturate toward trampled straw
+          // (the far-field twin of crushGrass — footpaths stay visible from
+          // across the valley)
+          vTrample = clamp(texture2D(uWorldEditTex, guv).g * 1.7, 0.0, 1.0);
           // wind sway grows with height above blade base
           float ph = uTime * (1.1 + aRand * 0.7) + ipos.x * 0.13 + ipos.z * 0.11;
           float sway = (sin(ph) + 0.5 * sin(ph * 2.3 + aRand * 6.0)) * 0.5;
@@ -368,10 +449,11 @@ uniform float uPortalPush;`)
           vec4 wp = instanceMatrix * vec4(position, 1.0);
           float bend = pow(uv.y, 1.6) * (0.06 + 0.30 * uWind) * sway;
           wp.x += uWindDir.x * bend; wp.z += uWindDir.y * bend;
-          // rain flattens grass
-          float flatF = 1.0 - vWet * 0.30;
+          // rain flattens grass; trample shrinks it further
+          float flatF = 1.0 - vWet * 0.30 - vTrample * 0.35;
+          flatF = max(flatF, 0.3);
           wp.y = ipos.y + (wp.y - ipos.y) * flatF;
-          wp.y += min(mdlt + 0.03, 0.0);
+          wp.y += min(sinkD + 0.03, 0.0);
           // distance fade: collapse beyond radius
           float d = distance(wp.xyz, uCamPos);
           float fade = 1.0 - smoothstep(uFadeR * 0.72, uFadeR, d);
@@ -383,13 +465,16 @@ uniform float uPortalPush;`)
         uniform vec3 uSunDir, uSunColor, uFogColor;
         uniform float uSunI, uFogDensity;
         varying vec2 vUv;
-        varying float vRand, vWet, vWind, vViewDist;
+        varying float vRand, vWet, vWind, vViewDist, vTrample;
         void main(){
           // golden dry grass with per-blade variation; greener when wet
           vec3 dry = vec3(0.82, 0.64, 0.30);
           vec3 lush = vec3(0.42, 0.48, 0.24);
           vec3 col = mix(dry, lush, vRand * 0.35 + vWet * 0.40);
           col *= 0.8 + 0.45 * vUv.y; // dark base → lit tip
+          // trampled: dusty trodden straw — the path reads THROUGH the grass
+          vec3 straw = vec3(0.58, 0.47, 0.30);
+          col = mix(col, straw, vTrample * 0.75);
           // lighting: wrap-around lambert + sky ambient
           float ndl = max(dot(normalize(vec3(0.0, 1.0, 0.0)), normalize(uSunDir)), 0.0);
           float wrap = pow(ndl, 0.7);
@@ -492,7 +577,7 @@ uniform float uPortalPush;`)
     if (!micro) return;
     const box = micro.digBox();
     if (this.terrainShader) {
-      (this.terrainShader.uniforms.uDigBox.value as THREE.Vector4).set(box.cx, box.cz, box.half, 2.5);
+      (this.terrainShader.uniforms.uDigBox.value as THREE.Vector4).set(box.cx, box.cz, box.half, 0);
     }
     const gm = this.grass.material as THREE.ShaderMaterial;
     (gm.uniforms.uMicroOrigin.value as THREE.Vector2).set(micro.ox, micro.oz);
@@ -628,6 +713,9 @@ uniform float uPortalPush;`)
     u.sunDir.value.set(Math.cos(az) * Math.cos(el), Math.sin(el), Math.sin(az) * Math.cos(el)).normalize();
     const dim = 1 - 0.93 * cloudiness;
     u.sunIntensity.value = dim;
+    u.skySheen.value.setRGB(
+      0.62 - 0.42 * cloudiness, 0.72 - 0.38 * cloudiness, 0.82 - 0.33 * cloudiness);
+    u.sheenSun.value.setRGB(1.0, 0.85 + 0.1 * dim, 0.66 + 0.2 * dim).multiplyScalar(Math.max(dim, 0.15));
     this.sun.intensity = 2.4 * dim * dim + 0.08 + flash * 5.0;
     this.sun.color.setRGB(1.0, 0.85 + 0.1 * (1 - cloudiness), 0.66 + 0.2 * (1 - cloudiness));
     this.hemi.intensity = 0.55 * (1 - 0.4 * cloudiness) + 0.12;

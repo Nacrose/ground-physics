@@ -5,8 +5,10 @@
  * scrolls with the actor. It owns the ONLY deforming geometry in the world:
  * footprints, dig craters, spoil piles, slump scars — all as a height-delta
  * field on top of the static terrain, rendered through a RGBA8 delta texture
- * displacing a high-res overlay mesh (the base terrain is pushed 2.5 m down
- * inside the window, so holes are true holes with no z-fighting).
+ * displacing a high-res overlay mesh (the static mesh DISCARDS its fragments
+ * inside the window, so the overlay is the sole ground there — no sink, no
+ * z-fighting, and the rim blends the overlay's delta into the world-wide
+ * edit cache so the two surfaces hand off as ONE continuous field).
  *
  * Physics contract (docs/soil-state-spec.md):
  *  - RENDER-SIDE SUB-CELL SMOOTHING: the physics stays on the 6.25 cm cell
@@ -41,12 +43,28 @@ import * as THREE from "three";
 import { WORLD_SIZE, GRID, TerrainData, sampleHeight, terrainNormal, cellIndex } from "./terrain";
 import { Ground } from "./ground";
 import { SOIL_TEXTURES } from "./params";
+import { NOISE_GLSL, MUD_SURFACE_GLSL, MUD_NORMAL_GLSL, MUD_SHEEN_GLSL } from "./shaderlib";
 
 const NV = 257; // render vertices per side (cell corners)
 const NC = 256; // physics cells per side
 export const MICRO_SIZE = 16; // window extent [m]
 export const MICRO_CELL = MICRO_SIZE / NC; // 0.0625 m
 export const MICRO_HALF = MICRO_SIZE / 2;
+/** world edit texture: one texel per WTEXEL metres over the whole 768 m
+ *  world — the far-field cache of every deformed metre of ground. The
+ *  micro window is the ONLY writer; the static terrain mesh, the grass and
+ *  the overlay's own rim blend are the readers. R = delta (same quadratic
+ *  ±1.5 m encode as the micro tex), G = churn coverage, B = spoil. */
+export const WTEX = 1024;
+export const WTEXEL = WORLD_SIZE / WTEX; // 0.75 m
+const MICRO_PER_TEXEL = WTEXEL / MICRO_CELL; // 12 micro cells per texel
+/** (retired) the static mesh no longer sinks under the overlay — it
+ * discards its fragments inside the window instead (see world.ts) */
+/** rim blend: micro delta owns the middle of the window, the world (blurred)
+ *  delta owns the rim, so the overlay hands its geometry to the static mesh
+ *  with BOTH surfaces showing the SAME field at the seam (no step, no moat) */
+const RIM_IN = MICRO_HALF - 1.8; // 6.2 m — micro delta full inside this
+const RIM_OUT = MICRO_HALF - 1.1; // 6.9 m — world delta owns it from here out
 const GRID_HALF = WORLD_SIZE / 2; // world → terrain-grid frame shift
 /** delta clamp [m] — RGBA8 R channel encodes ±1.5 m (quadratic: sub-cm
  *  resolution near 0 for footprints, ~1.7 cm at full range for tunnel
@@ -120,6 +138,19 @@ export class MicroTerrain {
   tex: THREE.DataTexture;
   private texData = new Uint8Array(NC * NC * 4);
   private texDirty = true;
+  /** sheen environment for the mud look (shared instances — always current;
+   *  fx.update wires them in every frame, film or no film) */
+  private sheenSky = new THREE.Color(0x8fa3b5);
+  private sheenSun = new THREE.Color(0xffd9a8);
+  private sheenSunDir = new THREE.Vector3(0.55, 0.35, -0.75);
+  /** far-field cache of every ground edit, world-anchored (never scrolls):
+   *  the static terrain mesh + grass sample it, so a ditch you dug stays
+   *  visible from anywhere, and the overlay's rim blends into it. */
+  worldTex!: THREE.DataTexture;
+  private worldTexData = new Uint8Array(WTEX * WTEX * 4);
+  private worldTexDirty = false;
+  private worldTexTimer = 0;
+  private worldTexHasEdits = false;
   private gtRef: THREE.DataTexture | null = null;
   private shaderRef: { uniforms: { [k: string]: { value: unknown } } } | null = null;
   /** QA: set once onBeforeCompile actually ran on the overlay material */
@@ -195,6 +226,7 @@ export class MicroTerrain {
   private accCnt = new Float32Array(GRID * GRID);
 
   constructor(private scene: THREE.Scene, private terrain: TerrainData, private ground: Ground) {
+    this.buildWorldTex();
     this.buildMesh();
     this.buildWaterMesh();
     this.ox = 0;
@@ -246,34 +278,49 @@ export class MicroTerrain {
     this.tex.magFilter = THREE.LinearFilter;
     this.tex.needsUpdate = true;
 
-    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.96, metalness: 0 });
+    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.96, metalness: 0, dithering: true });
+    // the overlay wins the depth test against the resurfaced static mesh by
+    // 8 mm of lift — this negative offset is the belt-and-braces half of that
+    // (grazing-angle chords of the coarse 1.5 m mesh can bow ~9 mm above the
+    // fine surface between its vertices)
+    mat.polygonOffset = true;
+    mat.polygonOffsetFactor = -1.5;
+    mat.polygonOffsetUnits = -2.5;
     mat.onBeforeCompile = (shader) => {
       this.compiled = true;
       if (shader.vertexShader.includes("#include <begin_vertex>")) this.displacementInjected = true;
       shader.uniforms.uMicroTex = { value: this.tex };
+      shader.uniforms.uWorldTex = { value: this.worldTex };
       shader.uniforms.uGroundTex = { value: this.gtRef };
       shader.uniforms.uMicroOrigin = { value: new THREE.Vector2(this.ox, this.oz) };
-      // displacement fades OUT well inside the base-mesh resurfacing ramp
-      // (uDigBox half=8 m, ramp 7.4–8.0): delta is zero by 7.35 m so the
-      // overlay is pure terrain height exactly where the base mesh rises
-      shader.uniforms.uMicroEdge = { value: MICRO_HALF - 1.1 };
+      // rim blend band: micro delta owns the window interior, the world
+      // (blurred) delta owns the rim — BOTH surfaces show the SAME field at
+      // the seam, so the handoff to the static mesh has no step and no moat
+      // (static-mesh resurfacing ramp: full sink ≤5.0 m, risen by 7.8 m)
+      shader.uniforms.uMicroEdge = { value: RIM_IN };
       // portal cut (tunnel.ts): the same rotated smoothstep box the terrain
       // shader uses — the overlay must open where the hillside is cut, or a
       // flat sheet of fake ground would cap the adit mouth
       shader.uniforms.uPortal = { value: new THREE.Vector4(0, 0, 0, 0) };
       shader.uniforms.uPortalDir = { value: new THREE.Vector2(0, 1) };
       shader.uniforms.uPortalPush = { value: 0 };
+      // sheen environment (shared instances — fx.update writes them every frame)
+      shader.uniforms.uSkySheen = { value: this.sheenSky };
+      shader.uniforms.uSunDirSheen = { value: this.sheenSunDir };
+      shader.uniforms.uSunColSheen = { value: this.sheenSun };
       shader.vertexShader = shader.vertexShader
         .replace("#include <common>", `#include <common>
           attribute float aBaseH;
           attribute vec3 aBaseN;
           uniform sampler2D uMicroTex;
+          uniform sampler2D uWorldTex;
           uniform vec2 uMicroOrigin;
           uniform float uMicroEdge;
           uniform vec4 uPortal;
           uniform vec2 uPortalDir;
           uniform float uPortalPush;
           varying vec2 vGroundUv;
+          varying vec3 vWpos;
           varying float vChurn;
           varying float vSpoil;
           varying float vRing;
@@ -281,19 +328,39 @@ export class MicroTerrain {
           float microD(in vec2 u){
             float b = texture2D(uMicroTex, clamp(u, 0.0, 1.0)).r;
             return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
+          }
+          // the far-field edit cache — same quadratic encode, world-anchored
+          float worldD(in vec2 wuv){
+            float b = texture2D(uWorldTex, clamp(wuv, 0.0, 1.0)).r;
+            return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
+          }
+          // rim factor: 1 in the window interior, 0 past RIM_OUT
+          float rimE(in vec2 lp){
+            return 1.0 - smoothstep(uMicroEdge, uMicroEdge + ${(RIM_OUT - RIM_IN).toFixed(2)}, max(abs(lp.x), abs(lp.y)));
+          }
+          // the surface the overlay renders: fine micro detail inside,
+          // the world's blurred field at the rim — ONE continuous field
+          float surfH(in vec2 lp, in vec2 wuv){
+            return mix(worldD(wuv), microD((lp + vec2(${MICRO_HALF.toFixed(1)})) / ${MICRO_SIZE.toFixed(1)}), rimE(lp));
           }`)
         .replace("#include <beginnormal_vertex>", `#include <beginnormal_vertex>
-          vec2 mUv = (position.xz + vec2(${MICRO_HALF.toFixed(1)})) / ${MICRO_SIZE.toFixed(1)};
+          vec2 lp = position.xz;
+          vec2 mUv = (lp + vec2(${MICRO_HALF.toFixed(1)})) / ${MICRO_SIZE.toFixed(1)};
           vec4 mInfo = texture2D(uMicroTex, mUv);
-          float eStep = ${(2 * MICRO_CELL / MICRO_SIZE).toFixed(5)};
-          float dDdx = (microD(mUv + vec2(eStep, 0.0)) - microD(mUv - vec2(eStep, 0.0))) / ${(2 * MICRO_CELL).toFixed(4)};
-          float dDdz = (microD(mUv + vec2(0.0, eStep)) - microD(mUv - vec2(0.0, eStep))) / ${(2 * MICRO_CELL).toFixed(4)};
+          vGroundUv = (lp + uMicroOrigin) / ${WORLD_SIZE.toFixed(1)} + 0.5;
+          // gradient of the BLENDED surface (micro inside, world at the rim)
+          float he = ${(MICRO_CELL).toFixed(5)};
+          float wsc = ${(1 / WORLD_SIZE).toFixed(8)};
+          float hx1 = surfH(lp + vec2(he, 0.0), vGroundUv + vec2(wsc * he, 0.0));
+          float hx0 = surfH(lp - vec2(he, 0.0), vGroundUv - vec2(wsc * he, 0.0));
+          float hz1 = surfH(lp + vec2(0.0, he), vGroundUv + vec2(0.0, wsc * he));
+          float hz0 = surfH(lp - vec2(0.0, he), vGroundUv - vec2(0.0, wsc * he));
+          float dDdx = (hx1 - hx0) / ${(2 * MICRO_CELL).toFixed(4)};
+          float dDdz = (hz1 - hz0) / ${(2 * MICRO_CELL).toFixed(4)};
           objectNormal = normalize(aBaseN + vec3(-dDdx, 0.0, -dDdz));`)
         .replace("#include <begin_vertex>", `#include <begin_vertex>
           vChurn = mInfo.g; vSpoil = mInfo.b; vRing = mInfo.a;
           vec2 wpos2 = position.xz + uMicroOrigin;
-          vGroundUv = wpos2 / ${(WORLD_SIZE).toFixed(1)} + 0.5;
-          float edge = 1.0 - smoothstep(uMicroEdge, uMicroEdge + 0.45, max(abs(position.x), abs(position.z)));
           // portal cut mask (matches the terrain shader's, rotated to the
           // adit axis — uPortalDir is the unit heading, .zw the half-extents)
           vec2 prel = wpos2 - uPortal.xy;
@@ -301,20 +368,30 @@ export class MicroTerrain {
                            -prel.x * uPortalDir.y + prel.y * uPortalDir.x);
           vec2 dpo = vec2(abs(prot.x) - uPortal.z, abs(prot.y) - uPortal.w);
           float inPortal = 1.0 - smoothstep(0.0, 0.6, max(dpo.x, dpo.y));
-          transformed = vec3(position.x, aBaseH + microD(mUv) * edge + ${(OVERLAY_LIFT).toFixed(3)} - uPortalPush * inPortal, position.z);`);
+          transformed = vec3(position.x, aBaseH + surfH(position.xz, vGroundUv) + ${(OVERLAY_LIFT).toFixed(3)} - uPortalPush * inPortal, position.z);
+          vWpos = vec3(wpos2.x, transformed.y, wpos2.y);`);
       shader.fragmentShader = shader.fragmentShader
         .replace("#include <common>", `#include <common>
           uniform sampler2D uGroundTex;
+          uniform vec3 uSkySheen;
+          uniform vec3 uSunDirSheen;
+          uniform vec3 uSunColSheen;
           varying vec2 vGroundUv;
+          varying vec3 vWpos;
           varying float vChurn;
           varying float vSpoil;
           varying float vRing;
-          vec3 lerp3(vec3 a, vec3 b, float t){ return a + (b-a)*t; }`)
+          vec3 lerp3(vec3 a, vec3 b, float t){ return a + (b-a)*t; }
+          ${NOISE_GLSL}
+          ${MUD_SURFACE_GLSL}
+          ${MUD_NORMAL_GLSL}
+          ${MUD_SHEEN_GLSL}`)
         .replace("#include <color_fragment>", `#include <color_fragment>
           vec4 gcell = texture2D(uGroundTex, vGroundUv);
           float wet = gcell.r; float pond = gcell.g; float mud = gcell.b; float road = gcell.a;
-          diffuseColor.rgb *= mix(1.0, 0.46, wet);
-          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.11, 0.085, 0.06), mud * 0.65);
+          // wet + mud: the shared surface look (identical to the static mesh)
+          float surfRough = 0.96;
+          mudSurface(diffuseColor.rgb, surfRough, vGroundUv, wet, mud, ${WORLD_SIZE.toFixed(1)});
           diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.42, 0.335, 0.24) * mix(1.0, 0.5, wet), road * 0.75);
           diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.19, 0.22, 0.20), clamp(pond * 1.4, 0.0, 0.55));
           // churned ground: dry crumbs pale it, wet churn darkens — soft
@@ -325,13 +402,22 @@ export class MicroTerrain {
           // spoil: loose heap tint
           diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.32, 0.25, 0.18) * mix(1.0, 0.55, wet), vSpoil * 0.55);
           // suction wet-ring: dark glossy mark
-          diffuseColor.rgb *= mix(1.0, 0.62, vRing * 0.6);`)
+          diffuseColor.rgb *= mix(1.0, 0.62, vRing * 0.6);
+          // churn/spoil/ring also carry their gloss (kept here so the whole
+          // roughness story lives in one place)
+          surfRough = mix(surfRough, 0.97, vChurn * (1.0 - wet) * 0.7);
+          surfRough = mix(surfRough, 0.98, vSpoil * 0.8);
+          surfRough = mix(surfRough, 0.16, vRing * 0.7);`)
         .replace("#include <roughnessmap_fragment>", `#include <roughnessmap_fragment>
-          roughnessFactor = mix(roughnessFactor, 0.20, wet * 0.85);
-          roughnessFactor = mix(roughnessFactor, 0.32, mud);
-          roughnessFactor = mix(roughnessFactor, 0.97, vChurn * (1.0 - wet) * 0.7);
-          roughnessFactor = mix(roughnessFactor, 0.98, vSpoil * 0.8);
-          roughnessFactor = mix(roughnessFactor, 0.16, vRing * 0.7);`);
+          roughnessFactor = surfRough;`)
+        .replace("#include <normal_fragment_begin>", `#include <normal_fragment_begin>
+          // micro-relief glisten: mud creep + rain-pocked sheen (matches the
+          // static terrain — same function, same inputs)
+          mudNormal(normal, vGroundUv, gcell.r, gcell.b, ${WORLD_SIZE.toFixed(1)});
+          // wet-earth sheen: sky fresnel + sun glint — identical to the
+          // static mesh, so mud looks the same on either side of the rim
+          mudSheen(totalEmissiveRadiance, normal, vWpos, gcell.r, gcell.b,
+                   uSkySheen, uSunDirSheen, uSunColSheen);`);
       this.shaderRef = shader;
       if (this.pendingPortal) {
         const p = this.pendingPortal;
@@ -409,7 +495,7 @@ export class MicroTerrain {
         varying float vDepth;
         varying float vEdge;
         void main(){
-          if (vDepth < 0.0003) discard;
+          if (vDepth < 0.0006) discard;
           // Beer-Lambert-ish depth ramp: shallow film = wet-earth sheen (the
           // soil shows through), depth = full sky-reflecting water — the film
           // now grades the same way as the fine-tier puddle sheet
@@ -427,7 +513,13 @@ export class MicroTerrain {
           float glint = pow(max(dot(reflect(-v, n), normalize(uSunDir)), 0.0), 90.0);
           vec3 col = mix(uWet, uSky * (0.60 + 0.90 * fres), dN);
           col += uSun * glint * 1.5;
-          float alpha = (0.34 + 0.50 * dN) * vEdge;
+          // depth-gated veil: a sub-mm film is WET GROUND (the terrain's own
+          // wetness shading owns that look, everywhere in the world); the
+          // sheet only veils once water actually ACCUMULATES — matching the
+          // fine-tier puddle sheet's ramp so the window edge stops reading
+          // as a wet square in dry country (the "square that follows you")
+          float veil = smoothstep(0.0008, 0.009, vDepth);
+          float alpha = veil * (0.30 + 0.58 * dN) * vEdge;
           float fogF = 1.0 - exp(-uFogDensity * uFogDensity * dot(uCamPos - vWorld, uCamPos - vWorld));
           col = mix(col, uFogColor, clamp(fogF, 0.0, 1.0));
           gl_FragColor = vec4(col, alpha);
@@ -440,6 +532,110 @@ export class MicroTerrain {
     this.waterUniforms = uniforms;
     this.waterMesh = wm;
     this.scene.add(wm);
+  }
+
+  // -------------------------------------------------------- world edit cache
+  /** the far-field texture: neutral delta-0, no churn/spoil, no deficit */
+  private buildWorldTex() {
+    for (let k = 0; k < WTEX * WTEX; k++) {
+      this.worldTexData[k * 4] = 128;
+      this.worldTexData[k * 4 + 3] = 0;
+    }
+    this.worldTex = new THREE.DataTexture(this.worldTexData, WTEX, WTEX, THREE.RGBAFormat);
+    this.worldTex.minFilter = THREE.LinearFilter;
+    this.worldTex.magFilter = THREE.LinearFilter;
+    this.worldTex.needsUpdate = true;
+  }
+
+  /**
+   * Downsample the live window into the far-field cache — the ONLY writer.
+   * Each 0.75 m texel packs:
+   *   R — delta, TRENCH-DOMINANT: if the texel contains a hole, its depth
+   *       (0.75 × the deepest cell — a spade crater reads as a trench, not
+   *       as the ~0 net mean its own spoil bank cancels to); otherwise the
+   *       mean (broad piles, erosion slopes, settling)
+   *   G — churn coverage (max-dilated one texel: disturbed ground reads as
+   *       a bare-earth TRAIL, wide enough to see from across the valley)
+   *   B — spoil coverage, A — depth deficit of the deepest hole (spare)
+   * The sparse world store stays the physics source of truth; this is the
+   * render cache the static terrain, the grass and the overlay's own rim
+   * read, so every metre of ground you ever reshaped stays visible from
+   * anywhere in the world.
+   */
+  private splatWorldTex() {
+    const t = this.worldTexData;
+    const x0 = this.ox - MICRO_HALF, z0 = this.oz - MICRO_HALF;
+    const ti0 = Math.max(0, Math.floor((x0 + WORLD_SIZE / 2) / WTEXEL));
+    const ti1 = Math.min(WTEX - 1, Math.floor((x0 + MICRO_SIZE + WORLD_SIZE / 2) / WTEXEL));
+    const tj0 = Math.max(0, Math.floor((z0 + WORLD_SIZE / 2) / WTEXEL));
+    const tj1 = Math.min(WTEX - 1, Math.floor((z0 + MICRO_SIZE + WORLD_SIZE / 2) / WTEXEL));
+    for (let tj = tj0; tj <= tj1; tj++) {
+      for (let ti = ti0; ti <= ti1; ti++) {
+        // world-metre bounds of the texel
+        const wx0 = ti * WTEXEL - WORLD_SIZE / 2, wz0 = tj * WTEXEL - WORLD_SIZE / 2;
+        // micro cells whose CENTRES fall inside texel ∩ window
+        const ci0 = Math.max(0, Math.ceil((wx0 - x0) / MICRO_CELL));
+        const ci1 = Math.min(NC - 1, Math.floor((wx0 + WTEXEL - x0) / MICRO_CELL - 1e-9));
+        const cj0 = Math.max(0, Math.ceil((wz0 - z0) / MICRO_CELL));
+        const cj1 = Math.min(NC - 1, Math.floor((wz0 + WTEXEL - z0) / MICRO_CELL - 1e-9));
+        if (ci0 > ci1 || cj0 > cj1) continue;
+        let dSum = 0, dCnt = 0, churn = 0, spoil = 0, dMin = 0;
+        for (let j = cj0; j <= cj1; j++) {
+          const row = j * NC;
+          for (let i = ci0; i <= ci1; i++) {
+            const v = row + i;
+            const dl = this.delta[v];
+            dSum += dl; dCnt++;
+            if (dl < dMin) dMin = dl;
+            if (this.flags[v] & 1) churn++;
+            if (this.flags[v] & 2) spoil++;
+          }
+        }
+        const k = tj * WTEX + ti;
+        // trench-dominant delta (a hole beats the mean; the mean keeps piles)
+        const dl = dMin < -0.02 ? Math.max(dMin * 0.75, DELTA_MIN) : dSum / dCnt;
+        const m = Math.min(Math.abs(dl), DELTA_ENCODE) / DELTA_ENCODE;
+        t[k * 4] = Math.max(0, Math.min(255, Math.round(128 + (dl < 0 ? -1 : 1) * 127 * Math.sqrt(m))));
+        t[k * 4 + 1] = Math.round((255 * churn) / dCnt);
+        t[k * 4 + 2] = Math.round((255 * spoil) / dCnt);
+        t[k * 4 + 3] = Math.max(0, Math.min(255, Math.round((-dMin / DELTA_ENCODE) * 255)));
+      }
+    }
+    // dilate the churn trail one texel (max of half the neighbours): a
+    // 0.3 m spade line reads as a ~1.5 m bare-earth trail at distance
+    for (let tj = tj0; tj <= tj1; tj++) {
+      for (let ti = ti0; ti <= ti1; ti++) {
+        const k = tj * WTEX + ti;
+        let g = t[k * 4 + 1];
+        if (ti > ti0) g = Math.max(g, t[(tj * WTEX + ti - 1) * 4 + 1] * 0.5);
+        if (ti < ti1) g = Math.max(g, t[(tj * WTEX + ti + 1) * 4 + 1] * 0.5);
+        if (tj > tj0) g = Math.max(g, t[((tj - 1) * WTEX + ti) * 4 + 1] * 0.5);
+        if (tj < tj1) g = Math.max(g, t[((tj + 1) * WTEX + ti) * 4 + 1] * 0.5);
+        // read-through: dilation uses the PRE-dilation neighbours as we
+        // sweep (good enough — one pass, monotone)
+        t[k * 4 + 1] = Math.round(Math.min(255, g));
+      }
+    }
+    this.worldTex.needsUpdate = true;
+    this.worldTexHasEdits = true;
+  }
+
+  /** QA: bytes of the far-field cache that carry a non-neutral edit */
+  worldTexEditCount(): number {
+    let n = 0;
+    const t = this.worldTexData;
+    for (let k = 0; k < WTEX * WTEX; k++) {
+      if (t[k * 4] !== 128 || t[k * 4 + 1] !== 0 || t[k * 4 + 2] !== 0) n++;
+    }
+    return n;
+  }
+
+  /** per-frame sheen environment for the mud look — fx.update wires it in
+   *  EVERY frame (unlike setWaterEnv, which sleeps when the film is dry) */
+  setSkySheen(sky: THREE.Color, sunDir: THREE.Vector3, sun: THREE.Color) {
+    this.sheenSky.copy(sky);
+    this.sheenSunDir.copy(sunDir);
+    this.sheenSun.copy(sun);
   }
 
   /** per-frame visual env for the film (camera, sun, fog, rain, wind) — engine wires it */
@@ -537,6 +733,9 @@ export class MicroTerrain {
   /** scroll the window by whole cells so the actor stays centred */
   private shiftWindow(dcx: number, dcz: number) {
     if (dcx === 0 && dcz === 0) return;
+    // capture the leaving cells' final state into the far-field cache
+    // BEFORE the arrays move (their edits must outlive the window)
+    this.splatWorldTex();
     // shift cell fields: newArray[i] = old[i + dcx] (value keeps its world cell)
     const n = NC;
     const d = this.delta, f = this.flags, cb = this.cellBase;
@@ -679,8 +878,8 @@ export class MicroTerrain {
   /** QA: how many world cells carry persisted edits */
   persistedEdits() { return this.worldEdits.size; }
 
-  /** keep the actor centred; call every frame */
-  follow(px: number, pz: number) {
+  /** keep the actor centred; call every frame — returns true if the window scrolled */
+  follow(px: number, pz: number): boolean {
     const offX = px - this.ox;
     const offZ = pz - this.oz;
     const dcx = Math.round(offX / MICRO_CELL);
@@ -689,7 +888,9 @@ export class MicroTerrain {
       this.shiftWindow(
         Math.max(-96, Math.min(96, dcx)),
         Math.max(-96, Math.min(96, dcz)));
+      return true;
     }
+    return false;
   }
 
   /** centre the window on a position immediately (spawn / QA) */
@@ -715,11 +916,27 @@ export class MicroTerrain {
     return d00 * (1 - u) * (1 - v) + d10 * u * (1 - v) + d01 * (1 - u) * v + d11 * u * v;
   }
 
-  /** terrain push-down box (world centre + half-extent) for the base mesh.
-   *  Full window extent: the base mesh sinks under the OPAQUE overlay across
-   *  its whole 16 m extent and resurfaces exactly at the overlay's geometric
-   *  edge — no ring where both surfaces render at full height (that ring was
-   *  the visible "square that follows the player"). */
+  /** bilinear delta sample from the far-field cache — valid ANYWHERE in the
+   *  world (the fine-tier puddle mesh drapes over dug ditches too) */
+  sampleWorldDelta(x: number, z: number): number {
+    const t = this.worldTexData;
+    const fx = Math.max(0, Math.min(WTEX - 1.0001, (x + WORLD_SIZE / 2) / WTEXEL - 0.5));
+    const fz = Math.max(0, Math.min(WTEX - 1.0001, (z + WORLD_SIZE / 2) / WTEXEL - 0.5));
+    const i = Math.floor(fx), j = Math.floor(fz);
+    const u = fx - i, v = fz - j;
+    const dec = (ti: number, tj: number): number => {
+      const b = t[(tj * WTEX + ti) * 4] / 255;
+      return Math.sign(b - 0.5) * DELTA_ENCODE * Math.pow(Math.abs(b - 0.5) * 2, 2);
+    };
+    const d00 = dec(i, j), d10 = dec(Math.min(i + 1, WTEX - 1), j);
+    const d01 = dec(i, Math.min(j + 1, WTEX - 1)), d11 = dec(Math.min(i + 1, WTEX - 1), Math.min(j + 1, WTEX - 1));
+    return d00 * (1 - u) * (1 - v) + d10 * u * (1 - v) + d01 * (1 - u) * v + d11 * u * v;
+  }
+
+  /** terrain window box (world centre + half-extent): the static mesh
+   *  discards its fragments inside it (minus a 0.1 m overlap ring) — the
+   *  overlay owns that ground outright, so there is no push-down sink and
+   *  no resurfacing ring for the coarse mesh to mis-sample. */
   digBox(): { cx: number; cz: number; half: number } {
     return { cx: this.ox, cz: this.oz, half: MICRO_HALF };
   }
@@ -1030,7 +1247,10 @@ export class MicroTerrain {
 
   // -------------------------------------------------------------------- update
   update(dt: number, px: number, pz: number) {
-    this.follow(px, pz);
+    // content changed since the last far-field splat? (texDirty may be set
+    // by a stroke, a relaxation pass, rain erosion…)
+    const edited = this.texDirty;
+    const scrolled = this.follow(px, pz);
     this.relaxAccum += dt;
     if (this.relaxAccum >= 0.5) {
       this.relaxAccum = 0;
@@ -1041,6 +1261,14 @@ export class MicroTerrain {
       }
     }
     if (this.texDirty) this.uploadTexture();
+    // far-field cache: bounded cadence, only when the window actually
+    // changed (walking around a pristine field costs nothing)
+    this.worldTexTimer += dt;
+    if (this.worldTexTimer >= 0.15 && (edited || scrolled || this.worldTexDirty)) {
+      this.worldTexTimer = 0;
+      this.worldTexDirty = false;
+      this.splatWorldTex();
+    }
   }
 
   /** QA: force N relaxation passes (fastForward companion) */
@@ -1052,6 +1280,7 @@ export class MicroTerrain {
         this.oz - MICRO_HALF + (j + 0.5) * MICRO_CELL));
     }
     this.uploadTexture();
+    this.splatWorldTex();
   }
 
   // ------------------------------------------------------------------ water film
@@ -1715,6 +1944,16 @@ export class MicroTerrain {
     this.audit.clippedM3 = 0;
     this.audit.persistDriftM3 = 0;
     this.worldEdits.clear();
+    // fresh world = fresh far-field cache too (same texture object — the
+    // overlay shader already holds it; just neutralise the bytes)
+    for (let k = 0; k < WTEX * WTEX; k++) {
+      this.worldTexData[k * 4] = 128;
+      this.worldTexData[k * 4 + 1] = 0;
+      this.worldTexData[k * 4 + 2] = 0;
+      this.worldTexData[k * 4 + 3] = 0;
+    }
+    this.worldTex.needsUpdate = true;
+    this.worldTexHasEdits = false;
     this.hWater.fill(0);
     this.sedLoad.fill(0);
     this.waterLedger.loanNetM3 = 0;
