@@ -59,7 +59,7 @@ export interface CellReport {
   mudFactor: number;
   branchLabel: string;
   traffic: number;
-  disturbed: boolean;
+  disturbed: number; // wet-hours of loose structure (0 = intact)
 }
 
 export class Ground {
@@ -82,7 +82,9 @@ export class Ground {
   // hysteretic state (spec §2)
   branch = new Uint8Array(N); // retention branch: 0 drying (main), 1 wetting (scanning)
   traffic = new Uint8Array(N); // cumulative traffic compaction memory
-  disturbed = new Uint8Array(N); // dig/till disturbance: crust broken, layers mixed
+  /** dig/till disturbance: WET-HOURS of loose structure remaining (float —
+   *  decays in step 5.5; u8 truncation would accelerate the clock 40×) */
+  disturbed = new Float32Array(N);
   /** compaction accumulator (fine-grained footfall memory; traffic = floor) */
   private compAcc = new Float32Array(N);
   /** per-step infiltration flux [m] — branch flips on the NET water tendency
@@ -129,10 +131,21 @@ export class Ground {
     this.basinOutflowM3 = 0;
     this.loanPond.fill(0);
     this.sedKg.fill(0);
+    this.microCovered.fill(0);
+    this.eroM.fill(0);
+    this.settleM.fill(0);
+    this.consolidatedM3 = 0;
     this.sedLedger.detachedKg = 0;
     this.sedLedger.depositedKg = 0;
     this.sedLedger.exportedKg = 0;
     this.sedLedger.importedKg = 0;
+  }
+
+  /** dynamic surface lift (erosion/deposition + hydrocompaction) [m] — the
+   *  contact tier bakes this into its window so gullies and fans appear */
+  dynLiftAt(x: number, z: number): number {
+    const k = cellIndex(x, z);
+    return this.eroM[k] + this.settleM[k];
   }
 
   /** node-grid terrain height (the D8 routing datum) for the micro tier */
@@ -355,14 +368,50 @@ export class Ground {
     // 5) D8 runoff routing (Manning overland, one capped hop per tick)
     this.route(dt);
 
+    // 5.5) wet self-compaction (spec §12): water lubricates, so disturbed
+    // structure re-consolidates on wet hours and loose saturated ground
+    // settles toward a denser state — the ground writes itself flat again
+    {
+      const dth = dt / 3600;
+      const sr = this.sr;
+      for (let k = 0; k < N; k++) {
+        if (this.disturbed[k] > 0 && sr[k] > 0.45) {
+          // structure re-establishes over ~24 wet hours (disturbed = hours left)
+          this.disturbed[k] = Math.max(0, this.disturbed[k] - dth * (0.5 + sr[k]));
+          // hydrocompaction: loose saturated fill settles up to 6 cm
+          if (sr[k] > 0.9) {
+            const inc = Math.min(0.004 * dth * sr[k], 0.06 - this.settleM[k]);
+            if (inc > 0) {
+              this.settleM[k] += inc;
+              this.consolidatedM3 += inc * CELL * CELL;
+            }
+          }
+        }
+      }
+    }
+
     // 6) geotechnical response (ported from geotech.py update)
     this.updateGeotech();
   }
 
   private routeOut = new Float32Array(N);
   private routeIn = new Float32Array(N);
+  /** fine cells whose erosion is owned by the contact tier this tick */
+  microCovered = new Uint8Array(N);
+  /** net surface offset from erosion (−) / deposition (+) [m] — the world's
+   *  slow topography. Feeds D8 routing elevations and the micro-tier bake
+   *  so gullies and fans appear where you walk (spec §10). */
+  eroM = new Float32Array(N);
+  /** hydrocompaction settling of loose saturated ground [m] (volume loss,
+   *  booked separately — densification is not mass transfer, spec §12) */
+  settleM = new Float32Array(N);
+  /** consolidated volume ledger (spoil piles settling back toward bank) */
+  consolidatedM3 = 0;
 
-  /** Manning-D8 routing with a hop cap for stability. */
+  /** Manning-D8 routing with a hop cap for stability. Evolving topography
+   *  (eroM + settleM) rides the node elevations; sediment rides the routed
+   *  water as a concentration, with detachment / deposition by shear — the
+   *  same Hjulström-lite contract as the contact tier (spec §10). */
   private route(dt: number) {
     const h = this.hPond;
     const outflow = this.routeOut;
@@ -371,14 +420,19 @@ export class Ground {
     const depStore = 0.002; // 2 mm micro-depression storage
     const nMan = 0.05;
     const height = this.terrain.height;
+    const dth = dt / 3600;
+    const sedIn = this.routeIn2;
+    const slopeOf = this.routeSlope; // per-cell routed surface slope for shear
+    sedIn.fill(0); slopeOf.fill(0.01);
     for (let j = 0; j < GRID; j++) {
       for (let i = 0; i < GRID; i++) {
         const k = j * GRID + i;
+        const lift = this.eroM[k] + this.settleM[k];
         const hExcess = h[k] - depStore - this.rut[k] * 0.4;
         if (hExcess <= 2e-4) continue;
-        // steepest descent among 8 neighbours (use node heights)
+        // steepest descent among 8 neighbours (node heights + dynamic lift)
         let bestK = -1, bestSlope = 0.02; // minimum slope to move
-        const zc = height[(j + 1) * (GRID + 1) + i + 1] + h[k];
+        const zc = height[(j + 1) * (GRID + 1) + i + 1] + lift + h[k];
         for (let dj = -1; dj <= 1; dj++) {
           for (let di = -1; di <= 1; di++) {
             if (di === 0 && dj === 0) continue;
@@ -386,10 +440,12 @@ export class Ground {
             if (ni < 0 || ni >= GRID || nj < 0 || nj >= GRID) continue;
             const nk = nj * GRID + ni;
             const dist = (di !== 0 && dj !== 0) ? CELL * 1.414 : CELL;
-            const slope = (zc - (height[(nj + 1) * (GRID + 1) + ni + 1] + h[nk])) / dist;
+            const slope = (zc - (height[(nj + 1) * (GRID + 1) + ni + 1]
+              + this.eroM[nk] + this.settleM[nk] + h[nk])) / dist;
             if (slope > bestSlope) { bestSlope = slope; bestK = nk; }
           }
         }
+        slopeOf[k] = bestSlope;
         if (bestK < 0) continue;
         // Manning velocity for the excess depth
         const v = (1 / nMan) * Math.pow(hExcess, 5 / 3) * Math.sqrt(bestSlope);
@@ -398,9 +454,58 @@ export class Ground {
         const dq = q / (CELL * CELL); // depth equivalent [m]
         outflow[k] += dq;
         inflow[bestK] += dq;
+        // ---- sediment rides the routed water (skip contact-tier cells) ---
+        if (!this.microCovered[k] && this.sedKg[k] > 1e-9) {
+          const share = Math.min(q / (CELL * CELL * Math.max(h[k], 1e-3)), 0.9);
+          const moveKg = this.sedKg[k] * share;
+          this.sedKg[k] -= moveKg;
+          sedIn[bestK] += moveKg;
+        }
       }
     }
-    for (let k = 0; k < N; k++) h[k] += inflow[k] - outflow[k];
+    for (let k = 0; k < N; k++) {
+      h[k] += inflow[k] - outflow[k];
+      if (sedIn[k] > 0) this.sedKg[k] += sedIn[k];
+    }
+
+    // ---- fine-tier detachment / deposition (Hjulström-lite, spec §10) ---
+    // concentrated-flow shear on the routed film; churn/disturbed ground
+    // erodes first, sealed crust resists — mirrors the micro-tier contract
+    if (dth > 0) {
+      const soil = this.terrain.soil;
+      for (let j = 0; j < GRID; j++) {
+        for (let i = 0; i < GRID; i++) {
+          const k = j * GRID + i;
+          if (this.microCovered[k]) continue; // the contact tier owns it
+          const load = this.sedKg[k];
+          if (h[k] <= 1e-3 && load <= 1e-9) continue;
+          const tex = SOIL_TEXTURES[soil[k]];
+          // shear on the routed film (slope captured by the routing pass)
+          const tau = 1000 * 9.81 * h[k] * Math.max(slopeOf[k], 0.01); // Pa
+          const armor = Math.min(this.keCum[k] / CFG.keSealJ, 1) * (this.disturbed[k] > 0 ? 0.25 : 1);
+          let tauC = 0.12 + 0.5 * (1 - tex.sand / 100);
+          if (this.disturbed[k] > 0) tauC *= 0.5;
+          tauC *= 1 + armor * 2.5;
+          const cap = (0.1 + 5 * h[k]) * CELL * CELL; // kg the cell's flow holds
+          // detachment: routed flow above critical shear
+          if (outflow[k] > 1e-4 && tau > tauC) {
+            const kFlow = 0.04; // kg/(m²·Pa·h)
+            const detachKg = kFlow * (tau - tauC) * dth * CELL * CELL;
+            this.sedKg[k] += detachKg;
+            this.sedLedger.detachedKg += detachKg;
+            this.eroM[k] -= detachKg / tex.rhoDry; // bed lowers
+          }
+          // deposition: load above capacity settles
+          if (load > cap) {
+            const settle = tau < tauC ? Math.min(dth * 24, 1) : Math.min(dth * 6, 1);
+            const depKg = Math.min((load - cap) * settle, load);
+            this.sedKg[k] -= depKg;
+            this.sedLedger.depositedKg += depKg;
+            this.eroM[k] += depKg / (tex.rhoDry * 0.8); // loose deposit
+          }
+        }
+      }
+    }
 
     // depression-cap spillover. This catchment has no mapped outlet channel
     // yet (rivers are Phase 3), so a closed bowl would silently pile up a
@@ -408,14 +513,24 @@ export class Ground {
     // wetting branch for months. Water beyond a legible sheet depth leaves
     // as sub-grid basin outflow, booked in the ledger so mass is accounted,
     // never silently destroyed (spec §4: conserve, and never forget).
+    // Suspended load leaves with the spilled water, at its concentration.
     const cap = CFG.depressionMaxM;
     for (let k = 0; k < N; k++) {
       if (h[k] > cap) {
-        this.basinOutflowM3 += (h[k] - cap) * CELL * CELL;
+        const spillVol = (h[k] - cap) * CELL * CELL;
+        this.basinOutflowM3 += spillVol;
+        if (this.sedKg[k] > 1e-9) {
+          const frac = Math.min(spillVol / Math.max(h[k] * CELL * CELL, 1e-9), 1);
+          const expKg = this.sedKg[k] * frac;
+          this.sedKg[k] -= expKg;
+          this.sedLedger.exportedKg += expKg;
+        }
         h[k] = cap;
       }
     }
   }
+  private routeIn2 = new Float32Array(N);
+  private routeSlope = new Float32Array(N);
 
   /** recompute geotech state from moisture (ported from geotech.py). */
   private updateGeotech() {
@@ -506,10 +621,11 @@ export class Ground {
     this.traffic[k] = Math.min(255, Math.floor(this.compAcc[k]));
   }
 
-  /** digging disturbed this cell: crust broken, layers mixed, structure open */
+  /** digging disturbed this cell: crust broken, layers mixed, structure open.
+   *  Value = wet-hours of loose structure remaining (decays in step 5.5). */
   markDug(x: number, y: number) {
     const k = cellIndex(x, y);
-    this.disturbed[k] = 1;
+    this.disturbed[k] = 24;
     this.keCum[k] *= 0.25; // crust shattered
     // lift moist subsoil into the top layer (mixed, loosened)
     const th0 = this.theta[0][k], th1 = this.theta[1][k];
@@ -576,7 +692,7 @@ export class Ground {
       mudFactor: this.mudFactor[k],
       branchLabel: this.branch[k] === 1 ? "WETTING (scan)" : "DRYING (main)",
       traffic: this.traffic[k],
-      disturbed: this.disturbed[k] > 0,
+      disturbed: this.disturbed[k],
     };
   }
 

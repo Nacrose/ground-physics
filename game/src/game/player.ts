@@ -137,7 +137,8 @@ export class Player {
 
   /** ground height incl. micro deformations (prints, craters, spoil) and the tunnel invert */
   groundHeightAt(x: number, z: number): number {
-    const th = sampleHeight(this.terrain, x + 384, z + 384);
+    const th = sampleHeight(this.terrain, x + 384, z + 384)
+      + this.ground.dynLiftAt(x, z); // fine-tier erosion / settling rides too
     if (this.tunnel) {
       // the height gate keeps surface walkers above a drive on the terrain
       // floor; inside the tube (or the portal cut) the tunnel owns the floor

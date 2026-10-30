@@ -461,7 +461,10 @@ export class MicroTerrain {
   private pendingPortal: { cx: number; cz: number; halfAlong: number; halfAcross: number; push: number; dirX: number; dirZ: number } | null = null;
 
   // ------------------------------------------------------------------- baking
-  /** bake cell physics + render attributes for a cell rect (verts i0..i1+1) */
+  /** bake cell physics + render attributes for a cell rect (verts i0..i1+1).
+   *  The bake rides the fine tier's dynamic lift (eroM + settleM) so world-
+   *  scale gullies, deposition fans and hydrocompaction settling appear in
+   *  the contact window wherever you walk (spec §10, §12). */
   private bakeRegion(i0: number, i1: number, j0: number, j1: number) {
     const bh = this.aBaseH.array as Float32Array;
     const bn = this.aBaseN.array as Float32Array;
@@ -476,7 +479,8 @@ export class MicroTerrain {
       for (let i = i0; i <= i1; i++) {
         const wx = this.ox - MICRO_HALF + (i + 0.5) * MICRO_CELL;
         const wz = this.oz - MICRO_HALF + (j + 0.5) * MICRO_CELL;
-        this.cellBase[j * NC + i] = sampleHeight(this.terrain, wx + GRID_HALF, wz + GRID_HALF);
+        this.cellBase[j * NC + i] = sampleHeight(this.terrain, wx + GRID_HALF, wz + GRID_HALF)
+          + this.ground.dynLiftAt(wx, wz);
       }
     }
     // vertex attributes (corner lattice)
@@ -487,7 +491,8 @@ export class MicroTerrain {
         const lz = -MICRO_HALF + j * MICRO_CELL;
         const wx = this.ox + lx;
         const wz = this.oz + lz;
-        const h = sampleHeight(this.terrain, wx + GRID_HALF, wz + GRID_HALF);
+        const h = sampleHeight(this.terrain, wx + GRID_HALF, wz + GRID_HALF)
+          + this.ground.dynLiftAt(wx, wz);
         bh[v] = h;
         terrainNormal(this.terrain, wx + GRID_HALF, wz + GRID_HALF, nrm);
         bn[v * 3] = nrm[0]; bn[v * 3 + 1] = nrm[1]; bn[v * 3 + 2] = nrm[2];
@@ -1055,6 +1060,7 @@ export class MicroTerrain {
     const splashErosion = rainMmH > 0.5 && this.churnCount > 0;
     if (!anyFilm && !anyLoad && !splashErosion && !gridPond) {
       this.ground.loanPond.fill(0); // nothing on loan
+      this.ground.microCovered.fill(0); // and no erosion ownership
       this.uploadWaterTexture();
       return;
     }
@@ -1062,6 +1068,7 @@ export class MicroTerrain {
     this.routeWater(6);
     this.filmSoilWater(dtGame, f);
     this.sedimentTick(dtGame);
+    this.consolidateSpoil(dtGame);
     this.uploadWaterTexture();
   }
 
@@ -1076,6 +1083,7 @@ export class MicroTerrain {
   private loanRelax() {
     const g = this.ground;
     g.loanPond.fill(0);
+    g.microCovered.fill(0); // the fine tier erodes wherever we hold no film
     const n = NC;
     const x0 = this.ox - MICRO_HALF, z0 = this.oz - MICRO_HALF;
     const x1 = this.ox + MICRO_HALF, z1 = this.oz + MICRO_HALF;
@@ -1159,8 +1167,10 @@ export class MicroTerrain {
             }
           }
         }
-        // display depth for the minimap / ground texture
+        // display depth for the minimap / ground texture + erosion ownership:
+        // where we hold film, THIS tier owns detachment (spec §10)
         g.loanPond[k] = accD[k] / cnt;
+        g.microCovered[k] = accD[k] > 1e-5 ? 1 : 0;
       }
     }
   }
@@ -1434,6 +1444,39 @@ export class MicroTerrain {
       }
     }
     if (this.sedLedger.detachedKg > 0 || this.sedLedger.depositedKg > 0) this.texDirty = true;
+  }
+
+  /**
+   * Wet self-compaction of spoil piles (spec §12): loose heaps densify back
+   * toward bank volume when wet — water lubricates the grains. Dry piles
+   * keep their steep loose repose; saturated ones slump-settle over hours.
+   * Volume loss is densification, not mass transfer: booked in the
+   * consolidated ledger, the kg never move.
+   */
+  private consolidateSpoil(dtGame: number) {
+    const dth = dtGame / 3600;
+    if (dth <= 0) return;
+    const g = this.ground;
+    const f = this.flags;
+    const d = this.delta;
+    let compactedVol = 0;
+    for (let v = 0; v < NC * NC; v++) {
+      if ((f[v] & 2) === 0 || d[v] <= 0.002) continue;
+      const wx = this.ox - MICRO_HALF + ((v % NC) + 0.5) * MICRO_CELL;
+      const wz = this.oz - MICRO_HALF + (Math.floor(v / NC) + 0.5) * MICRO_CELL;
+      const k = cellIndex(wx, wz);
+      const wet = g.wetness[k];
+      if (wet < 0.15) continue; // dry heaps hold their repose
+      // rate: up to ~30%/h fully saturated (loose 1.25x -> 1.0x over ~3 wet h)
+      const r = 0.02 + 0.3 * wet;
+      const shrink = d[v] * 0.2 * r * dth; // toward 80% of current height
+      d[v] -= shrink;
+      compactedVol += shrink * CELL_AREA;
+    }
+    if (compactedVol > 0) {
+      g.consolidatedM3 += compactedVol;
+      this.texDirty = true;
+    }
   }
 
   /** local surface slope magnitude (base + delta) at a micro cell */

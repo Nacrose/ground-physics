@@ -264,6 +264,7 @@ export class StormFX {
         const z0 = j * cell - HALF, z1 = z0 + cell;
         const xc = (x0 + x1) / 2, zc = (z0 + z1) / 2;
         const yC = sampleHeight(this.terrain, xc + HALF, zc + HALF) +
+          this.ground.dynLiftAt(xc, zc) +
           (this.micro ? this.micro.sampleDelta(xc, zc) : 0) +
           0.015 + Math.min(depth, 0.3) * 0.35;
         verts.push(x0, yC, z0, x1, yC, z0, x1, yC, z1, x0, yC, z0, x1, yC, z1, x0, yC, z1);

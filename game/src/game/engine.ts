@@ -325,10 +325,15 @@ export class Game {
     const tex = rep.texture;
     const stateColor = rep.consistency === 0 ? "#9fc97a" : rep.consistency === 1 ? "#e3c268" : "#e0685c";
     const microRelief = this.micro.sampleDelta(p.x, p.z) * 100;
+    // bulk unit weight rises with water (γ = γdry + θ·Sr·γw) — the film in
+    // your dug hole counts too, so a soaked hole is a HEAVY hole
+    const gammaBulk = tex.gammaDry + tex.thetaS * rep.sr * 9.81;
+    const filmHere = this.micro.waterAt(p.x, p.z);
     const rows: Array<[string, string]> = [
       ["TEXTURE", `${tex.label} · ${tex.clay}% clay`],
       ["WATER CONTENT", `${rep.wPct.toFixed(1)} %  (PL ${tex.PL} · LL ${tex.LL})`],
       ["CONSISTENCY", rep.consistencyLabel],
+      ["UNIT WEIGHT γ", `${gammaBulk.toFixed(1)} kN/m³  (dry ${tex.gammaDry.toFixed(1)})`],
       ["MATRIC SUCTION", `${rep.suctionKpa.toFixed(0)} kPa`],
       ["RETENTION BRANCH", rep.branchLabel],
       ["APPARENT COHESION", `${rep.cEffKpa.toFixed(1)} kPa`],
@@ -337,11 +342,11 @@ export class Game {
       ["CBR", `${rep.cbr.toFixed(1)}`],
       ["SHEAR τ<sub>f</sub>", `${rep.tauFKpa.toFixed(0)} kPa`],
       ["INFIL. CAPACITY", `${rep.infilCapMmH.toFixed(1)} mm/h`],
-      ["PONDING", `${rep.pondMm.toFixed(1)} mm`],
+      ["PONDING", `${rep.pondMm.toFixed(1)} mm${filmHere > 0.001 ? ` + film ${(filmHere * 1000).toFixed(0)} mm` : ""}`],
       ["RUT DEPTH", `${(rep.rutM * 100).toFixed(1)} cm`],
       ["MICRO RELIEF", `${microRelief >= 0 ? "+" : ""}${microRelief.toFixed(1)} cm`],
       ["COMPACTION", `${rep.traffic} passes`],
-      ["DIG STATE", rep.disturbed ? "DISTURBED (loosened)" : "intact"],
+      ["DIG STATE", rep.disturbed ? `DISTURBED (loosened, ${rep.disturbed} wet-h left)` : "intact"],
       ["RAIN HERE", `${rainHere.toFixed(1)} mm/h`],
     ];
     // the driven adit: station graph + live Terzaghi panel (design §8)
@@ -514,8 +519,19 @@ export class Game {
   /** QA: sediment conservation ledger (detached / deposited / handoff / load) */
   sedAudit() {
     const m = this.micro.sedAudit();
-    const f = this.ground.sedLedger;
-    return { micro: m, fine: { ...f, loadNowKg: this.ground.sedKg.reduce((s, x) => s + x, 0) } };
+    const g = this.ground;
+    let load = 0;
+    for (let k = 0; k < g.sedKg.length; k++) load += g.sedKg[k];
+    const f = g.sedLedger;
+    return {
+      micro: m,
+      fine: {
+        ...f,
+        loadNowKg: load,
+        errKg: Math.abs(f.detachedKg + f.importedKg - f.depositedKg - f.exportedKg - load),
+      },
+      consolidatedM3: +g.consolidatedM3.toFixed(4),
+    };
   }
 
   /** QA: tunnel station graph + conservation ledger */

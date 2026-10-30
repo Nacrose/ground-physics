@@ -146,3 +146,63 @@ support state and a live handle on the fine-tier soil state.
 - **Batch A scope note**: FS is computed and displayed only — stand-up
   timers, steel arch sets, seepage/piping and collapse carving arrive with
   batches B–D (`carveRect` on the micro tier is the collapse writer).
+
+## 9. The sub-grid water film (Flood & Spade)
+
+The fine tier's D8 routes on static node heights, so grid water cannot see a
+dug hole. The contact tier now carries a **water film** at 6.25 cm: while the
+window fully covers a 4 m cell, that cell's pond is **on loan** down here.
+
+- **Loan relaxation** (per physics tick, per covered cell): compare the film's
+  mean *surface* elevation (base + delta + film) with the grid's target
+  (node height + pond). Pull water down when the grid stands proud; hand the
+  excess back when the film does. Uniform lifts, 1 mm deadband, and the
+  *actual* clamped volume is booked — the identity
+  `Σfilm = loanNet − edgeOut − evap − infilt` closes to 0.
+- **Routing**: pairwise transfer toward the lower local surface, Gauss-Seidel
+  ordered, 6 passes/tick (~1 m/s sheet travel). Water physically finds dug
+  holes, spills at their rims, and hands off to the fine pond at the window
+  edge. Scroll-out returns loaned water + suspended load to the grid.
+- **Infiltration / evaporation** at game-time rates write straight into the
+  fine column (θ₀, F, branch) — one soil-moisture truth, one water ledger.
+- **Rendering**: a transparent sheet sharing the overlay geometry, displaced
+  by a RGBA8 film texture (R = surface offset ±2 m quadratic, G = depth);
+  the fine puddle mesh owns water outside the window.
+
+## 10. Sediment — the ground moves (Hjulström-lite)
+
+One contract at both tiers: **detachment by concentrated flow above a
+state-dependent critical shear, transport as a concentration in the routed
+water, settling where capacity falls.**
+
+- τ ≈ ρ_w·g·h·S from the routed film; τ_c from texture
+  (sand 0.15 … clay 0.62 Pa), ×0.35 churn/spoil, ×0.5 disturbed,
+  ×(1 + 2.5·armor) for a rain-sealed crust. Raindrop detachment hits bare
+  loose ground (drop KE damped by standing water).
+- Bed erosion writes the delta / `eroM` fields (real scars); deposition
+  re-builds LOOSE ground (fill 0.8, churn+spoil flags → relaxation smooths
+  it into fans). kg ledgers close exactly at both tiers; the depression-cap
+  spill exports suspended load with its water.
+- **Ownership**: wherever the contact tier holds film, it owns detachment;
+  the fine tier erodes everywhere else (`microCovered`). `eroM` feeds the
+  D8 elevations — the drainage net itself evolves — and the micro bake, so
+  gullies and fans appear where you walk.
+
+## 11. The window is a cache, not the world
+
+Scrolled-out edits persist in a sparse world store keyed by 6.25 cm world
+cell (`(delta_mm + 1600)·8 + flags`), restored on return. A hole stays dug
+wherever you walk. The store is mm-quantised; the rounding is booked as
+`persistDriftM3` so the volume ledger stays honest. Digging is also simply
+better: a 0.30 m × 0.26 m blade at 2 strokes/s, with churn/disturbance
+easing penetration after the crust cracks.
+
+## 12. Wet self-compaction
+
+Water lubricates. **Spoil piles** densify from loose (fill 0.8) back toward
+bank volume at ~2–30 %/h by wetness; dry heaps keep their steep repose.
+**Disturbed fine cells** re-consolidate over ~24 wet hours (the `disturbed`
+field is now wet-hours remaining), and loose saturated ground hydrocompacts
+up to 6 cm (`settleM`, booked in the consolidated-volume ledger —
+densification is volume, not mass). Unit weight γ already rises with water
+(γ = γ_dry + θ·Sr·γ_w) and the inspector now shows it live.
