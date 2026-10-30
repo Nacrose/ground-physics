@@ -1,11 +1,15 @@
 /**
- * Storm FX: GPU-friendly rain streaks wrapped in a box around the camera
- * (Marshall-Palmer fall speeds), ground splash rings, a dynamic puddle mesh
- * grown from the ground-physics ponding field with an animated ripple shader,
- * and fully procedural WebAudio (rain hiss, wind, thunder rumbles).
+ * Storm FX: rain as GPU-billboarded motion-blur streaks — each drop is a
+ * persistent particle that really falls at its Marshall-Palmer speed and
+ * drifts with the wind; the streak quad is stretched along the velocity and
+ * faces the camera in the vertex shader (JS only integrates positions).
+ * Landing splash rings, a dynamic puddle mesh grown from the ground-physics
+ * ponding field (per-vertex depth → feathered edges + a Beer-Lambert
+ * wet-earth → sky-water colour ramp), and fully procedural WebAudio
+ * (rain hiss, wind, thunder rumbles).
  */
 import * as THREE from "three";
-import { GRID, WORLD_SIZE, TerrainData, sampleHeight } from "./terrain";
+import { GRID, WORLD_SIZE, TerrainData, sampleHeight, cellIndex } from "./terrain";
 import { Ground } from "./ground";
 import { dropFallSpeed, medianDropMm } from "./params";
 import { MicroTerrain } from "./contact";
@@ -20,24 +24,34 @@ export class StormFX {
   ground: Ground;
   micro: MicroTerrain | null;
 
-  rainMesh: THREE.InstancedMesh;
+  rainMesh: THREE.Mesh;
   splash: THREE.InstancedMesh;
   dust: THREE.InstancedMesh;
   puddleMesh: THREE.Mesh;
-  private rainGeo: THREE.BufferGeometry;
+  private rainGeo: THREE.InstancedBufferGeometry;
 
-  private rainCount: number;
+  /** quality-level cap on visible drops (setRainQuality) */
+  private rainCap: number;
   private baseRainCount: number;
   private splashCount = 240;
   private splashLife: Float32Array;
   private splashPos: Float32Array;
+  private splashScale: Float32Array;
   private splashIdx = 0;
   private dustCount = 96;
   private dustLife: Float32Array;
   private dustPos: Float32Array;
   private dustIdx = 0;
-  private rainSeeds: Float32Array; // per-drop random phase
-  private dropSpeed = 8.5;
+  // persistent rain state: world position + velocity per drop. Positions
+  // survive between frames — the drops actually fall, wrap in a camera-box
+  // and respawn at the top when they land.
+  private dropPos: Float32Array;
+  private dropVel: Float32Array;
+  private dropRand: Float32Array;
+  private aPosAttr!: THREE.InstancedBufferAttribute;
+  private aVelAttr!: THREE.InstancedBufferAttribute;
+  private activeDrops = 0;
+  private boxR = 14; // horizontal wrap radius around the camera [m]
   private lastSuction = 0;
 
   // audio
@@ -54,7 +68,7 @@ export class StormFX {
     this.ground = ground;
     this.micro = micro ?? null;
     this.baseRainCount = rainCount;
-    this.rainCount = rainCount;
+    this.rainCap = rainCount;
 
     this.buildRain();
     this.buildSplashes();
@@ -63,56 +77,107 @@ export class StormFX {
 
     this.splashLife = new Float32Array(this.splashCount).fill(-1);
     this.splashPos = new Float32Array(this.splashCount * 3);
+    this.splashScale = new Float32Array(this.splashCount).fill(1);
     this.dustLife = new Float32Array(this.dustCount).fill(-1);
     this.dustPos = new Float32Array(this.dustCount * 3);
   }
 
   // -------------------------------------------------------------------- rain
   private buildRain() {
-    // vertical streak quad — chunky enough to read at 5–25 m distance
-    const geo = new THREE.PlaneGeometry(0.17, 1.35);
+    // A unit quad stretched per-instance into a motion-blur streak. The
+    // streak is built IN THE VERTEX SHADER from the drop's own velocity and
+    // faces the camera — no per-drop matrices, no edge-on flicker, and the
+    // lean into the wind is physical (it IS the velocity vector).
+    const quad = new THREE.PlaneGeometry(1, 1);
+    const geo = new THREE.InstancedBufferGeometry();
+    geo.index = quad.index;
+    geo.setAttribute("position", quad.getAttribute("position"));
+    geo.setAttribute("uv", quad.getAttribute("uv"));
+    const n = this.baseRainCount;
+    this.dropPos = new Float32Array(n * 3);
+    this.dropVel = new Float32Array(n * 3);
+    this.dropRand = new Float32Array(n);
+    for (let i = 0; i < n; i++) this.seedDrop(i, 0, 6, 0);
+    this.aPosAttr = new THREE.InstancedBufferAttribute(this.dropPos, 3);
+    this.aVelAttr = new THREE.InstancedBufferAttribute(this.dropVel, 3);
+    this.aPosAttr.setUsage(THREE.DynamicDrawUsage);
+    this.aVelAttr.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute("aPos", this.aPosAttr);
+    geo.setAttribute("aVel", this.aVelAttr);
+    geo.setAttribute("aRand", new THREE.InstancedBufferAttribute(this.dropRand, 1));
+    geo.instanceCount = 0; // nothing until it rains
     this.rainGeo = geo;
     const mat = new THREE.ShaderMaterial({
       transparent: true, depthWrite: false, side: THREE.DoubleSide,
       uniforms: {
         uIntensity: { value: 0 },
-        uWindShear: { value: new THREE.Vector2(0.12, 0.03) },
-        uFogColor: { value: new THREE.Color(0x99a5ad) },
+        uCamPos: { value: new THREE.Vector3() },
       },
       vertexShader: `
-        uniform vec2 uWindShear;
+        attribute vec3 aPos;   // drop head, world space
+        attribute vec3 aVel;   // drop velocity (y < 0)
+        attribute float aRand; // per-drop variance 0..1
+        uniform vec3 uCamPos;
         varying vec2 vUv;
+        varying float vFade;
+        varying float vRand;
         void main(){
           vUv = uv;
-          vec3 p = position;
-          // streak leans with the wind; lean grows toward the top
-          p.x += uWindShear.x * (uv.y - 0.5) * 0.85;
-          p.y += uWindShear.y * (uv.y - 0.5) * 0.85;
-          gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(p, 1.0);
+          vRand = aRand;
+          vec3 vel = aVel;
+          float speed = max(length(vel), 0.001);
+          vec3 dir = vel / speed;             // streak points along the track
+          // ~80 ms exposure: streak length IS the motion blur
+          float len = clamp(speed * 0.08, 0.30, 1.10);
+          vec3 toCam = uCamPos - aPos;
+          // camera-facing width axis: perpendicular to streak and view ray
+          vec3 side = cross(dir, toCam);
+          float sl = length(side);
+          side = sl > 1e-4 ? side / sl : vec3(1.0, 0.0, 0.0);
+          float w = 0.016 + 0.014 * aRand;    // 1.6–3.0 cm wide
+          vec3 world = aPos - dir * (uv.y * len) + side * (position.x * w);
+          float d = length(toCam);
+          vFade = smoothstep(0.55, 2.1, d);   // never loom over the lens
+          gl_Position = projectionMatrix * viewMatrix * vec4(world, 1.0);
         }`,
       fragmentShader: `
         uniform float uIntensity;
         varying vec2 vUv;
+        varying float vFade;
+        varying float vRand;
         void main(){
-          // NOTE: no reversed-edge smoothstep — undefined behaviour on some GPUs
-          float a = smoothstep(0.0, 0.25, vUv.y) * (1.0 - smoothstep(0.55, 1.0, vUv.y));
-          a *= 0.5 + 0.5 * vUv.x * (1.0 - vUv.x) * 4.0;
-          gl_FragColor = vec4(vec3(0.85, 0.9, 0.96), a * 0.45 * uIntensity);
+          // bright head, tapering tail (motion blur), soft cross-section
+          float a = pow(1.0 - vUv.y, 1.7);
+          a *= 0.30 + 0.70 * (1.0 - abs(vUv.x - 0.5) * 2.0);
+          a *= vFade * (0.55 + 0.45 * vRand);
+          gl_FragColor = vec4(vec3(0.80, 0.85, 0.93), a * (0.30 + 0.38 * uIntensity));
         }`,
     });
-    this.rainMesh = new THREE.InstancedMesh(geo, mat, this.rainCount);
+    this.rainMesh = new THREE.Mesh(geo, mat);
     this.rainMesh.frustumCulled = false;
     this.rainMesh.renderOrder = 5;
-    const m = new THREE.Matrix4();
-    let seed = 17;
-    const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
-    this.rainSeeds = new Float32Array(this.rainCount);
-    for (let i = 0; i < this.rainCount; i++) {
-      this.rainSeeds[i] = rnd();
-      m.makeTranslation(0, -999, 0); // parked below the world until needed
-      this.rainMesh.setMatrixAt(i, m);
-    }
     this.scene.add(this.rainMesh);
+  }
+
+  /** place drop i (fresh spawn) around (cx, cy, cz) */
+  private seedDrop(i: number, cx: number, cy: number, cz: number) {
+    const i3 = i * 3;
+    this.dropPos[i3] = cx + (Math.random() * 2 - 1) * this.boxR;
+    this.dropPos[i3 + 1] = cy + Math.random() * 11;
+    this.dropPos[i3 + 2] = cz + (Math.random() * 2 - 1) * this.boxR;
+    this.dropRand[i] = Math.random();
+  }
+
+  /** respawn drop i above the camera with an MP-consistent velocity */
+  private respawnDrop(i: number, cam: THREE.Vector3, fall: number, windX: number, windZ: number) {
+    const i3 = i * 3;
+    this.dropPos[i3] = cam.x + (Math.random() * 2 - 1) * this.boxR;
+    this.dropPos[i3 + 1] = cam.y + 5 + Math.random() * 8;
+    this.dropPos[i3 + 2] = cam.z + (Math.random() * 2 - 1) * this.boxR;
+    this.dropVel[i3] = windX * (0.7 + 0.6 * Math.random());
+    this.dropVel[i3 + 1] = -fall * (0.8 + 0.4 * Math.random());
+    this.dropVel[i3 + 2] = windZ * (0.7 + 0.6 * Math.random());
+    this.dropRand[i] = Math.random();
   }
 
   // ---------------------------------------------------------------- splashes
@@ -132,7 +197,7 @@ export class StormFX {
           float ring = smoothstep(0.55, 0.8, r) * (1.0 - smoothstep(0.85, 1.0, r));
           float dots = smoothstep(0.9, 1.0, r);
           float a = (ring + dots * 0.6) * (1.0 - r * 0.4);
-          gl_FragColor = vec4(vec3(0.82, 0.88, 0.92), a * 0.6);
+          gl_FragColor = vec4(vec3(0.86, 0.90, 0.94), a * 0.42);
         }`,
     });
     this.splash = new THREE.InstancedMesh(geo, mat, this.splashCount);
@@ -150,7 +215,7 @@ export class StormFX {
     const i = this.splashIdx = (this.splashIdx + 1) % this.splashCount;
     this.splashLife[i] = 0;
     this.splashPos[i * 3] = x; this.splashPos[i * 3 + 1] = y; this.splashPos[i * 3 + 2] = z;
-    void scale;
+    this.splashScale[i] = scale;
   }
 
   // -------------------------------------------------------------------- dust
@@ -197,47 +262,58 @@ export class StormFX {
   private buildPuddles() {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(0), 3));
+    geo.setAttribute("aDepth", new THREE.BufferAttribute(new Float32Array(0), 1));
     geo.setIndex(null);
     const mat = new THREE.ShaderMaterial({
       transparent: true, depthWrite: false,
       uniforms: {
         uTime: { value: 0 },
         uRain: { value: 0 }, // local rain intensity for rain-ripple sparkle
+        uWindDir: { value: new THREE.Vector2(1, 0) },
         uSky: { value: new THREE.Color(0x8fa3b5) },
         uSun: { value: new THREE.Color(0xffd9a8) },
         uSunDir: { value: new THREE.Vector3(0.5, 0.4, -0.6) },
+        uWet: { value: new THREE.Color(0x23281f) }, // wet-earth absorption tint
         uFogColor: { value: new THREE.Color(0xe6d2ac) },
         uFogDensity: { value: 0.0026 },
         uCamPos: { value: new THREE.Vector3() },
       },
       vertexShader: `
+        attribute float aDepth; // pond depth at this vertex [m]
         varying vec3 vWorld;
-        varying float vPond;
+        varying float vDepth;
         void main(){
           vWorld = position;
-          vPond = 1.0;
+          vDepth = aDepth;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }`,
       fragmentShader: `
         uniform float uTime, uRain, uFogDensity;
-        uniform vec3 uSky, uSun, uSunDir, uFogColor, uCamPos;
+        uniform vec3 uSky, uSun, uSunDir, uFogColor, uCamPos, uWet;
+        uniform vec2 uWindDir;
         varying vec3 vWorld;
-        varying float vPond;
+        varying float vDepth;
         void main(){
-          // animated normal: two travelling wave fields + rain prickle
+          if (vDepth < 0.0006) discard;
+          // Beer-Lambert-ish depth ramp: shallow film reads as a wet-earth
+          // sheen (the soil shows through), depth → full sky-reflecting water
+          float dN = 1.0 - exp(-vDepth * 8.0);
           vec2 p = vWorld.xz;
-          float w1 = sin(p.x * 1.7 + uTime * 1.9) * cos(p.y * 1.3 - uTime * 1.4);
-          float w2 = sin((p.x + p.y) * 2.6 + uTime * 2.7) * 0.5;
-          float prickle = uRain * (sin(p.x * 23.0 + uTime * 12.0) * sin(p.y * 19.0 - uTime * 10.0));
-          vec3 n = normalize(vec3(w1 * 0.05 + w2 * 0.05 + prickle * 0.09, 1.0, w2 * 0.05 - w1 * 0.04 + prickle * 0.08));
+          // wind-aligned capillary waves — deeper water is livelier — + prickle
+          float w1 = sin(dot(p, uWindDir) * 2.6 + uTime * 2.2) * cos(p.x * 1.9 - uTime * 1.5);
+          float w2 = sin((p.x + p.y) * 3.4 + uTime * 3.0) * 0.5;
+          float prickle = uRain * (sin(p.x * 21.0 + uTime * 11.0) * sin(p.y * 17.0 - uTime * 9.0));
+          float amp = 0.030 + 0.055 * dN;
+          vec3 n = normalize(vec3(w1 * amp + w2 * amp + prickle * 0.10, 1.0,
+                                  w2 * amp - w1 * amp * 0.8 + prickle * 0.09));
           vec3 v = normalize(uCamPos - vWorld);
-          float fres = pow(1.0 - max(dot(v, n), 0.0), 2.2);
-          // sky reflection tinted by sun glint
-          float glint = pow(max(dot(reflect(-v, n), normalize(uSunDir)), 0.0), 60.0);
-          vec3 col = uSky * (0.65 + 0.85 * fres);
-          col += uSun * glint * 1.5;
-          col = mix(col, uFogColor, 0.08);
-          float alpha = 0.82;
+          float fres = pow(1.0 - max(dot(v, n), 0.0), 2.4);
+          float glint = pow(max(dot(reflect(-v, n), normalize(uSunDir)), 0.0), 90.0);
+          vec3 col = mix(uWet, uSky * (0.60 + 0.90 * fres), dN);
+          col += uSun * glint * 1.6;
+          // alpha grows with optical depth; the vertex-interpolated depth
+          // feathers the waterline instead of snapping square cell plates
+          float alpha = (0.34 + 0.50 * dN) * smoothstep(0.0006, 0.005, vDepth);
           float fogF = 1.0 - exp(-uFogDensity * uFogDensity * dot(uCamPos - vWorld, uCamPos - vWorld));
           col = mix(col, uFogColor, clamp(fogF, 0.0, 1.0));
           gl_FragColor = vec4(col, alpha);
@@ -252,9 +328,26 @@ export class StormFX {
   /** rebuild puddle quads from the ponding field (every physics tick) */
   rebuildPuddles() {
     const hPond = this.ground.hPond;
+    const ruts = this.ground.rut;
     const cell = WORLD_SIZE / GRID;
     const verts: number[] = [];
-    const ruts = this.ground.rut;
+    const depths: number[] = [];
+    // water depth at a grid CORNER = mean over the (up to four) cells meeting
+    // there — shared corner values interpolate smoothly across cell edges,
+    // which is what feathers the waterline in the shader
+    const cornerDepth = (i: number, j: number): number => {
+      let s = 0, c = 0;
+      for (let dj = -1; dj <= 0; dj++) {
+        for (let di = -1; di <= 0; di++) {
+          const ii = i + di, jj = j + dj;
+          if (ii < 0 || ii >= GRID || jj < 0 || jj >= GRID) continue;
+          const k = jj * GRID + ii;
+          s += hPond[k] + ruts[k] * 0.35;
+          c++;
+        }
+      }
+      return c > 0 ? s / c : 0;
+    };
     for (let j = 0; j < GRID; j++) {
       for (let i = 0; i < GRID; i++) {
         const k = j * GRID + i;
@@ -263,21 +356,36 @@ export class StormFX {
         const x0 = i * cell - HALF, x1 = x0 + cell;
         const z0 = j * cell - HALF, z1 = z0 + cell;
         const xc = (x0 + x1) / 2, zc = (z0 + z1) / 2;
+        const d00 = cornerDepth(i, j), d10 = cornerDepth(i + 1, j);
+        const d11 = cornerDepth(i + 1, j + 1), d01 = cornerDepth(i, j + 1);
         const yC = sampleHeight(this.terrain, xc + HALF, zc + HALF) +
           this.ground.dynLiftAt(xc, zc) +
           (this.micro ? this.micro.sampleDelta(xc, zc) : 0) +
-          0.015 + Math.min(depth, 0.3) * 0.35;
+          0.01 + Math.min(depth, 0.3) * 0.45;
         verts.push(x0, yC, z0, x1, yC, z0, x1, yC, z1, x0, yC, z0, x1, yC, z1, x0, yC, z1);
+        depths.push(d00, d10, d11, d00, d11, d01);
       }
     }
     const geo = this.puddleMesh.geometry as THREE.BufferGeometry;
     geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(verts), 3));
+    geo.setAttribute("aDepth", new THREE.BufferAttribute(new Float32Array(depths), 1));
     geo.setIndex(null);
     geo.computeBoundingSphere();
   }
 
   setRainQuality(count: number) {
-    this.rainMesh.count = Math.min(count, this.baseRainCount);
+    this.rainCap = Math.min(count, this.baseRainCount);
+  }
+
+  /** QA: rain field state — drops persist and fall between frames */
+  rainDebug() {
+    const drops: number[][] = [];
+    const n = Math.min(this.activeDrops, 8);
+    for (let i = 0; i < n; i++) {
+      drops.push([+this.dropPos[i * 3].toFixed(2), +this.dropPos[i * 3 + 1].toFixed(2),
+        +this.dropPos[i * 3 + 2].toFixed(2)]);
+    }
+    return { active: this.activeDrops, cap: this.rainCap, drops };
   }
 
   // ------------------------------------------------------------------- audio
@@ -451,54 +559,55 @@ export class StormFX {
   update(dt: number, elapsed: number, camPos: THREE.Vector3, playerPos: THREE.Vector3,
     rainAtPlayer: number, windMs: number, windDirRad: number, cloudiness: number,
     sunDir: THREE.Vector3, fogColor: THREE.Color, fogDensity: number) {
-    const visible = this.rainMesh.count;
+    // ---- rain: integrate persistent drops; streaks billboard on the GPU ---
+    const mat = this.rainMesh.material as THREE.ShaderMaterial;
+    const intensityNorm = Math.min(Math.sqrt(Math.max(rainAtPlayer, 0) / 60), 1);
+    mat.uniforms.uIntensity.value = Math.min(intensityNorm * 1.6, 1.0);
+    (mat.uniforms.uCamPos.value as THREE.Vector3).copy(camPos);
     // Marshall-Palmer drop size from local intensity → fall speed
     const dMed = medianDropMm(Math.max(rainAtPlayer, 0.05));
-    this.dropSpeed = dropFallSpeed(dMed);
-    const mat = this.rainMesh.material as THREE.ShaderMaterial;
-    const intensityNorm = Math.min(Math.sqrt(rainAtPlayer / 60), 1);
-    mat.uniforms.uIntensity.value = Math.min(intensityNorm * 1.6, 1.0);
-    mat.uniforms.uWindShear.value.set(
-      Math.cos(windDirRad) * windMs * 0.016, Math.sin(windDirRad) * windMs * 0.016);
-
-    // move drops inside a 26 m box centred on the camera
-    const m = new THREE.Matrix4();
-    const q = new THREE.Quaternion();
-    const s = new THREE.Vector3(1, 1, 1);
-    const p = new THREE.Vector3();
-    const boxR = 13, boxH = 17;
-    // deterministic pseudo-random per drop from seeds
-    const active = Math.floor(visible * Math.min(intensityNorm * 1.5, 1));
-    for (let i = 0; i < visible; i++) {
-      const seed = this.rainSeeds[i];
-      const inUse = i < active;
-      if (!inUse) {
-        m.makeTranslation(0, -999, 0);
-        this.rainMesh.setMatrixAt(i, m);
-        continue;
-      }
-      const r1 = seed * 7.13, r2 = seed * 3.71;
-      let dx = ((r1 % 1) * 2 - 1) * boxR;
-      let dz = ((r2 % 1) * 2 - 1) * boxR;
-      let dy = ((seed * 9.91) % 1) * boxH;
-      // fall: wrapped in the box (camera-anchored)
-      dy -= this.dropSpeed * dt * (0.75 + 0.5 * ((seed * 5.3) % 1));
-      if (dy < 0) dy += boxH;
-      const gx = camPos.x + dx, gy = camPos.y - 7 + dy, gz = camPos.z + dz;
-      p.set(gx, gy, gz);
-      q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), elapsed * 0.0 + seed * 6.283);
-      m.compose(p, q, s);
-      this.rainMesh.setMatrixAt(i, m);
-      // land splashes for a subset near the player
-      if (gy < sampleHeight(this.terrain, gx + HALF, gz + HALF) +
-          (this.micro ? this.micro.sampleDelta(gx, gz) : 0) + 0.4 && Math.random() < 0.05) {
-        this.spawnSplash(gx, sampleHeight(this.terrain, gx + HALF, gz + HALF) +
-          (this.micro ? this.micro.sampleDelta(gx, gz) : 0) + 0.03, gz);
+    const fall = dropFallSpeed(dMed);
+    // drops drift with the wind (≈55% of wind speed: real terminal-streak tilt)
+    const windX = Math.cos(windDirRad) * windMs * 0.55;
+    const windZ = Math.sin(windDirRad) * windMs * 0.55;
+    const active = intensityNorm > 0.01
+      ? Math.max(24, Math.floor(this.rainCap * Math.min(intensityNorm * 1.25, 1)))
+      : 0;
+    // newly visible drops enter around the camera
+    for (let i = this.activeDrops; i < active; i++) this.respawnDrop(i, camPos, fall, windX, windZ);
+    this.activeDrops = active;
+    this.rainGeo.instanceCount = active;
+    const micro = this.micro;
+    for (let i = 0; i < active; i++) {
+      const i3 = i * 3;
+      this.dropPos[i3] += this.dropVel[i3] * dt;
+      this.dropPos[i3 + 1] += this.dropVel[i3 + 1] * dt;
+      this.dropPos[i3 + 2] += this.dropVel[i3 + 2] * dt;
+      // wrap horizontally in the camera box (while: survives teleports)
+      let dx = this.dropPos[i3] - camPos.x;
+      while (dx > this.boxR) { this.dropPos[i3] -= 2 * this.boxR; dx -= 2 * this.boxR; }
+      while (dx < -this.boxR) { this.dropPos[i3] += 2 * this.boxR; dx += 2 * this.boxR; }
+      let dz = this.dropPos[i3 + 2] - camPos.z;
+      while (dz > this.boxR) { this.dropPos[i3 + 2] -= 2 * this.boxR; dz -= 2 * this.boxR; }
+      while (dz < -this.boxR) { this.dropPos[i3 + 2] += 2 * this.boxR; dz += 2 * this.boxR; }
+      // landing? (terrain + micro window, so drops find dug holes too)
+      const gy = sampleHeight(this.terrain, this.dropPos[i3] + HALF, this.dropPos[i3 + 2] + HALF)
+        + (micro ? micro.sampleDelta(this.dropPos[i3], this.dropPos[i3 + 2]) : 0);
+      if (this.dropPos[i3 + 1] <= gy + 0.03) {
+        const ddx = this.dropPos[i3] - playerPos.x, ddz = this.dropPos[i3 + 2] - playerPos.z;
+        if (ddx * ddx + ddz * ddz < 81 && Math.random() < 0.22) {
+          // rings read larger on standing water
+          const onPond = this.ground.hPond[cellIndex(this.dropPos[i3], this.dropPos[i3 + 2])] > 0.002;
+          this.spawnSplash(this.dropPos[i3], gy + 0.03, this.dropPos[i3 + 2], onPond ? 1.5 : 0.95);
+        }
+        this.respawnDrop(i, camPos, fall, windX, windZ);
       }
     }
-    this.rainMesh.instanceMatrix.needsUpdate = true;
+    this.aPosAttr.needsUpdate = true;
+    this.aVelAttr.needsUpdate = true;
 
     // splash lifecycle
+    const m = new THREE.Matrix4();
     const sm = new THREE.Matrix4();
     const sq = new THREE.Quaternion();
     const ss = new THREE.Vector3();
@@ -511,16 +620,16 @@ export class StormFX {
         continue;
       }
       const age = life;
-      const scale = 0.14 + age * 1.1;
-      const alpha = Math.max(0, 1 - age / 0.45);
+      const scale = this.splashScale[i] * (0.09 + age * 0.55);
+      const alpha = Math.max(0, 1 - age / 0.4);
       sp.set(this.splashPos[i * 3], this.splashPos[i * 3 + 1], this.splashPos[i * 3 + 2]);
       sq.identity();
       ss.set(scale, 1, scale);
       // shrink alpha → emulate by shrinking scale near end
-      ss.multiplyScalar(alpha * 0.8 + 0.2);
+      ss.multiplyScalar(alpha * 0.75 + 0.25);
       sm.compose(sp, sq, ss);
       this.splash.setMatrixAt(i, sm);
-      this.splashLife[i] = age + dt >= 0.45 ? -1 : age + dt;
+      this.splashLife[i] = age + dt >= 0.4 ? -1 : age + dt;
     }
     this.splash.instanceMatrix.needsUpdate = true;
 
@@ -555,6 +664,7 @@ export class StormFX {
     const pm = this.puddleMesh.material as THREE.ShaderMaterial;
     pm.uniforms.uTime.value = elapsed;
     pm.uniforms.uRain.value = Math.min(rainAtPlayer / 50, 1);
+    pm.uniforms.uWindDir.value.set(Math.cos(windDirRad), Math.sin(windDirRad));
     pm.uniforms.uSky.value.setRGB(
       0.62 - 0.42 * cloudiness, 0.72 - 0.38 * cloudiness, 0.82 - 0.33 * cloudiness);
     pm.uniforms.uSun.value.setRGB(1.0, 0.85, 0.62).multiplyScalar(1 - 0.92 * cloudiness);
@@ -562,13 +672,12 @@ export class StormFX {
     pm.uniforms.uFogColor.value.copy(fogColor);
     pm.uniforms.uFogDensity.value = fogDensity;
     pm.uniforms.uCamPos.value.copy(camPos);
-    void playerPos;
 
     // the contact-tier film sheet rides the same sky/sun/fog environment
     if (this.micro) {
       this.micro.setWaterEnv(elapsed, Math.min(rainAtPlayer / 50, 1), camPos, sunDir,
         pm.uniforms.uSky.value as THREE.Color, pm.uniforms.uSun.value as THREE.Color,
-        fogColor, fogDensity);
+        fogColor, fogDensity, windDirRad);
     }
 
     // audio levels

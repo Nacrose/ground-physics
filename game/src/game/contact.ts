@@ -358,6 +358,8 @@ export class MicroTerrain {
       uSky: { value: new THREE.Color(0x8fa3b5) },
       uSun: { value: new THREE.Color(0xffd9a8) },
       uSunDir: { value: new THREE.Vector3(0.5, 0.4, -0.6) },
+      uWet: { value: new THREE.Color(0x23281f) }, // wet-earth absorption tint
+      uWindDir: { value: new THREE.Vector2(1, 0) },
       uFogColor: { value: new THREE.Color(0xe6d2ac) },
       uFogDensity: { value: 0.0026 },
       uCamPos: { value: new THREE.Vector3() },
@@ -383,32 +385,37 @@ export class MicroTerrain {
           vec4 wInfo = texture2D(uWaterTex, mUv);
           vDepth = wInfo.g * ${WATER_DEPTH_ENCODE.toFixed(2)};
           vEdge = 1.0 - smoothstep(uMicroEdge, uMicroEdge + 0.45, max(abs(position.x), abs(position.z)));
-          vec3 wp = vec3(position.x + uMicroOrigin.x, aBaseH + surfOff(mUv) + 0.02, position.z + uMicroOrigin.y);
+          vec3 wp = vec3(position.x + uMicroOrigin.x, aBaseH + surfOff(mUv) + 0.012, position.z + uMicroOrigin.y);
           vWorld = wp;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position.x, aBaseH + surfOff(mUv) + 0.02, position.z, 1.0);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position.x, aBaseH + surfOff(mUv) + 0.012, position.z, 1.0);
         }`,
       fragmentShader: `
         uniform float uTime, uRain, uFogDensity;
-        uniform vec3 uSky, uSun, uSunDir, uFogColor, uCamPos;
+        uniform vec3 uSky, uSun, uSunDir, uFogColor, uCamPos, uWet;
+        uniform vec2 uWindDir;
         varying vec3 vWorld;
         varying float vDepth;
         varying float vEdge;
         void main(){
           if (vDepth < 0.0003) discard;
-          // animated normal: two travelling wave fields + rain prickle
+          // Beer-Lambert-ish depth ramp: shallow film = wet-earth sheen (the
+          // soil shows through), depth = full sky-reflecting water — the film
+          // now grades the same way as the fine-tier puddle sheet
+          float dN = 1.0 - exp(-vDepth * 8.0);
           vec2 p = vWorld.xz;
-          float w1 = sin(p.x * 1.7 + uTime * 1.9) * cos(p.y * 1.3 - uTime * 1.4);
-          float w2 = sin((p.x + p.y) * 2.6 + uTime * 2.7) * 0.5;
-          float prickle = uRain * (sin(p.x * 23.0 + uTime * 12.0) * sin(p.y * 19.0 - uTime * 10.0));
-          vec3 n = normalize(vec3(w1 * 0.05 + w2 * 0.05 + prickle * 0.09, 1.0, w2 * 0.05 - w1 * 0.04 + prickle * 0.08));
+          // wind-aligned capillary waves — deeper water is livelier — + prickle
+          float w1 = sin(dot(p, uWindDir) * 2.6 + uTime * 2.2) * cos(p.x * 1.9 - uTime * 1.5);
+          float w2 = sin((p.x + p.y) * 3.4 + uTime * 3.0) * 0.5;
+          float prickle = uRain * (sin(p.x * 21.0 + uTime * 11.0) * sin(p.y * 17.0 - uTime * 9.0));
+          float amp = 0.030 + 0.055 * dN;
+          vec3 n = normalize(vec3(w1 * amp + w2 * amp + prickle * 0.10, 1.0,
+                                  w2 * amp - w1 * amp * 0.8 + prickle * 0.09));
           vec3 v = normalize(uCamPos - vWorld);
-          float fres = pow(1.0 - max(dot(v, n), 0.0), 2.2);
-          float glint = pow(max(dot(reflect(-v, n), normalize(uSunDir)), 0.0), 60.0);
-          vec3 col = uSky * (0.62 + 0.9 * fres);
-          col += uSun * glint * 1.4;
-          // shallow films read as a dark wet sheen; depth ramps to full water
-          float dNorm = clamp((vDepth - 0.0003) / 0.05, 0.0, 1.0);
-          float alpha = (0.46 + 0.46 * dNorm) * vEdge;
+          float fres = pow(1.0 - max(dot(v, n), 0.0), 2.4);
+          float glint = pow(max(dot(reflect(-v, n), normalize(uSunDir)), 0.0), 90.0);
+          vec3 col = mix(uWet, uSky * (0.60 + 0.90 * fres), dN);
+          col += uSun * glint * 1.5;
+          float alpha = (0.34 + 0.50 * dN) * vEdge;
           float fogF = 1.0 - exp(-uFogDensity * uFogDensity * dot(uCamPos - vWorld, uCamPos - vWorld));
           col = mix(col, uFogColor, clamp(fogF, 0.0, 1.0));
           gl_FragColor = vec4(col, alpha);
@@ -423,9 +430,10 @@ export class MicroTerrain {
     this.scene.add(wm);
   }
 
-  /** per-frame visual env for the film (camera, sun, fog, rain) — engine wires it */
+  /** per-frame visual env for the film (camera, sun, fog, rain, wind) — engine wires it */
   setWaterEnv(t: number, rain: number, camPos: THREE.Vector3, sunDir: THREE.Vector3,
-    sky: THREE.Color, sun: THREE.Color, fogColor: THREE.Color, fogDensity: number) {
+    sky: THREE.Color, sun: THREE.Color, fogColor: THREE.Color, fogDensity: number,
+    windDirRad = 0) {
     if (!this.waterMesh.visible) return;
     const u = this.waterUniforms;
     u.uTime.value = t;
@@ -436,6 +444,7 @@ export class MicroTerrain {
     (u.uSun.value as THREE.Color).copy(sun);
     (u.uFogColor.value as THREE.Color).copy(fogColor);
     u.uFogDensity.value = fogDensity;
+    (u.uWindDir.value as THREE.Vector2).set(Math.cos(windDirRad), Math.sin(windDirRad));
   }
 
   /** World wires the shared ground-state texture in (single source of truth) */
@@ -834,12 +843,13 @@ export class MicroTerrain {
     let qPen = qUlt * (1 + 0.06 * Math.min(traffic, 5));
     if (s.consistency === 2) qPen *= 0.35;
     if (this.ground.disturbed[k] > 0) qPen *= 0.6; // structure broken
-    qPen *= 1 - 0.5 * churnFrac; // cracked crust accepts the blade
+    qPen *= 1 - 0.65 * churnFrac; // cracked ground really opens up for the blade
     const hard = s.consistency === 0 && s.wPct < tex.PL * 0.75 && qPen > 260
       && churnFrac < 0.35; // broken ground is no longer virgin: the spade works
-    const dPen = Math.max(0.03, Math.min(0.35 * (45 / Math.max(qPen, 45)), 0.35)) * (hard ? 0.45 : 1);
+    const dPen = Math.max(0.05, Math.min(0.55 * (45 / Math.max(qPen, 45)), 0.55)) * (hard ? 0.45 : 1);
     // 2) cut volume — a proper long-handled spade: 0.30 m blade × 0.26 m
-    // bite, ~2× the old bite at twice the cadence (substantial digging)
+    // bite, up to 0.55 m penetration in opened ground at a 0.32 s swing —
+    // ≈2.4× the phase-1 throughput (substantial digging, spec §11)
     const bite = 0.30 * 0.26 * dPen * (hard ? 0.6 : 1);
     // crater: the blade's own footprint (0.22 m wide × 0.18 m bite). The
     // paraboloid peak 1.9·dPen makes the GEOMETRIC crater volume match the

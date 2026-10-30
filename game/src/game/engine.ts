@@ -59,7 +59,7 @@ export class Game {
   // spade stroke state machine
   private digging = false;
   private digTimer = 0;
-  private digDur = 0.5; // a full swing every half second — substantial digging
+  private digDur = 0.32; // a full swing every 0.32 s — dig throughput ×2–3 (spec §11)
   private digApplied = false;
   private digCooldown = 0;
 
