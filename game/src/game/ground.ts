@@ -57,6 +57,9 @@ export interface CellReport {
   rutM: number;
   infilCapMmH: number;
   mudFactor: number;
+  branchLabel: string;
+  traffic: number;
+  disturbed: boolean;
 }
 
 export class Ground {
@@ -76,6 +79,12 @@ export class Ground {
   mudFactor = new Float32Array(N); // smooth 0..1 for rendering
   wetness = new Float32Array(N); // top-layer wetness 0..1 for darkening
   rainField = new Float32Array(N); // mm/h per cell (current)
+  // hysteretic state (spec §2)
+  branch = new Uint8Array(N); // retention branch: 0 drying (main), 1 wetting (scanning)
+  traffic = new Uint8Array(N); // cumulative traffic compaction memory
+  disturbed = new Uint8Array(N); // dig/till disturbance: crust broken, layers mixed
+  /** compaction accumulator (fine-grained footfall memory; traffic = floor) */
+  private compAcc = new Float32Array(N);
   // spatial pattern state
   private blobPhase = 0;
   private bandX = -0.35; // band centre, fraction of world
@@ -97,6 +106,7 @@ export class Ground {
       const th = tex.thetaS * initSat * jit;
       for (let L = 0; L < 4; L++) this.theta[L][k] = th;
       this.hPond[k] = 0; this.infiltF[k] = 0; this.keCum[k] = 0; this.rut[k] = 0;
+      this.branch[k] = 0; this.traffic[k] = 0; this.disturbed[k] = 0; this.compAcc[k] = 0;
     }
   }
 
@@ -217,7 +227,11 @@ export class Ground {
       if (avail <= 1e-7) { F[k] = Math.max(F[k], 2e-3); continue; }
       const tex = SOIL_TEXTURES[soil[k]];
       const seal = 1 - CFG.keSealFrac * Math.min(ke[k] / CFG.keSealJ, 1);
-      const ks = (tex.kSatMmH / 3600) / 1000 * seal; // m/s
+      // disturbed soil infiltrates faster (crust broken, structure open);
+      // compacted paths shed water — the desire-path feedback (spec §2)
+      const kTraffic = 1 - 0.12 * Math.min(this.traffic[k], 5);
+      const kDig = this.disturbed[k] > 0 ? 1.7 : 1;
+      const ks = (tex.kSatMmH / 3600) / 1000 * seal * kTraffic * kDig; // m/s
       const dTheta = Math.max(tex.thetaS - theta0[k], 1e-3);
       const Fk = Math.max(F[k], 2e-3);
       const psiF = Math.min(
@@ -232,6 +246,7 @@ export class Ground {
       hP[k] -= infil;
       theta0[k] = Math.min(theta0[k] + infil / dz[0], tex.thetaS);
       F[k] += infil;
+      if (infil > 1e-7) this.branch[k] = 1; // wetting scan
     }
 
     // 3) percolation between layers (Clapp-Hornberger K(theta))
@@ -284,6 +299,7 @@ export class Ground {
           (theta0[k] - tex.thetaWp) / Math.max(tex.thetaFc - tex.thetaWp, 1e-3), 1));
         const eSoil = Math.min(ePotDt * beta, Math.max(theta0[k] - tex.thetaWp, 0) * dz[0]);
         theta0[k] -= eSoil / dz[0];
+        if (eSoil > 1e-7) this.branch[k] = 0; // back on the main drying curve
       }
     }
 
@@ -347,8 +363,12 @@ export class Ground {
       const th = (CFG.soilDz[0] / 0.3) * th0[k] + (CFG.soilDz[1] / 0.3) * th1[k];
       const Sr = Math.max(0, Math.min(th / tex.thetaS, 1));
       const wPct = (100 * th * 1000) / tex.rhoDry;
-      // suction from retention curve
+      // suction from retention curve — DUAL BRANCH (spec §3): the Clapp-
+      // Hornberger power law is the main DRYING curve; a freshly wetted cell
+      // sits on the scanning wetting branch at ~0.42× suction, so wetting
+      // weakens fast while drying recovers strength slowly — the drying crust.
       let psiMm = tex.psiSmm * Math.pow(Math.max(th / tex.thetaS, 1e-3), -tex.b);
+      if (this.branch[k] === 1) psiMm *= 0.42;
       let suction = Math.min(psiMm * 9.81e-3, CFG.suctionCapKpa);
       if (Sr >= 0.999) suction = 0;
       // apparent cohesion (Fredlund)
@@ -391,7 +411,9 @@ export class Ground {
   /** player/vehicle rutting: punching shear into soft ground [m sinkage] */
   applyWheelLoad(x: number, y: number, contactKpa: number, isPlayer: boolean): { sinkage: number; verdict: string } {
     const k = cellIndex(x, y);
-    const qUlt = this.qUlt[k];
+    // every pass leaves compaction memory (hysteretic — spec rule 8)
+    if (this.traffic[k] < 255) this.traffic[k]++;
+    const qUlt = this.qUlt[k] * (1 + 0.05 * Math.min(this.traffic[k], 5));
     const E = 120 * Math.max(this.suction[k] * this.sr[k] + 3, 10);
     const sEl = (contactKpa * CFG.footingB * (1 - 0.3 * 0.3)) / E;
     const excess = Math.max(contactKpa - qUlt, 0);
@@ -405,6 +427,34 @@ export class Ground {
     return { sinkage: sTotal, verdict };
   }
 
+  /**
+   * A walking footfall — compaction memory without rut carving (spec §2, §9).
+   * Compaction peaks at the PLASTIC optimum: dry soil barely packs further,
+   * liquid mud flows instead of compacting (the churn record lives in the
+   * micro tier), plastic soil takes the full memory. This is the seed of the
+   * desire path: a walked line sheds water, firms up and sinks less.
+   */
+  footPass(x: number, y: number, sprint = false) {
+    const k = cellIndex(x, y);
+    const cons = this.consistency[k];
+    const w = cons === 1 ? (sprint ? 1.6 : 1.3) : cons === 0 ? (sprint ? 1.2 : 0.9) : 0;
+    if (w <= 0) return;
+    this.compAcc[k] += w;
+    this.traffic[k] = Math.min(255, Math.floor(this.compAcc[k]));
+  }
+
+  /** digging disturbed this cell: crust broken, layers mixed, structure open */
+  markDug(x: number, y: number) {
+    const k = cellIndex(x, y);
+    this.disturbed[k] = 1;
+    this.keCum[k] *= 0.25; // crust shattered
+    // lift moist subsoil into the top layer (mixed, loosened)
+    const th0 = this.theta[0][k], th1 = this.theta[1][k];
+    const mixed = 0.5 * th0 + 0.5 * th1;
+    this.theta[0][k] = mixed;
+    this.theta[1][k] = mixed;
+  }
+
   /** movement penalty & visual sinkage at a world position */
   sampleMud(x: number, y: number): { mud: number; pondM: number; slow: number; sink: number; rut: number } {
     const k = cellIndex(x, y);
@@ -412,7 +462,9 @@ export class Ground {
     const pond = this.hPond[k];
     const pondSlow = Math.min(pond / 0.25, 1) * 0.45;
     const slow = Math.max(0.18, 1 - 0.68 * mud - pondSlow);
-    const sink = mud * 0.24 + Math.min(this.rut[k], 0.2);
+    // a compacted path is a hard path: prints sink less (spec §2)
+    const kComp = 1 - 0.08 * Math.min(this.traffic[k], 5);
+    const sink = (mud * 0.24 + Math.min(this.rut[k], 0.2)) * kComp;
     return { mud, pondM: pond, slow, sink, rut: this.rut[k] };
   }
 
@@ -428,7 +480,8 @@ export class Ground {
     const psiF = Math.min(Math.max((tex.psiSmm / 1000) *
       Math.pow((0.55 * tex.thetaS) / Math.max(this.theta[0][k], tex.thetaWp), -tex.b), 0.02), 0.6);
     const seal = 1 - CFG.keSealFrac * Math.min(this.keCum[k] / CFG.keSealJ, 1);
-    const fCap = ((tex.kSatMmH / 3600) / 1000) * seal * (1 + (psiF * dTheta + this.hPond[k]) / Fk);
+    const kEff = (1 - 0.12 * Math.min(this.traffic[k], 5)) * (this.disturbed[k] > 0 ? 1.7 : 1);
+    const fCap = ((tex.kSatMmH / 3600) / 1000) * seal * kEff * (1 + (psiF * dTheta + this.hPond[k]) / Fk);
     // strength chain at this cell
     const Sr = this.sr[k];
     const overLiq = Math.max(this.wPct[k] - tex.LL, 0);
@@ -458,6 +511,9 @@ export class Ground {
       rutM: this.rut[k],
       infilCapMmH: fCap * 3600 * 1000,
       mudFactor: this.mudFactor[k],
+      branchLabel: this.branch[k] === 1 ? "WETTING (scan)" : "DRYING (main)",
+      traffic: this.traffic[k],
+      disturbed: this.disturbed[k] > 0,
     };
   }
 
