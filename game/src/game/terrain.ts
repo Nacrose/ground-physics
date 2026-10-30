@@ -7,7 +7,7 @@
 
 export const WORLD_SIZE = 768; // m
 export const GRID = 192; // physics cells per side (4 m cells)
-export const MESH_SEG = 256; // render mesh segments
+export const MESH_SEG = 512; // render mesh segments — 1.5 m quads, smooth shading
 
 export interface TerrainData {
   /** height (m) on (GRID+1)^2 node grid, row-major, y*=(GRID+1) */

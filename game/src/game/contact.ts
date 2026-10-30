@@ -167,6 +167,10 @@ export class MicroTerrain {
   };
 
   private rng = lcg(7919);
+  /** spade geometry scale (settings slider): scales blade footprint +
+   *  crater ellipse — bite volume scales with it, spoil follows the bite,
+   *  so mass conservation is untouched */
+  digScale = 1;
   private relaxAccum = 0;
   private scratch = new Float32Array(NC * NC);
   private scratchV = new Float32Array(NV * NV * 3); // sized for the largest attr (vec3)
@@ -245,7 +249,10 @@ export class MicroTerrain {
       shader.uniforms.uMicroTex = { value: this.tex };
       shader.uniforms.uGroundTex = { value: this.gtRef };
       shader.uniforms.uMicroOrigin = { value: new THREE.Vector2(this.ox, this.oz) };
-      shader.uniforms.uMicroEdge = { value: MICRO_HALF - 0.7 };
+      // displacement fades OUT well inside the base-mesh resurfacing ramp
+      // (uDigBox half=8 m, ramp 7.4–8.0): delta is zero by 7.35 m so the
+      // overlay is pure terrain height exactly where the base mesh rises
+      shader.uniforms.uMicroEdge = { value: MICRO_HALF - 1.1 };
       // portal cut (tunnel.ts): the same rotated smoothstep box the terrain
       // shader uses — the overlay must open where the hillside is cut, or a
       // flat sheet of fake ground would cap the adit mouth
@@ -703,9 +710,13 @@ export class MicroTerrain {
     return d00 * (1 - u) * (1 - v) + d10 * u * (1 - v) + d01 * (1 - u) * v + d11 * u * v;
   }
 
-  /** terrain push-down box (world centre + half-extent) for the base mesh */
+  /** terrain push-down box (world centre + half-extent) for the base mesh.
+   *  Full window extent: the base mesh sinks under the OPAQUE overlay across
+   *  its whole 16 m extent and resurfaces exactly at the overlay's geometric
+   *  edge — no ring where both surfaces render at full height (that ring was
+   *  the visible "square that follows the player"). */
   digBox(): { cx: number; cz: number; half: number } {
-    return { cx: this.ox, cz: this.oz, half: MICRO_HALF - 0.75 };
+    return { cx: this.ox, cz: this.oz, half: MICRO_HALF };
   }
 
   /** soil touch state at a world position (from the fine tier) */
@@ -827,10 +838,11 @@ export class MicroTerrain {
     // next ones bite deep (substantial digging, spec §11). Scan the BLADE
     // footprint (0.30 × 0.26 m), not a wider halo, so the fraction reads
     // the crater itself.
+    const ds = this.digScale; // settings: blade size × (0.5–2)
     let churnCells = 0;
     let spoilCells = 0;
     let nCell = 0;
-    const [ci0, ci1, cj0, cj1] = this.cellRect(x, z, 0.16);
+    const [ci0, ci1, cj0, cj1] = this.cellRect(x, z, 0.16 * ds);
     for (let j = cj0; j <= cj1; j++) {
       for (let i = ci0; i <= ci1; i++, nCell++) {
         const fl = this.flags[j * NC + i];
@@ -850,13 +862,13 @@ export class MicroTerrain {
     // 2) cut volume — a proper long-handled spade: 0.30 m blade × 0.26 m
     // bite, up to 0.55 m penetration in opened ground at a 0.32 s swing —
     // ≈2.4× the phase-1 throughput (substantial digging, spec §11)
-    const bite = 0.30 * 0.26 * dPen * (hard ? 0.6 : 1);
+    const bite = 0.30 * ds * 0.26 * ds * dPen * (hard ? 0.6 : 1);
     // crater: the blade's own footprint (0.22 m wide × 0.18 m bite). The
     // paraboloid peak 1.9·dPen makes the GEOMETRIC crater volume match the
     // ledger bite exactly (mean of D√(1-r²) over the ellipse is (2/3)D).
     const yaw = Math.atan2(dirX, dirZ);
     const craterPeak = dPen * 1.9 * (hard ? 0.6 : 1);
-    const removed = -this.addProfile(x, z, yaw, 0.15, 0.13, craterPeak, -1, false, false);
+    const removed = -this.addProfile(x, z, yaw, 0.15 * ds, 0.13 * ds, craterPeak, -1, false, false);
     void removed; // crater shape is written; ledger uses the analytic bite
     // 3) spoil — same dry MASS, looser bulk (fill factor), unless already spoil
     const wasSpoil = nCell > 0 && spoilCells / nCell > 0.5;
@@ -872,7 +884,7 @@ export class MicroTerrain {
     // 4) extraction suction — saturated fines cling
     const suction = s.sr > 0.9 && s.wPct > tex.PL;
     if (suction) {
-      const rr = 0.24;
+      const rr = 0.24 * ds;
       const [ri0, ri1, rj0, rj1] = this.cellRect(x, z, rr);
       for (let j = rj0; j <= rj1; j++) {
         for (let i = ri0; i <= ri1; i++) {

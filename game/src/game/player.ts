@@ -134,6 +134,8 @@ export class Player {
 
   addPitch(d: number) { this.camPitch = Math.max(-0.5, Math.min(0.9, this.camPitch + d)); }
   addZoom(d: number) { this.camZoom = Math.max(2.8, Math.min(14, this.camZoom + d)); }
+  /** settings slider: set the camera follow distance directly [m] */
+  setZoom(z: number) { this.camZoom = Math.max(2.8, Math.min(14, z)); }
 
   /** ground height incl. micro deformations (prints, craters, spoil) and the tunnel invert */
   groundHeightAt(x: number, z: number): number {

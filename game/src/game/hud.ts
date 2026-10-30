@@ -28,6 +28,21 @@ export interface HUDState {
   tunnelLine: string | null;
 }
 
+/** one settings control (engine owns the values; HUD renders + reports) */
+export interface SettingDef {
+  key: string;
+  label: string;
+  section: string;
+  kind: "range" | "check";
+  min?: number;
+  max?: number;
+  step?: number;
+  unit?: string;
+  decimals?: number;
+}
+
+export type SettingValue = number | boolean;
+
 const MM = 188; // minimap px
 
 export class HUD {
@@ -52,6 +67,15 @@ export class HUD {
   private hintEl!: HTMLElement;
   private bootEl!: HTMLElement;
   private overlayTimer = 0;
+
+  // ---- settings panel ------------------------------------------------------
+  private settingsEl!: HTMLElement;
+  private settingsOpen = false;
+  private settingInputs = new Map<string, HTMLInputElement>();
+  private settingValEls = new Map<string, HTMLElement>();
+  private settingDefs: SettingDef[] = [];
+  private onSettingChange: ((key: string, value: SettingValue) => void) | null = null;
+  private onSettingReset: (() => void) | null = null;
 
   constructor(container: HTMLElement, terrain: TerrainData) {
     this.root = document.createElement("div");
@@ -138,6 +162,7 @@ export class HUD {
         <span>C</span><span>cinematic bars</span>
         <span>G</span><span>graphics quality</span>
         <span>M</span><span>mute</span>
+        <span>O</span><span>settings — every dial, live</span>
       </div>
       <div class="hud-hint-sub">the ground is stateful — dig it, churn it, compact it; the soil remembers</div>`;
     this.root.appendChild(this.hintEl);
@@ -201,6 +226,120 @@ export class HUD {
 
   setMuted(m: boolean) {
     this.root.classList.toggle("muted", m);
+    this.syncSettings({ muted: m });
+  }
+
+  // ------------------------------------------------------------- settings
+  /** build the live-settings panel (engine calls this once it exists) */
+  buildSettingsPanel(defs: SettingDef[], values: Record<string, SettingValue>,
+    onChange: (key: string, value: SettingValue) => void, onReset: () => void) {
+    this.settingDefs = defs;
+    this.onSettingChange = onChange;
+    this.onSettingReset = onReset;
+
+    const el = document.createElement("div");
+    el.className = "hud-settings";
+    const head = document.createElement("div");
+    head.innerHTML = `<div class="hud-settings-title">SETTINGS</div>
+      <div class="hud-settings-sub">every dial this world owns — live</div>`;
+    el.appendChild(head);
+
+    const scroll = document.createElement("div");
+    scroll.className = "hud-settings-scroll";
+    let section = "";
+    for (const d of defs) {
+      if (d.section !== section) {
+        section = d.section;
+        const sec = document.createElement("div");
+        sec.className = "hud-settings-sec";
+        sec.textContent = section;
+        scroll.appendChild(sec);
+      }
+      const row = document.createElement("div");
+      row.className = `hud-set-row${d.kind === "check" ? " check" : ""}`;
+      const lab = document.createElement("div");
+      lab.className = "hud-set-lab";
+      const name = document.createElement("span");
+      name.textContent = d.label;
+      lab.appendChild(name);
+      const val = document.createElement("span");
+      val.className = "hud-set-val";
+      lab.appendChild(val);
+      row.appendChild(lab);
+      this.settingValEls.set(d.key, val);
+
+      const input = document.createElement("input");
+      if (d.kind === "range") {
+        input.type = "range";
+        input.min = String(d.min ?? 0);
+        input.max = String(d.max ?? 1);
+        input.step = String(d.step ?? 0.1);
+        input.value = String(values[d.key] ?? d.min ?? 0);
+        input.addEventListener("input", () => {
+          const v = parseFloat(input.value);
+          this.paintSettingValue(d, v);
+          this.onSettingChange?.(d.key, v);
+        });
+      } else {
+        input.type = "checkbox";
+        input.checked = !!values[d.key];
+        input.addEventListener("change", () => {
+          this.paintSettingValue(d, input.checked);
+          this.onSettingChange?.(d.key, input.checked);
+        });
+      }
+      row.appendChild(input);
+      this.settingInputs.set(d.key, input);
+      scroll.appendChild(row);
+      this.paintSettingValue(d, values[d.key]);
+    }
+    el.appendChild(scroll);
+
+    const reset = document.createElement("button");
+    reset.className = "hud-settings-reset";
+    reset.textContent = "RESET DEFAULTS";
+    reset.addEventListener("click", () => this.onSettingReset?.());
+    el.appendChild(reset);
+    const foot = document.createElement("div");
+    foot.className = "hud-settings-foot";
+    foot.textContent = "O — CLOSE · APPLIES LIVE & SAVES";
+    el.appendChild(foot);
+
+    this.settingsEl = el;
+    this.root.appendChild(el);
+  }
+
+  private paintSettingValue(d: SettingDef, v: SettingValue) {
+    const val = this.settingValEls.get(d.key);
+    if (!val) return;
+    if (d.kind === "check") {
+      val.textContent = v ? "ON" : "OFF";
+    } else {
+      const n = v as number;
+      const dec = d.decimals ?? (d.step ?? 1) < 1 ? 1 : 0;
+      val.textContent = `${n.toFixed(dec)}${d.unit ?? ""}`;
+    }
+  }
+
+  /** show / hide the panel; returns the new open state */
+  toggleSettings(open?: boolean): boolean {
+    this.settingsOpen = open ?? !this.settingsOpen;
+    this.settingsEl?.classList.toggle("open", this.settingsOpen);
+    return this.settingsOpen;
+  }
+
+  isSettingsOpen(): boolean { return this.settingsOpen; }
+
+  /** external updates (T/G/M keys) — no onChange round-trip */
+  syncSettings(values: Record<string, SettingValue>) {
+    for (const [k, v] of Object.entries(values)) {
+      const input = this.settingInputs.get(k);
+      if (!input) continue;
+      if (input.type === "checkbox") input.checked = !!v;
+      else input.value = String(v);
+      const d = this.settingDefs.find((dd) => dd.key === k);
+      if (d) this.paintSettingValue(d, v);
+    }
   }
 
   hideBoot() {

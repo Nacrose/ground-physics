@@ -5,7 +5,7 @@
  * valley wagon (the trafficability stage).
  */
 import * as THREE from "three";
-import { GRID, MESH_SEG, WORLD_SIZE, TerrainData, sampleHeight } from "./terrain";
+import { GRID, MESH_SEG, WORLD_SIZE, TerrainData, sampleHeight, terrainNormal } from "./terrain";
 import { Ground } from "./ground";
 import { MicroTerrain, MICRO_SIZE, MICRO_HALF, DELTA_ENCODE } from "./contact";
 
@@ -96,12 +96,19 @@ export class World {
     const geo = new THREE.PlaneGeometry(WORLD_SIZE, WORLD_SIZE, MESH_SEG, MESH_SEG);
     geo.rotateX(-Math.PI / 2);
     const pos = geo.attributes.position as THREE.BufferAttribute;
+    const nrm = geo.attributes.normal as THREE.BufferAttribute;
     const colors = new Float32Array(pos.count * 3);
     const c = new THREE.Color();
+    const n: [number, number, number] = [0, 1, 0];
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i), z = pos.getZ(i);
       const h = sampleHeight(this.terrain, x + HALF, z + HALF);
       pos.setY(i, h);
+      // analytic normals — the SAME function the contact overlay bakes into
+      // aBaseN, so the 16 m deformable window shades exactly like the world
+      // around it (no visible seam where the two meshes meet)
+      terrainNormal(this.terrain, x + HALF, z + HALF, n);
+      nrm.setXYZ(i, n[0], n[1], n[2]);
       // painterly vertex tint: dry golden uplands, greener lows, rock high
       const hn = Math.min(Math.max(h / 18, 0), 1);
       const dry = new THREE.Color(0xb9985a); // dry golden grass
@@ -113,7 +120,7 @@ export class World {
       colors[i * 3] = c.r * m; colors[i * 3 + 1] = c.g * m; colors[i * 3 + 2] = c.b * m;
     }
     geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-    geo.computeVertexNormals();
+    nrm.needsUpdate = true;
 
     const mat = new THREE.MeshStandardMaterial({
       vertexColors: true, roughness: 0.96, metalness: 0.0,

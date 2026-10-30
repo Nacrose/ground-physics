@@ -12,7 +12,7 @@ import * as THREE from "three";
 import { GRID, WORLD_SIZE, TerrainData, sampleHeight, cellIndex } from "./terrain";
 import { Ground } from "./ground";
 import { dropFallSpeed, medianDropMm } from "./params";
-import { MicroTerrain } from "./contact";
+import { MicroTerrain, MICRO_HALF } from "./contact";
 
 const HALF = WORLD_SIZE / 2;
 
@@ -56,10 +56,13 @@ export class StormFX {
 
   // audio
   private audioCtx: AudioContext | null = null;
+  private masterGain: GainNode | null = null;
   private rainGain: GainNode | null = null;
   private windGain: GainNode | null = null;
   private noiseBuf: AudioBuffer | null = null;
   muted = false;
+  /** master volume 0..1 (settings slider) */
+  volume = 0.8;
 
   constructor(scene: THREE.Scene, terrain: TerrainData, ground: Ground, rainCount = 5200,
     micro?: MicroTerrain) {
@@ -196,7 +199,8 @@ export class StormFX {
           float r = length(c) * 2.0;
           float ring = smoothstep(0.55, 0.8, r) * (1.0 - smoothstep(0.85, 1.0, r));
           float dots = smoothstep(0.9, 1.0, r);
-          float a = (ring + dots * 0.6) * (1.0 - r * 0.4);
+          // die exactly at the quad rim — no faint square corners
+          float a = (ring + dots * 0.6) * (1.0 - smoothstep(0.82, 1.0, r));
           gl_FragColor = vec4(vec3(0.86, 0.90, 0.94), a * 0.42);
         }`,
     });
@@ -277,14 +281,25 @@ export class StormFX {
         uFogColor: { value: new THREE.Color(0xe6d2ac) },
         uFogDensity: { value: 0.0026 },
         uCamPos: { value: new THREE.Vector3() },
+        // the contact window's film sheet owns the water INSIDE the window —
+        // the fine-tier sheet dissolves approaching it (no double-stacked
+        // water square that follows the player)
+        uWinOrigin: { value: new THREE.Vector2(0, 0) },
+        uWinHalf: { value: MICRO_HALF - 0.5 },
       },
       vertexShader: `
         attribute float aDepth; // pond depth at this vertex [m]
+        uniform vec2 uWinOrigin;
+        uniform float uWinHalf;
         varying vec3 vWorld;
         varying float vDepth;
+        varying float vWin;
         void main(){
           vWorld = position;
           vDepth = aDepth;
+          // 0 inside the micro window → 1 beyond a 1.2 m handoff band
+          float wd = max(abs(position.x - uWinOrigin.x), abs(position.z - uWinOrigin.y));
+          vWin = smoothstep(uWinHalf, uWinHalf + 1.2, wd);
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }`,
       fragmentShader: `
@@ -293,6 +308,7 @@ export class StormFX {
         uniform vec2 uWindDir;
         varying vec3 vWorld;
         varying float vDepth;
+        varying float vWin;
         void main(){
           if (vDepth < 0.0006) discard;
           // Beer-Lambert-ish depth ramp: shallow film reads as a wet-earth
@@ -312,8 +328,9 @@ export class StormFX {
           vec3 col = mix(uWet, uSky * (0.60 + 0.90 * fres), dN);
           col += uSun * glint * 1.6;
           // alpha grows with optical depth; the vertex-interpolated depth
-          // feathers the waterline instead of snapping square cell plates
-          float alpha = (0.34 + 0.50 * dN) * smoothstep(0.0006, 0.005, vDepth);
+          // feathers the waterline, vWin hands off to the contact film sheet
+          float alpha = (0.34 + 0.50 * dN) * smoothstep(0.0006, 0.005, vDepth) * vWin;
+          if (alpha < 0.004) discard;
           float fogF = 1.0 - exp(-uFogDensity * uFogDensity * dot(uCamPos - vWorld, uCamPos - vWorld));
           col = mix(col, uFogColor, clamp(fogF, 0.0, 1.0));
           gl_FragColor = vec4(col, alpha);
@@ -325,7 +342,11 @@ export class StormFX {
     this.scene.add(this.puddleMesh);
   }
 
-  /** rebuild puddle quads from the ponding field (every physics tick) */
+  /** rebuild puddle quads from the ponding field (every physics tick).
+   *  The sheet DRAPES the ground: every quad corner sits at that corner's own
+   *  ground height + its corner-interpolated water depth, so adjacent quads
+   * share corner heights — a continuous sloping film instead of flat square
+   * plates hovering at one cell-centre height (the "voxel water" look). */
   rebuildPuddles() {
     const hPond = this.ground.hPond;
     const ruts = this.ground.rut;
@@ -348,21 +369,30 @@ export class StormFX {
       }
       return c > 0 ? s / c : 0;
     };
+    // ground height (terrain + fine dynamic lift + micro relief) at a corner —
+    // the same stack the contact overlay renders, so film and ground agree
+    const micro = this.micro;
+    const cornerGround = (i: number, j: number): number => {
+      const x = i * cell - HALF, z = j * cell - HALF;
+      return sampleHeight(this.terrain, i * cell, j * cell)
+        + this.ground.dynLiftAt(x, z)
+        + (micro ? micro.sampleDelta(x, z) : 0);
+    };
     for (let j = 0; j < GRID; j++) {
       for (let i = 0; i < GRID; i++) {
         const k = j * GRID + i;
         const depth = hPond[k] + ruts[k] * 0.35;
-        if (depth < 0.0016) continue; // ~1.6 mm minimum film
+        if (depth < 0.0012) continue; // ~1.2 mm minimum film
         const x0 = i * cell - HALF, x1 = x0 + cell;
         const z0 = j * cell - HALF, z1 = z0 + cell;
-        const xc = (x0 + x1) / 2, zc = (z0 + z1) / 2;
         const d00 = cornerDepth(i, j), d10 = cornerDepth(i + 1, j);
         const d11 = cornerDepth(i + 1, j + 1), d01 = cornerDepth(i, j + 1);
-        const yC = sampleHeight(this.terrain, xc + HALF, zc + HALF) +
-          this.ground.dynLiftAt(xc, zc) +
-          (this.micro ? this.micro.sampleDelta(xc, zc) : 0) +
-          0.01 + Math.min(depth, 0.3) * 0.45;
-        verts.push(x0, yC, z0, x1, yC, z0, x1, yC, z1, x0, yC, z0, x1, yC, z1, x0, yC, z1);
+        // per-corner surface = ground + depth (+12 mm z-fight guard)
+        const y00 = cornerGround(i, j) + 0.012 + d00;
+        const y10 = cornerGround(i + 1, j) + 0.012 + d10;
+        const y11 = cornerGround(i + 1, j + 1) + 0.012 + d11;
+        const y01 = cornerGround(i, j + 1) + 0.012 + d01;
+        verts.push(x0, y00, z0, x1, y10, z0, x1, y11, z1, x0, y00, z0, x1, y11, z1, x0, y01, z1);
         depths.push(d00, d10, d11, d00, d11, d01);
       }
     }
@@ -389,11 +419,21 @@ export class StormFX {
   }
 
   // ------------------------------------------------------------------- audio
+  private out(): AudioNode {
+    return this.masterGain ?? this.audioCtx!.destination;
+  }
+
   initAudio() {
     if (this.audioCtx) return;
     try {
       const ctx = new AudioContext();
       this.audioCtx = ctx;
+      // master gain: ONE fader every sound passes through — mute ramps it
+      // to zero (the old code only stopped UPDATING the rain/wind gains, so
+      // a live storm kept hissing after "mute")
+      this.masterGain = ctx.createGain();
+      this.masterGain.gain.value = this.muted ? 0 : this.volume;
+      this.masterGain.connect(ctx.destination);
       // 2 s of white noise, looped
       const len = ctx.sampleRate * 2;
       const buf = ctx.createBuffer(1, len, ctx.sampleRate);
@@ -412,7 +452,7 @@ export class StormFX {
       bp.type = "bandpass"; bp.frequency.value = 2400; bp.Q.value = 0.6;
       this.rainGain = ctx.createGain();
       this.rainGain.gain.value = 0;
-      rainSrc.connect(bp).connect(this.rainGain).connect(ctx.destination);
+      rainSrc.connect(bp).connect(this.rainGain).connect(this.out());
       rainSrc.start();
       // wind: lowpassed noise
       const windSrc = ctx.createBufferSource();
@@ -421,9 +461,40 @@ export class StormFX {
       lp.type = "lowpass"; lp.frequency.value = 420;
       this.windGain = ctx.createGain();
       this.windGain.gain.value = 0;
-      windSrc.connect(lp).connect(this.windGain).connect(ctx.destination);
+      windSrc.connect(lp).connect(this.windGain).connect(this.out());
       windSrc.start();
     } catch { /* audio unavailable */ }
+  }
+
+  /** master volume 0..1 (settings slider) */
+  setVolume(v: number) {
+    this.volume = Math.max(0, Math.min(1, v));
+    this.applyMaster();
+  }
+
+  /** real mute: the master fader ramps to silence in ~40 ms */
+  setMuted(m: boolean) {
+    this.muted = m;
+    this.applyMaster();
+  }
+
+  private applyMaster() {
+    const g = this.masterGain, ctx = this.audioCtx;
+    if (!g || !ctx) return;
+    const target = this.muted ? 0 : this.volume;
+    g.gain.cancelScheduledValues(ctx.currentTime);
+    if (ctx.state === "running") {
+      g.gain.setTargetAtTime(target, ctx.currentTime, 0.04);
+    } else {
+      // suspended context (autoplay policy / headless): apply instantly —
+      // the ramp times are frozen while the clock stands still
+      g.gain.value = target;
+    }
+  }
+
+  /** QA: the live master fader value (0 when muted) */
+  masterLevel(): number {
+    return this.masterGain ? this.masterGain.gain.value : -1;
   }
 
   playThunder(power: number) {
@@ -441,7 +512,7 @@ export class StormFX {
     g.gain.setValueAtTime(0.0001, ctx.currentTime);
     g.gain.exponentialRampToValueAtTime(peak, ctx.currentTime + 0.06);
     g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 3.4 + power);
-    src.connect(lp).connect(g).connect(ctx.destination);
+    src.connect(lp).connect(g).connect(this.out());
     src.start();
     src.stop(ctx.currentTime + 4.5);
   }
@@ -481,7 +552,7 @@ export class StormFX {
       g.gain.setValueAtTime(0.11 * power, t0);
       g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.16);
     }
-    src.connect(f).connect(g).connect(ctx.destination);
+    src.connect(f).connect(g).connect(this.out());
     src.start(t0);
     src.stop(t0 + dur + 0.05);
   }
@@ -504,7 +575,7 @@ export class StormFX {
     g.gain.setValueAtTime(0.0001, t0);
     g.gain.exponentialRampToValueAtTime(Math.min(0.16, 0.07 + strength * 0.1), t0 + 0.02);
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.16);
-    src.connect(f).connect(g).connect(ctx.destination);
+    src.connect(f).connect(g).connect(this.out());
     src.start(t0);
     src.stop(t0 + 0.2);
     // the pop itself: short low sine
@@ -515,7 +586,7 @@ export class StormFX {
     const og = ctx.createGain();
     og.gain.setValueAtTime(0.1 * strength, t0 + 0.02);
     og.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.1);
-    osc.connect(og).connect(ctx.destination);
+    osc.connect(og).connect(this.out());
     osc.start(t0 + 0.02);
     osc.stop(t0 + 0.12);
   }
@@ -550,7 +621,7 @@ export class StormFX {
       g.gain.setValueAtTime(0.09, t0);
       g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.12);
     }
-    src.connect(f).connect(g).connect(ctx.destination);
+    src.connect(f).connect(g).connect(this.out());
     src.start(t0);
     src.stop(t0 + 0.25);
   }
@@ -665,6 +736,10 @@ export class StormFX {
     pm.uniforms.uTime.value = elapsed;
     pm.uniforms.uRain.value = Math.min(rainAtPlayer / 50, 1);
     pm.uniforms.uWindDir.value.set(Math.cos(windDirRad), Math.sin(windDirRad));
+    // the fine sheet dissolves inside the contact window (film owns it there)
+    if (this.micro) {
+      (pm.uniforms.uWinOrigin.value as THREE.Vector2).set(this.micro.ox, this.micro.oz);
+    }
     pm.uniforms.uSky.value.setRGB(
       0.62 - 0.42 * cloudiness, 0.72 - 0.38 * cloudiness, 0.82 - 0.33 * cloudiness);
     pm.uniforms.uSun.value.setRGB(1.0, 0.85, 0.62).multiplyScalar(1 - 0.92 * cloudiness);
@@ -680,12 +755,12 @@ export class StormFX {
         fogColor, fogDensity, windDirRad);
     }
 
-    // audio levels
-    if (this.rainGain && !this.muted) {
+    // audio levels — always tracked; the master fader owns mute/volume
+    if (this.rainGain) {
       const target = Math.min(rainAtPlayer / 90, 1) * 0.24;
       this.rainGain.gain.value += (target - this.rainGain.gain.value) * Math.min(dt * 3, 1);
     }
-    if (this.windGain && !this.muted) {
+    if (this.windGain) {
       const target = Math.min(windMs / 25, 1) * 0.16;
       this.windGain.gain.value += (target - this.windGain.gain.value) * Math.min(dt * 3, 1);
     }
