@@ -123,7 +123,8 @@ export class HUD {
         <span>SCROLL</span><span>camera zoom</span>
         <span>F</span><span>dig (hold) — spade</span>
         <span>E</span><span>inspect soil</span>
-        <span>1 – 5</span><span>weather scenario</span>
+        <span>1 – 5</span><span>weather front over this ground</span>
+        <span>Shift + 1 – 5</span><span>fresh scenario world</span>
         <span>T</span><span>time speed</span>
         <span>C</span><span>cinematic bars</span>
         <span>G</span><span>graphics quality</span>

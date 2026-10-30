@@ -154,16 +154,25 @@ export class Game {
     return this.timelines.get(key)!;
   }
 
-  private async loadPreset(key: string) {
+  /**
+   * Switch the weather scenario. By default this is a FRONT ROLLING IN over
+   * the existing world: soil moisture, compaction, ruts, craters and spoil
+   * all persist — the weather writes to the ground, it never erases it
+   * (design §0: the ground is stateful; front changes are not resets).
+   * Pass reset=true only for a fresh scenario world.
+   */
+  private async loadPreset(key: string, reset = false) {
     const tl = await this.fetchTimeline(key);
     if (this.disposed || !this.world) return;
     const def = PRESETS.find((p) => p.key === key)!;
     this.weather = new WeatherPlayer(def, tl);
-    this.ground.reset(def.initSat);
-    this.ground.patternTime = 0;
-    this.micro.reset();
-    this.world.wagon.position.y = this.wagonBaseY;
-    this.world.wagon.rotation.z = 0;
+    if (reset) {
+      this.ground.reset(def.initSat);
+      this.ground.patternTime = 0;
+      this.micro.reset();
+      this.world.wagon.position.y = this.wagonBaseY;
+      this.world.wagon.rotation.z = 0;
+    }
     this.ground.packTexture(this.terrain.road);
     this.world.refreshGroundTexture();
     this.fx.rebuildPuddles();
@@ -198,9 +207,13 @@ export class Game {
   fastForward(gameMinutes: number) {
     const w = this.weather;
     if (!w) return;
-    const now2 = w.now();
     const steps = Math.max(1, Math.min(Math.round(gameMinutes), 720));
     for (let i = 0; i < steps; i++) {
+      // advance the weather clock one GAME minute (advance() works in real
+      // seconds scaled by timescale), then sample the timeline fresh —
+      // otherwise every step replays the same stale snapshot.
+      w.advance(60 / Math.max(w.timescale, 1e-6));
+      const now2 = w.now();
       this.ground.update({
         coreRainMmH: now2.rainMmH,
         windMs: now2.windMs,
@@ -252,7 +265,8 @@ export class Game {
     const presetKeys = ["Digit1", "Digit2", "Digit3", "Digit4", "Digit5"];
     const pi = presetKeys.indexOf(code);
     if (pi >= 0) {
-      try { await this.loadPreset(PRESETS[pi].key); } catch { /* keep old */ }
+      // bare digit: new front over the SAME ground; Shift+digit: fresh world
+      try { await this.loadPreset(PRESETS[pi].key, e.shiftKey); } catch { /* keep old */ }
     }
   }
 

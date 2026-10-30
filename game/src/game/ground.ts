@@ -85,6 +85,10 @@ export class Ground {
   disturbed = new Uint8Array(N); // dig/till disturbance: crust broken, layers mixed
   /** compaction accumulator (fine-grained footfall memory; traffic = floor) */
   private compAcc = new Float32Array(N);
+  /** per-step infiltration flux [m] — branch flips on the NET water tendency */
+  private wetFlux = new Float32Array(N);
+  /** sub-grid basin outflow ledger [m3] (depression-cap spillover, spec §4) */
+  basinOutflowM3 = 0;
   // spatial pattern state
   private blobPhase = 0;
   private bandX = -0.35; // band centre, fraction of world
@@ -107,7 +111,9 @@ export class Ground {
       for (let L = 0; L < 4; L++) this.theta[L][k] = th;
       this.hPond[k] = 0; this.infiltF[k] = 0; this.keCum[k] = 0; this.rut[k] = 0;
       this.branch[k] = 0; this.traffic[k] = 0; this.disturbed[k] = 0; this.compAcc[k] = 0;
+      this.wetFlux[k] = 0;
     }
+    this.basinOutflowM3 = 0;
   }
 
   /** saturation vapor pressure [kPa] (Magnus, ported spirit of Bolton) */
@@ -224,7 +230,7 @@ export class Ground {
     const hP = this.hPond, F = this.infiltF;
     for (let k = 0; k < N; k++) {
       const avail = hP[k];
-      if (avail <= 1e-7) { F[k] = Math.max(F[k], 2e-3); continue; }
+      if (avail <= 1e-7) { F[k] = Math.max(F[k], 2e-3); this.wetFlux[k] = 0; continue; }
       const tex = SOIL_TEXTURES[soil[k]];
       const seal = 1 - CFG.keSealFrac * Math.min(ke[k] / CFG.keSealJ, 1);
       // disturbed soil infiltrates faster (crust broken, structure open);
@@ -246,7 +252,7 @@ export class Ground {
       hP[k] -= infil;
       theta0[k] = Math.min(theta0[k] + infil / dz[0], tex.thetaS);
       F[k] += infil;
-      if (infil > 1e-7) this.branch[k] = 1; // wetting scan
+      this.wetFlux[k] = infil;
     }
 
     // 3) percolation between layers (Clapp-Hornberger K(theta))
@@ -299,7 +305,11 @@ export class Ground {
           (theta0[k] - tex.thetaWp) / Math.max(tex.thetaFc - tex.thetaWp, 1e-3), 1));
         const eSoil = Math.min(ePotDt * beta, Math.max(theta0[k] - tex.thetaWp, 0) * dz[0]);
         theta0[k] -= eSoil / dz[0];
-        if (eSoil > 1e-7) this.branch[k] = 0; // back on the main drying curve
+        // retention branch follows the NET tendency (spec §3): rain of mm must
+        // beat drizzle-scale evaporation of µm, not lose to it by run order.
+        const netWet = this.wetFlux[k] - eSoil;
+        if (netWet > 1e-7) this.branch[k] = 1; // wetting scan
+        else if (netWet < -1e-7) this.branch[k] = 0; // main drying curve
       }
     }
 
@@ -352,6 +362,20 @@ export class Ground {
       }
     }
     for (let k = 0; k < N; k++) h[k] += inflow[k] - outflow[k];
+
+    // depression-cap spillover. This catchment has no mapped outlet channel
+    // yet (rivers are Phase 3), so a closed bowl would silently pile up a
+    // phantom lake — 13+ m of invisible water keeping the valley on the
+    // wetting branch for months. Water beyond a legible sheet depth leaves
+    // as sub-grid basin outflow, booked in the ledger so mass is accounted,
+    // never silently destroyed (spec §4: conserve, and never forget).
+    const cap = CFG.depressionMaxM;
+    for (let k = 0; k < N; k++) {
+      if (h[k] > cap) {
+        this.basinOutflowM3 += (h[k] - cap) * CELL * CELL;
+        h[k] = cap;
+      }
+    }
   }
 
   /** recompute geotech state from moisture (ported from geotech.py). */

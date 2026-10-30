@@ -73,6 +73,10 @@ export const CFG = {
   maxRutM: 0.5,
   keSealJ: 800.0, // rain KE for full surface sealing
   keSealFrac: 0.35, // max Ks reduction from crusting
+  /** depression-storage cap [m]: beyond this, routed water spills out of the
+   *  catchment as sub-grid basin outflow (no river outlet until Phase 3 —
+   *  without the cap a closed bowl silently lakes up 13+ m of phantom water) */
+  depressionMaxM: 0.25,
   rhoW: 1000.0,
 };
 
