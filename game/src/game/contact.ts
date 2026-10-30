@@ -29,9 +29,13 @@ const NC = 256; // physics cells per side
 export const MICRO_SIZE = 16; // window extent [m]
 export const MICRO_CELL = MICRO_SIZE / NC; // 0.0625 m
 export const MICRO_HALF = MICRO_SIZE / 2;
-/** delta clamp [m] — RGBA8 R channel encodes ±0.5 m */
-const DELTA_MIN = -0.45;
-const DELTA_MAX = 0.5;
+const GRID_HALF = WORLD_SIZE / 2; // world → terrain-grid frame shift
+/** delta clamp [m] — RGBA8 R channel encodes ±1.5 m (quadratic: sub-cm
+ *  resolution near 0 for footprints, ~1.7 cm at full range for tunnel
+ *  portal notches, muck heaps and collapse scars) */
+const DELTA_MIN = -1.45;
+const DELTA_MAX = 1.5;
+export const DELTA_ENCODE = 1.5; // encoded magnitude of the R channel
 /** overlay rides 8 mm above the base terrain so it always wins the depth test */
 const OVERLAY_LIFT = 0.008;
 
@@ -167,6 +171,12 @@ export class MicroTerrain {
       shader.uniforms.uGroundTex = { value: this.gtRef };
       shader.uniforms.uMicroOrigin = { value: new THREE.Vector2(this.ox, this.oz) };
       shader.uniforms.uMicroEdge = { value: MICRO_HALF - 0.7 };
+      // portal cut (tunnel.ts): the same rotated smoothstep box the terrain
+      // shader uses — the overlay must open where the hillside is cut, or a
+      // flat sheet of fake ground would cap the adit mouth
+      shader.uniforms.uPortal = { value: new THREE.Vector4(0, 0, 0, 0) };
+      shader.uniforms.uPortalDir = { value: new THREE.Vector2(0, 1) };
+      shader.uniforms.uPortalPush = { value: 0 };
       shader.vertexShader = shader.vertexShader
         .replace("#include <common>", `#include <common>
           attribute float aBaseH;
@@ -174,11 +184,18 @@ export class MicroTerrain {
           uniform sampler2D uMicroTex;
           uniform vec2 uMicroOrigin;
           uniform float uMicroEdge;
+          uniform vec4 uPortal;
+          uniform vec2 uPortalDir;
+          uniform float uPortalPush;
           varying vec2 vGroundUv;
           varying float vChurn;
           varying float vSpoil;
           varying float vRing;
-          float microD(in vec2 u){ return texture2D(uMicroTex, clamp(u, 0.0, 1.0)).r - 0.5; }`)
+          // quadratic decode: byte 128 = 0 m, ±127 = ±1.5 m; sub-cm near 0
+          float microD(in vec2 u){
+            float b = texture2D(uMicroTex, clamp(u, 0.0, 1.0)).r;
+            return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
+          }`)
         .replace("#include <beginnormal_vertex>", `#include <beginnormal_vertex>
           vec2 mUv = (position.xz + vec2(${MICRO_HALF.toFixed(1)})) / ${MICRO_SIZE.toFixed(1)};
           vec4 mInfo = texture2D(uMicroTex, mUv);
@@ -191,7 +208,14 @@ export class MicroTerrain {
           vec2 wpos2 = position.xz + uMicroOrigin;
           vGroundUv = wpos2 / ${(WORLD_SIZE).toFixed(1)} + 0.5;
           float edge = 1.0 - smoothstep(uMicroEdge, uMicroEdge + 0.45, max(abs(position.x), abs(position.z)));
-          transformed = vec3(position.x, aBaseH + (mInfo.r - 0.5) * edge + ${(OVERLAY_LIFT).toFixed(3)}, position.z);`);
+          // portal cut mask (matches the terrain shader's, rotated to the
+          // adit axis — uPortalDir is the unit heading, .zw the half-extents)
+          vec2 prel = wpos2 - uPortal.xy;
+          vec2 prot = vec2(prel.x * uPortalDir.x + prel.y * uPortalDir.y,
+                           -prel.x * uPortalDir.y + prel.y * uPortalDir.x);
+          vec2 dpo = vec2(abs(prot.x) - uPortal.z, abs(prot.y) - uPortal.w);
+          float inPortal = 1.0 - smoothstep(0.0, 0.6, max(dpo.x, dpo.y));
+          transformed = vec3(position.x, aBaseH + microD(mUv) * edge + ${(OVERLAY_LIFT).toFixed(3)} - uPortalPush * inPortal, position.z);`);
       shader.fragmentShader = shader.fragmentShader
         .replace("#include <common>", `#include <common>
           uniform sampler2D uGroundTex;
@@ -222,6 +246,13 @@ export class MicroTerrain {
           roughnessFactor = mix(roughnessFactor, 0.98, vSpoil * 0.8);
           roughnessFactor = mix(roughnessFactor, 0.16, vRing * 0.7);`);
       this.shaderRef = shader;
+      if (this.pendingPortal) {
+        const p = this.pendingPortal;
+        (shader.uniforms.uPortal.value as THREE.Vector4).set(p.cx, p.cz, p.halfAlong, p.halfAcross);
+        (shader.uniforms.uPortalDir.value as THREE.Vector2).set(p.dirX, p.dirZ);
+        shader.uniforms.uPortalPush.value = p.push;
+        this.pendingPortal = null;
+      }
     };
     const mesh = new THREE.Mesh(geo, mat);
     mesh.receiveShadow = true;
@@ -236,6 +267,22 @@ export class MicroTerrain {
     this.gtRef = gt;
     if (this.shaderRef) this.shaderRef.uniforms.uGroundTex.value = gt;
   }
+
+  /** micro-window origin in world coords (tunnel muck routing queries it) */
+  originX() { return this.ox; }
+  originZ() { return this.oz; }
+
+  /** the tunnel wires its portal cut in — overlay opens with the terrain */
+  setPortalBox(cx: number, cz: number, halfAlong: number, halfAcross: number, push: number, dirX: number, dirZ: number) {
+    if (!this.shaderRef) {
+      this.pendingPortal = { cx, cz, halfAlong, halfAcross, push, dirX, dirZ };
+      return;
+    }
+    (this.shaderRef.uniforms.uPortal.value as THREE.Vector4).set(cx, cz, halfAlong, halfAcross);
+    (this.shaderRef.uniforms.uPortalDir.value as THREE.Vector2).set(dirX, dirZ);
+    this.shaderRef.uniforms.uPortalPush.value = push;
+  }
+  private pendingPortal: { cx: number; cz: number; halfAlong: number; halfAcross: number; push: number; dirX: number; dirZ: number } | null = null;
 
   // ------------------------------------------------------------------- baking
   /** bake cell physics + render attributes for a cell rect (verts i0..i1+1) */
@@ -253,7 +300,7 @@ export class MicroTerrain {
       for (let i = i0; i <= i1; i++) {
         const wx = this.ox - MICRO_HALF + (i + 0.5) * MICRO_CELL;
         const wz = this.oz - MICRO_HALF + (j + 0.5) * MICRO_CELL;
-        this.cellBase[j * NC + i] = sampleHeight(this.terrain, wx + MICRO_HALF, wz + MICRO_HALF);
+        this.cellBase[j * NC + i] = sampleHeight(this.terrain, wx + GRID_HALF, wz + GRID_HALF);
       }
     }
     // vertex attributes (corner lattice)
@@ -264,9 +311,9 @@ export class MicroTerrain {
         const lz = -MICRO_HALF + j * MICRO_CELL;
         const wx = this.ox + lx;
         const wz = this.oz + lz;
-        const h = sampleHeight(this.terrain, wx + MICRO_HALF, wz + MICRO_HALF);
+        const h = sampleHeight(this.terrain, wx + GRID_HALF, wz + GRID_HALF);
         bh[v] = h;
-        terrainNormal(this.terrain, wx + MICRO_HALF, wz + MICRO_HALF, nrm);
+        terrainNormal(this.terrain, wx + GRID_HALF, wz + GRID_HALF, nrm);
         bn[v * 3] = nrm[0]; bn[v * 3 + 1] = nrm[1]; bn[v * 3 + 2] = nrm[2];
         // identical tint formula to world.buildTerrainMesh
         const hn = Math.min(Math.max(h / 18, 0), 1);
@@ -568,6 +615,46 @@ export class MicroTerrain {
     return { volumeM3: bite, dPenM: dPen, suction, hard, spoil: { x: px, z: pz, volM3: spoilVol } };
   }
 
+  /**
+   * Cut an oriented rect (a machine-cut notch — portal mouth, collapse scar)
+   * down to an ABSOLUTE floor elevation; never raises ground. Unlike a spade
+   * crater the cut is clean: cells are not churn-flagged, so slope relaxation
+   * leaves the notch alone (the timbered headwall conceptually retains it —
+   * free-sloughing portals arrive with the collapse batch).
+   * Returns bank volume removed [m³] (0 where ground was already lower).
+   */
+  carveRect(
+    cx: number, cz: number, yaw: number,
+    halfLateral: number, alongA: number, alongB: number, floorY: number,
+  ): number {
+    const ca = Math.cos(yaw), sa = Math.sin(yaw);
+    const reach = Math.max(halfLateral, Math.abs(alongA), Math.abs(alongB)) * 1.35;
+    const [i0, i1, j0, j1] = this.cellRect(cx, cz, reach);
+    const area = MICRO_CELL * MICRO_CELL;
+    let vol = 0;
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const wx = this.ox - MICRO_HALF + (i + 0.5) * MICRO_CELL;
+        const wz = this.oz - MICRO_HALF + (j + 0.5) * MICRO_CELL;
+        const dx = wx - cx, dz = wz - cz;
+        const along = dx * sa + dz * ca;
+        const lateral = -dx * ca + dz * sa;
+        if (along < alongA || along > alongB) continue;
+        if (Math.abs(lateral) > halfLateral) continue;
+        const v = j * NC + i;
+        const target = floorY - this.cellBase[v]; // delta that puts surface AT floorY
+        if (target >= this.delta[v]) continue;   // already at/below the floor
+        const before = this.delta[v];
+        let after = Math.max(target, DELTA_MIN);
+        if (target < DELTA_MIN) this.audit.clippedM3 += (DELTA_MIN - target) * area;
+        this.delta[v] = after;
+        vol += (before - after) * area;
+      }
+    }
+    if (vol > 0) this.texDirty = true;
+    return vol;
+  }
+
   /** a cone of loose spoil lands (paraboloid pile at the state's repose angle) */
   dropSpoil(x: number, z: number, vol: number, s: SoilTouch, yaw = 0) {
     const { tanRepose } = reposeOf(s);
@@ -666,7 +753,10 @@ export class MicroTerrain {
     let cc = 0;
     for (let v = 0; v < NC * NC; v++) {
       const dl = this.delta[v];
-      t[v * 4] = Math.max(0, Math.min(255, Math.round((dl + 0.5) * 255)));
+      // quadratic encode: byte = 128 ± 127·sqrt(|d|/1.5)
+      const m = Math.min(Math.abs(dl), DELTA_ENCODE) / DELTA_ENCODE;
+      const b = 128 + (dl < 0 ? -1 : 1) * Math.round(127 * Math.sqrt(m));
+      t[v * 4] = Math.max(0, Math.min(255, b));
       t[v * 4 + 1] = (this.flags[v] & 1) ? 255 : 0;
       t[v * 4 + 2] = (this.flags[v] & 2) ? 255 : 0;
       t[v * 4 + 3] = (this.flags[v] & 4) ? 255 : 0;

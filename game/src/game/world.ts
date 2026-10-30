@@ -7,7 +7,7 @@
 import * as THREE from "three";
 import { GRID, MESH_SEG, WORLD_SIZE, TerrainData, sampleHeight } from "./terrain";
 import { Ground } from "./ground";
-import { MicroTerrain, MICRO_SIZE, MICRO_HALF } from "./contact";
+import { MicroTerrain, MICRO_SIZE, MICRO_HALF, DELTA_ENCODE } from "./contact";
 
 const HALF = WORLD_SIZE / 2;
 const GRASS_BUCKET = 4; // m — spatial hash cell for trample queries
@@ -46,8 +46,8 @@ export class World {
   private grassCount: number;
   private baseGrassCount: number;
   private micro: MicroTerrain | null;
-  private terrainShader: THREE.Shader | null = null;
-  private grassShader: THREE.Shader | null = null;
+  private terrainShader: { uniforms: { [k: string]: { value: unknown } } } | null = null;
+  private grassShader: { uniforms: { [k: string]: { value: unknown } } } | null = null;
   private grassX!: Float32Array;
   private grassZ!: Float32Array;
   private grassBuckets = new Map<number, number[]>();
@@ -123,18 +123,32 @@ export class World {
       shader.uniforms.uGroundTex = { value: this.groundTex };
       shader.uniforms.uWorldSize = { value: WORLD_SIZE };
       shader.uniforms.uDigBox = { value: new THREE.Vector4(0, 0, 0, 0) }; // xy centre, z half, w sink
+      // tunnel portal cut: vec4(x, z, halfAlong, halfAcross), separate push
+      shader.uniforms.uPortal = { value: new THREE.Vector4(0, 0, 0, 0) };
+      shader.uniforms.uPortalDir = { value: new THREE.Vector2(0, 1) };
+      shader.uniforms.uPortalPush = { value: 0 };
       this.terrainShader = shader;
       shader.vertexShader = shader.vertexShader
         .replace("#include <common>", `#include <common>
 varying vec2 vGroundUv;
-uniform vec4 uDigBox;`)
+uniform vec4 uDigBox;
+uniform vec4 uPortal;
+uniform vec2 uPortalDir;
+uniform float uPortalPush;`)
         .replace("#include <begin_vertex>",
           `#include <begin_vertex>
            vGroundUv = vec2(position.x / ${WORLD_SIZE.toFixed(1)} + 0.5, position.z / ${WORLD_SIZE.toFixed(1)} + 0.5);
            // the micro window owns geometry here: push the static mesh 2.5 m down
            vec2 dwb = abs(position.xz - uDigBox.xy);
            float inDig = 1.0 - smoothstep(uDigBox.z - 0.6, uDigBox.z, max(dwb.x, dwb.y));
-           transformed.y -= uDigBox.w * inDig;`);
+           transformed.y -= uDigBox.w * inDig;
+           // tunnel portal cut — rotated anisotropic box (along × across), 0.6 m edge
+           vec2 prel = position.xz - uPortal.xy;
+           vec2 prot = vec2(prel.x * uPortalDir.x + prel.y * uPortalDir.y,
+                            -prel.x * uPortalDir.y + prel.y * uPortalDir.x);
+           vec2 dpo = vec2(abs(prot.x) - uPortal.z, abs(prot.y) - uPortal.w);
+           float inPortal = 1.0 - smoothstep(0.0, 0.6, max(dpo.x, dpo.y));
+           transformed.y -= uPortalPush * inPortal;`);
       shader.fragmentShader = shader.fragmentShader
         .replace("#include <common>", `#include <common>
           uniform sampler2D uGroundTex;
@@ -336,9 +350,10 @@ uniform vec4 uDigBox;`)
           vec2 guv = vec2(ipos.x / uWorldSize + 0.5, ipos.z / uWorldSize + 0.5);
           vec4 g = texture2D(uGroundTex, guv);
           vWet = max(g.r, g.b * 0.7);
-          // sink with dig holes in the micro window
+          // sink with dig holes in the micro window (quadratic decode, ±DELTA_ENCODE)
           vec2 muv = (ipos.xz - uMicroOrigin + vec2(${MICRO_HALF.toFixed(1)})) / ${MICRO_SIZE.toFixed(1)};
-          float mdlt = texture2D(uMicroTex, clamp(muv, 0.0, 1.0)).r - 0.5;
+          float mb = texture2D(uMicroTex, clamp(muv, 0.0, 1.0)).r;
+          float mdlt = sign(mb - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(mb - 0.5) * 2.0, 2.0);
           // wind sway grows with height above blade base
           float ph = uTime * (1.1 + aRand * 0.7) + ipos.x * 0.13 + ipos.z * 0.11;
           float sway = (sin(ph) + 0.5 * sin(ph * 2.3 + aRand * 6.0)) * 0.5;
@@ -474,6 +489,14 @@ uniform vec4 uDigBox;`)
     }
     const gm = this.grass.material as THREE.ShaderMaterial;
     (gm.uniforms.uMicroOrigin.value as THREE.Vector2).set(micro.ox, micro.oz);
+  }
+
+  /** tunnel portal cut: push the static terrain down inside the adit box */
+  setPortalBox(cx: number, cz: number, halfAlong: number, halfAcross: number, push: number, dirX: number, dirZ: number) {
+    if (!this.terrainShader) return;
+    (this.terrainShader.uniforms.uPortal.value as THREE.Vector4).set(cx, cz, halfAlong, halfAcross);
+    (this.terrainShader.uniforms.uPortalDir.value as THREE.Vector2).set(dirX, dirZ);
+    this.terrainShader.uniforms.uPortalPush.value = push;
   }
 
   // -------------------------------------------------------------------- trees
