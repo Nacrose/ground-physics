@@ -121,6 +121,7 @@ export class HUD {
         <span>SPACE</span><span>jump</span>
         <span>MOUSE</span><span>look (click to capture)</span>
         <span>SCROLL</span><span>camera zoom</span>
+        <span>F</span><span>dig (hold) — spade</span>
         <span>E</span><span>inspect soil</span>
         <span>1 – 5</span><span>weather scenario</span>
         <span>T</span><span>time speed</span>
@@ -128,7 +129,7 @@ export class HUD {
         <span>G</span><span>graphics quality</span>
         <span>M</span><span>mute</span>
       </div>
-      <div class="hud-hint-sub">the ground you stand on runs the real soil physics — watch the valley clay</div>`;
+      <div class="hud-hint-sub">the ground is stateful — dig it, churn it, compact it; the soil remembers</div>`;
     this.root.appendChild(this.hintEl);
 
     // ---- boot screen -------------------------------------------------------------

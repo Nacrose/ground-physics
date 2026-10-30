@@ -8,16 +8,21 @@ import * as THREE from "three";
 import { GRID, WORLD_SIZE, TerrainData, sampleHeight } from "./terrain";
 import { Ground } from "./ground";
 import { dropFallSpeed, medianDropMm } from "./params";
+import { MicroTerrain } from "./contact";
 
 const HALF = WORLD_SIZE / 2;
+
+export type StepKind = "dry" | "moist" | "wet" | "mud";
 
 export class StormFX {
   scene: THREE.Scene;
   terrain: TerrainData;
   ground: Ground;
+  micro: MicroTerrain | null;
 
   rainMesh: THREE.InstancedMesh;
   splash: THREE.InstancedMesh;
+  dust: THREE.InstancedMesh;
   puddleMesh: THREE.Mesh;
   private rainGeo: THREE.BufferGeometry;
 
@@ -27,8 +32,13 @@ export class StormFX {
   private splashLife: Float32Array;
   private splashPos: Float32Array;
   private splashIdx = 0;
+  private dustCount = 96;
+  private dustLife: Float32Array;
+  private dustPos: Float32Array;
+  private dustIdx = 0;
   private rainSeeds: Float32Array; // per-drop random phase
   private dropSpeed = 8.5;
+  private lastSuction = 0;
 
   // audio
   private audioCtx: AudioContext | null = null;
@@ -37,19 +47,24 @@ export class StormFX {
   private noiseBuf: AudioBuffer | null = null;
   muted = false;
 
-  constructor(scene: THREE.Scene, terrain: TerrainData, ground: Ground, rainCount = 5200) {
+  constructor(scene: THREE.Scene, terrain: TerrainData, ground: Ground, rainCount = 5200,
+    micro?: MicroTerrain) {
     this.scene = scene;
     this.terrain = terrain;
     this.ground = ground;
+    this.micro = micro ?? null;
     this.baseRainCount = rainCount;
     this.rainCount = rainCount;
 
     this.buildRain();
     this.buildSplashes();
+    this.buildDust();
     this.buildPuddles();
 
     this.splashLife = new Float32Array(this.splashCount).fill(-1);
     this.splashPos = new Float32Array(this.splashCount * 3);
+    this.dustLife = new Float32Array(this.dustCount).fill(-1);
+    this.dustPos = new Float32Array(this.dustCount * 3);
   }
 
   // -------------------------------------------------------------------- rain
@@ -138,6 +153,46 @@ export class StormFX {
     void scale;
   }
 
+  // -------------------------------------------------------------------- dust
+  private buildDust() {
+    const geo = new THREE.PlaneGeometry(1, 1);
+    geo.rotateX(-Math.PI / 2);
+    const mat = new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false,
+      vertexShader: `
+        varying vec2 vUv;
+        void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0); }`,
+      fragmentShader: `
+        varying vec2 vUv;
+        uniform vec3 uTint;
+        void main(){
+          vec2 c = vUv - 0.5;
+          float r = length(c) * 2.0;
+          float core = 1.0 - smoothstep(0.15, 1.0, r);
+          float a = core * (1.0 - r * 0.45);
+          gl_FragColor = vec4(uTint, clamp(a, 0.0, 1.0) * 0.5);
+        }`,
+      uniforms: { uTint: { value: new THREE.Color(0xb39868) } },
+    });
+    this.dust = new THREE.InstancedMesh(geo, mat, this.dustCount);
+    this.dust.frustumCulled = false;
+    this.dust.renderOrder = 6;
+    const m = new THREE.Matrix4();
+    for (let i = 0; i < this.dustCount; i++) {
+      m.makeTranslation(0, -999, 0);
+      this.dust.setMatrixAt(i, m);
+    }
+    this.scene.add(this.dust);
+  }
+
+  /** a dry dust puff at a footfall / landing / spoil landing */
+  spawnDust(x: number, y: number, z: number, scale = 1) {
+    const i = this.dustIdx = (this.dustIdx + 1) % this.dustCount;
+    this.dustLife[i] = 0;
+    this.dustPos[i * 3] = x; this.dustPos[i * 3 + 1] = y; this.dustPos[i * 3 + 2] = z;
+    void scale;
+  }
+
   // ----------------------------------------------------------------- puddles
   private buildPuddles() {
     const geo = new THREE.BufferGeometry();
@@ -208,7 +263,9 @@ export class StormFX {
         const x0 = i * cell - HALF, x1 = x0 + cell;
         const z0 = j * cell - HALF, z1 = z0 + cell;
         const xc = (x0 + x1) / 2, zc = (z0 + z1) / 2;
-        const yC = sampleHeight(this.terrain, xc + HALF, zc + HALF) + 0.015 + Math.min(depth, 0.3) * 0.35;
+        const yC = sampleHeight(this.terrain, xc + HALF, zc + HALF) +
+          (this.micro ? this.micro.sampleDelta(xc, zc) : 0) +
+          0.015 + Math.min(depth, 0.3) * 0.35;
         verts.push(x0, yC, z0, x1, yC, z0, x1, yC, z1, x0, yC, z0, x1, yC, z1, x0, yC, z1);
       }
     }
@@ -280,6 +337,115 @@ export class StormFX {
     src.stop(ctx.currentTime + 4.5);
   }
 
+  /** a footfall, by ground state (dry crunch → wet squelch → mud suck) */
+  playStep(kind: StepKind, power = 1) {
+    const ctx = this.audioCtx;
+    if (!ctx || !this.noiseBuf || this.muted) return;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    const f = ctx.createBiquadFilter();
+    const g = ctx.createGain();
+    const t0 = ctx.currentTime;
+    let dur = 0.09;
+    if (kind === "dry") {
+      f.type = "highpass"; f.frequency.value = 1400;
+      src.playbackRate.value = 1.9;
+      g.gain.setValueAtTime(0.05 * power, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.07);
+    } else if (kind === "moist") {
+      f.type = "bandpass"; f.frequency.setValueAtTime(420, t0);
+      f.frequency.exponentialRampToValueAtTime(680, t0 + 0.07);
+      f.Q.value = 0.9;
+      g.gain.setValueAtTime(0.07 * power, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.1);
+    } else if (kind === "wet") {
+      f.type = "bandpass"; f.frequency.setValueAtTime(260, t0);
+      f.frequency.exponentialRampToValueAtTime(760, t0 + 0.11);
+      f.Q.value = 1.4;
+      g.gain.setValueAtTime(0.09 * power, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.13);
+    } else { // mud: low thump + downward squelch
+      dur = 0.16;
+      f.type = "bandpass"; f.frequency.setValueAtTime(300, t0);
+      f.frequency.exponentialRampToValueAtTime(110, t0 + 0.14);
+      f.Q.value = 1.1;
+      g.gain.setValueAtTime(0.11 * power, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.16);
+    }
+    src.connect(f).connect(g).connect(ctx.destination);
+    src.start(t0);
+    src.stop(t0 + dur + 0.05);
+  }
+
+  /** boot pulled out of saturated fines — the suction pop */
+  playSuction(strength: number) {
+    const ctx = this.audioCtx;
+    if (!ctx || !this.noiseBuf || this.muted) return;
+    if (ctx.currentTime - this.lastSuction < 0.25) return;
+    this.lastSuction = ctx.currentTime;
+    const t0 = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    src.playbackRate.value = 1.2;
+    const f = ctx.createBiquadFilter();
+    f.type = "bandpass"; f.Q.value = 2.2;
+    f.frequency.setValueAtTime(700, t0);
+    f.frequency.exponentialRampToValueAtTime(130, t0 + 0.13);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(Math.min(0.16, 0.07 + strength * 0.1), t0 + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.16);
+    src.connect(f).connect(g).connect(ctx.destination);
+    src.start(t0);
+    src.stop(t0 + 0.2);
+    // the pop itself: short low sine
+    const osc = ctx.createOscillator();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(95, t0 + 0.02);
+    osc.frequency.exponentialRampToValueAtTime(55, t0 + 0.09);
+    const og = ctx.createGain();
+    og.gain.setValueAtTime(0.1 * strength, t0 + 0.02);
+    og.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.1);
+    osc.connect(og).connect(ctx.destination);
+    osc.start(t0 + 0.02);
+    osc.stop(t0 + 0.12);
+  }
+
+  /** spade stroke: cut / hard clay clink / suction heave */
+  playDigHit(kind: "cut" | "hard" | "suck" | "spoil") {
+    const ctx = this.audioCtx;
+    if (!ctx || !this.noiseBuf || this.muted) return;
+    const t0 = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    const f = ctx.createBiquadFilter();
+    const g = ctx.createGain();
+    if (kind === "cut") {
+      f.type = "bandpass"; f.frequency.setValueAtTime(900, t0);
+      f.frequency.exponentialRampToValueAtTime(350, t0 + 0.07);
+      f.Q.value = 0.8;
+      g.gain.setValueAtTime(0.12, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.09);
+    } else if (kind === "hard") {
+      f.type = "highpass"; f.frequency.value = 2000;
+      g.gain.setValueAtTime(0.08, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.05);
+    } else if (kind === "suck") {
+      f.type = "bandpass"; f.Q.value = 2.0;
+      f.frequency.setValueAtTime(620, t0);
+      f.frequency.exponentialRampToValueAtTime(150, t0 + 0.16);
+      g.gain.setValueAtTime(0.13, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.2);
+    } else { // spoil landing
+      f.type = "lowpass"; f.frequency.value = 420;
+      g.gain.setValueAtTime(0.09, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.12);
+    }
+    src.connect(f).connect(g).connect(ctx.destination);
+    src.start(t0);
+    src.stop(t0 + 0.25);
+  }
+
   // ------------------------------------------------------------------- update
   update(dt: number, elapsed: number, camPos: THREE.Vector3, playerPos: THREE.Vector3,
     rainAtPlayer: number, windMs: number, windDirRad: number, cloudiness: number,
@@ -323,8 +489,10 @@ export class StormFX {
       m.compose(p, q, s);
       this.rainMesh.setMatrixAt(i, m);
       // land splashes for a subset near the player
-      if (gy < sampleHeight(this.terrain, gx + HALF, gz + HALF) + 0.4 && Math.random() < 0.05) {
-        this.spawnSplash(gx, sampleHeight(this.terrain, gx + HALF, gz + HALF) + 0.03, gz);
+      if (gy < sampleHeight(this.terrain, gx + HALF, gz + HALF) +
+          (this.micro ? this.micro.sampleDelta(gx, gz) : 0) + 0.4 && Math.random() < 0.05) {
+        this.spawnSplash(gx, sampleHeight(this.terrain, gx + HALF, gz + HALF) +
+          (this.micro ? this.micro.sampleDelta(gx, gz) : 0) + 0.03, gz);
       }
     }
     this.rainMesh.instanceMatrix.needsUpdate = true;
@@ -354,6 +522,33 @@ export class StormFX {
       this.splashLife[i] = age + dt >= 0.45 ? -1 : age + dt;
     }
     this.splash.instanceMatrix.needsUpdate = true;
+
+    // dust lifecycle: expands, drifts up, fades
+    const dm = new THREE.Matrix4();
+    const dq = new THREE.Quaternion();
+    const ds = new THREE.Vector3();
+    const dp = new THREE.Vector3();
+    for (let i = 0; i < this.dustCount; i++) {
+      const life = this.dustLife[i];
+      if (life < 0) {
+        dm.makeTranslation(0, -999, 0);
+        this.dust.setMatrixAt(i, dm);
+        continue;
+      }
+      const age = life;
+      const scale = 0.22 + age * 1.4;
+      const alpha = Math.max(0, 1 - age / 0.85);
+      dp.set(
+        this.dustPos[i * 3] + Math.sin(age * 7 + i) * 0.08,
+        this.dustPos[i * 3 + 1] + age * 0.55,
+        this.dustPos[i * 3 + 2] + Math.cos(age * 6 + i) * 0.08);
+      dq.identity();
+      ds.set(scale * (alpha * 0.6 + 0.4), 1, scale * (alpha * 0.6 + 0.4));
+      dm.compose(dp, dq, ds);
+      this.dust.setMatrixAt(i, dm);
+      this.dustLife[i] = age + dt >= 0.85 ? -1 : age + dt;
+    }
+    this.dust.instanceMatrix.needsUpdate = true;
 
     // puddle shader
     const pm = this.puddleMesh.material as THREE.ShaderMaterial;

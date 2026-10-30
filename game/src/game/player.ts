@@ -7,17 +7,21 @@
 import * as THREE from "three";
 import { TerrainData, sampleHeight, terrainNormal } from "./terrain";
 import { Ground } from "./ground";
-import { StormFX } from "./fx";
+import { StormFX, StepKind } from "./fx";
+import { MicroTerrain, SoilTouch } from "./contact";
 
 export interface InputState {
   forward: number; // -1..1
   right: number; // -1..1
   sprint: boolean;
   jump: boolean;
+  dig: boolean; // hold F: spade strokes at the aim point
   yaw: number; // camera yaw (radians)
   pitch: number;
   zoom: number;
 }
+
+export type TrampleFn = (x: number, z: number, r: number, mode: "trample" | "dig") => void;
 
 export class Player {
   group: THREE.Group; // character root
@@ -46,9 +50,12 @@ export class Player {
   camera: THREE.PerspectiveCamera;
   private camPitch = 0.18;
   private camZoom = 6.2;
+  /** spade swing animation phase 0..1, or null when idle */
+  digPhase: number | null = null;
 
   constructor(scene: THREE.Scene, private terrain: TerrainData, private ground: Ground,
-    private fx: StormFX, spawnX: number, spawnZ: number) {
+    private fx: StormFX, private micro: MicroTerrain, spawnX: number, spawnZ: number,
+    private trample?: TrampleFn) {
     // ---- character ---------------------------------------------------------
     this.group = new THREE.Group();
     const coat = new THREE.MeshStandardMaterial({ color: 0x4a3a30, roughness: 0.9 });
@@ -112,10 +119,24 @@ export class Player {
     this.camera = new THREE.PerspectiveCamera(58, 1, 0.1, 2600);
     this.pos.set(spawnX, sampleHeight(terrain, spawnX + 384, spawnZ + 384), spawnZ);
     this.group.position.copy(this.pos);
+    this.micro.centerOn(spawnX, spawnZ);
   }
 
   addPitch(d: number) { this.camPitch = Math.max(-0.5, Math.min(0.9, this.camPitch + d)); }
   addZoom(d: number) { this.camZoom = Math.max(2.8, Math.min(14, this.camZoom + d)); }
+
+  /** ground height incl. micro deformations (prints, craters, spoil) */
+  groundHeightAt(x: number, z: number): number {
+    return sampleHeight(this.terrain, x + 384, z + 384) + this.micro.sampleDelta(x, z);
+  }
+
+  /** footfall classification from the live soil state */
+  private stepKind(s: SoilTouch): StepKind {
+    if (s.mud > 0.5 || s.consistency === 2) return "mud";
+    if (s.wetness > 0.8 && s.sr > 0.9) return "wet";
+    if (s.wetness > 0.3) return "moist";
+    return "dry";
+  }
 
   update(dt: number, input: InputState, elapsed: number) {
     // ----- movement ----------------------------------------------------------
@@ -155,18 +176,21 @@ export class Player {
     }
 
     // ----- vertical: jump + mud sinking --------------------------------------
-    const groundH = sampleHeight(this.terrain, this.pos.x + 384, this.pos.z + 384);
+    const groundH = this.groundHeightAt(this.pos.x, this.pos.z);
     if (input.jump && this.onGround) {
       this.jumpVel = 4.6 * (0.55 + 0.45 * mudSlow); // bogged jumps are pathetic
       this.onGround = false;
     }
     this.jumpVel -= 12.5 * dt;
     this.pos.y += this.jumpVel * dt;
-    const restH = groundH - sample.sink; // sink into mud
+    const restH = groundH - sample.sink; // sink into mud (and into your own churn)
     this.sinkage = this.onGround ? sample.sink : 0;
     if (this.pos.y <= restH) {
       if (!this.onGround) {
-        // landing splash in mud/water
+        // rate-dependent landing: 3-5x body weight through the legs
+        const fallSpd = Math.max(0, -this.jumpVel);
+        const impact = Math.min(4, 1 + (fallSpd / 4.6) * 2.4);
+        const s = this.micro.touchAt(this.pos.x, this.pos.z);
         if (sample.mud > 0.2 || sample.pondM > 0.02) {
           for (let i = 0; i < 6; i++) {
             this.fx.spawnSplash(
@@ -174,9 +198,20 @@ export class Player {
               groundH + 0.05,
               this.pos.z + (Math.random() - 0.5) * 0.8);
           }
+        } else if (s.wetness < 0.4) {
+          // dry impact: dust burst
+          for (let i = 0; i < 3; i++) {
+            this.fx.spawnDust(
+              this.pos.x + (Math.random() - 0.5) * 0.7,
+              groundH + 0.06,
+              this.pos.z + (Math.random() - 0.5) * 0.7);
+          }
         }
-        // landing rut in soft ground
-        if (sample.mud > 0.35) this.ground.applyWheelLoad(this.pos.x, this.pos.z, 60, true);
+        this.fx.playStep(this.stepKind(s), Math.min(1.8, impact * 0.6));
+        // the crater of a hard landing + the rut it leaves behind
+        this.micro.stampBoot(this.pos.x, this.pos.z, this.yaw, s, 1.6 + impact * 0.6);
+        this.trample?.(this.pos.x, this.pos.z, 0.2, "trample");
+        if (sample.mud > 0.35) this.ground.applyWheelLoad(this.pos.x, this.pos.z, 60 * impact, true);
       }
       this.pos.y = restH;
       this.jumpVel = 0;
@@ -197,18 +232,37 @@ export class Player {
     this.armL.rotation.x = -swing * 0.55;
     this.armR.rotation.x = swing * 0.55;
     this.torso.rotation.x = Math.min(spd / 16, 0.16) + (this.mud > 0.4 ? 0.12 : 0); // lean when hauling through mud
+    // spade swing overrides the arms while digging
+    if (this.digPhase != null) {
+      const dswing = Math.sin(this.digPhase * Math.PI);
+      this.armR.rotation.x = -2.3 * dswing;
+      this.armL.rotation.x = 0.55 * dswing;
+      this.torso.rotation.x += 0.16 * dswing;
+    }
     const bob = Math.abs(Math.sin(this.walkPhase)) * 0.03 * Math.min(spd / 4, 1);
     this.group.position.set(this.pos.x, this.pos.y + bob, this.pos.z);
     this.group.rotation.y = this.yaw;
 
-    // footprint every half stride when ground is wet enough
+    // footprint every half stride — a real write into the deformable ground
     const footSign = Math.sin(this.walkPhase) > 0 ? 1 : -1;
     if (footSign !== this.lastFootSign) {
       this.lastFootSign = footSign;
-      const wet = this.ground.wetness[Math.max(0, Math.min(36863,
-        Math.floor((this.pos.z + 384) / 4) * 192 + Math.floor((this.pos.x + 384) / 4)))];
-      if (spd > 0.6 && wet > 0.28 && this.onGround) {
-        this.stampFootprint(footSign);
+      const s = this.micro.touchAt(this.pos.x, this.pos.z);
+      const off = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw)).multiplyScalar(0.13 * footSign);
+      const fx0 = this.pos.x + off.x;
+      const fz0 = this.pos.z + off.z;
+      if (spd > 0.6 && this.onGround) {
+        // geometry: state-shaped crater + conserving rim
+        this.micro.stampBoot(fx0, fz0, this.yaw, s, input.sprint ? 1.55 : 1);
+        this.trample?.(fx0, fz0, 0.16, "trample");
+        // fine-tier compaction memory (plastic-optimum weighting)
+        this.ground.footPass(fx0, fz0, input.sprint);
+        // audio by state
+        this.fx.playStep(this.stepKind(s), input.sprint ? 1.4 : 1);
+        // dry dust puffs; wet churn gets splashes
+        if (s.wetness < 0.35 && s.mud < 0.2) {
+          this.fx.spawnDust(fx0, groundH + 0.05, fz0);
+        }
         if (this.pondM > 0.015 || this.mud > 0.5) {
           this.fx.spawnSplash(this.pos.x, groundH + 0.04, this.pos.z);
           // sprinting through soft clay churns ruts
@@ -216,6 +270,12 @@ export class Player {
             this.ground.applyWheelLoad(this.pos.x, this.pos.z, 55, true);
           }
         }
+        // suction pop when a boot leaves saturated fines
+        if (s.mud > 0.55 || (s.sr > 0.92 && s.wetness > 0.75)) {
+          this.fx.playSuction(Math.max(s.mud, 0.5));
+        }
+        // dark decal on top for far contrast (wet ground only)
+        if (s.wetness > 0.28) this.stampFootprint(footSign);
       }
     }
 
@@ -226,8 +286,8 @@ export class Player {
     const cx = this.pos.x - Math.sin(this.yaw === undefined ? 0 : input.yaw) * Math.cos(pitch) * dist * 0.96;
     const cz = this.pos.z - Math.cos(input.yaw) * Math.cos(pitch) * dist * 0.96;
     const cyPos = camTargetY + Math.sin(pitch) * dist;
-    // camera stays above terrain
-    const camGround = sampleHeight(this.terrain, cx + 384, cz + 384) + 0.55;
+    // camera stays above terrain (micro deformations included)
+    const camGround = this.groundHeightAt(cx, cz) + 0.55;
     this.camera.position.set(cx, Math.max(cyPos, camGround), cz);
     const look = new THREE.Vector3(this.pos.x, this.pos.y + 1.35, this.pos.z);
     const side = new THREE.Vector3(Math.cos(input.yaw), 0, -Math.sin(input.yaw)).multiplyScalar(0.5);

@@ -7,8 +7,10 @@
 import * as THREE from "three";
 import { GRID, MESH_SEG, WORLD_SIZE, TerrainData, sampleHeight } from "./terrain";
 import { Ground } from "./ground";
+import { MicroTerrain, MICRO_SIZE, MICRO_HALF } from "./contact";
 
 const HALF = WORLD_SIZE / 2;
+const GRASS_BUCKET = 4; // m — spatial hash cell for trample queries
 
 export interface WorldUniforms {
   time: { value: number };
@@ -43,13 +45,21 @@ export class World {
   private canopyMat: THREE.MeshStandardMaterial;
   private grassCount: number;
   private baseGrassCount: number;
+  private micro: MicroTerrain | null;
+  private terrainShader: THREE.Shader | null = null;
+  private grassShader: THREE.Shader | null = null;
+  private grassX!: Float32Array;
+  private grassZ!: Float32Array;
+  private grassBuckets = new Map<number, number[]>();
 
-  constructor(scene: THREE.Scene, terrain: TerrainData, ground: Ground, grassCount = 48000) {
+  constructor(scene: THREE.Scene, terrain: TerrainData, ground: Ground, grassCount = 48000,
+    micro?: MicroTerrain) {
     this.scene = scene;
     this.terrain = terrain;
     this.ground = ground;
     this.baseGrassCount = grassCount;
     this.grassCount = grassCount;
+    this.micro = micro ?? null;
 
     this.uniforms = {
       time: { value: 0 },
@@ -67,6 +77,7 @@ export class World {
     this.groundTex.minFilter = THREE.LinearFilter;
     this.groundTex.magFilter = THREE.LinearFilter;
     this.groundTex.needsUpdate = true;
+    if (this.micro) this.micro.setGroundTexture(this.groundTex);
 
     this.buildTerrainMesh();
     this.buildSky();
@@ -111,11 +122,19 @@ export class World {
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uGroundTex = { value: this.groundTex };
       shader.uniforms.uWorldSize = { value: WORLD_SIZE };
+      shader.uniforms.uDigBox = { value: new THREE.Vector4(0, 0, 0, 0) }; // xy centre, z half, w sink
+      this.terrainShader = shader;
       shader.vertexShader = shader.vertexShader
-        .replace("#include <common>", "#include <common>\nvarying vec2 vGroundUv;")
+        .replace("#include <common>", `#include <common>
+varying vec2 vGroundUv;
+uniform vec4 uDigBox;`)
         .replace("#include <begin_vertex>",
           `#include <begin_vertex>
-           vGroundUv = vec2(position.x / ${WORLD_SIZE.toFixed(1)} + 0.5, position.z / ${WORLD_SIZE.toFixed(1)} + 0.5);`);
+           vGroundUv = vec2(position.x / ${WORLD_SIZE.toFixed(1)} + 0.5, position.z / ${WORLD_SIZE.toFixed(1)} + 0.5);
+           // the micro window owns geometry here: push the static mesh 2.5 m down
+           vec2 dwb = abs(position.xz - uDigBox.xy);
+           float inDig = 1.0 - smoothstep(uDigBox.z - 0.6, uDigBox.z, max(dwb.x, dwb.y));
+           transformed.y -= uDigBox.w * inDig;`);
       shader.fragmentShader = shader.fragmentShader
         .replace("#include <common>", `#include <common>
           uniform sampler2D uGroundTex;
@@ -294,6 +313,8 @@ export class World {
         uSunI: this.uniforms.sunIntensity,
         uGroundTex: { value: this.groundTex },
         uWorldSize: { value: WORLD_SIZE },
+        uMicroTex: { value: this.micro ? this.micro.tex : new THREE.DataTexture(new Uint8Array([128, 128, 128, 128]), 1, 1, THREE.RGBAFormat) },
+        uMicroOrigin: { value: new THREE.Vector2(0, 0) },
         uFogColor: { value: new THREE.Color(0xe6d2ac) },
         uFogDensity: { value: 0.0026 },
         uFadeR: { value: 118.0 },
@@ -301,9 +322,9 @@ export class World {
       vertexShader: `
         attribute float aRand;
         uniform float uTime, uWind, uWorldSize, uFadeR;
-        uniform vec2 uWindDir;
+        uniform vec2 uWindDir, uMicroOrigin;
         uniform vec3 uCamPos;
-        uniform sampler2D uGroundTex;
+        uniform sampler2D uGroundTex, uMicroTex;
         varying vec2 vUv;
         varying float vRand;
         varying float vWet;
@@ -315,6 +336,9 @@ export class World {
           vec2 guv = vec2(ipos.x / uWorldSize + 0.5, ipos.z / uWorldSize + 0.5);
           vec4 g = texture2D(uGroundTex, guv);
           vWet = max(g.r, g.b * 0.7);
+          // sink with dig holes in the micro window
+          vec2 muv = (ipos.xz - uMicroOrigin + vec2(${MICRO_HALF.toFixed(1)})) / ${MICRO_SIZE.toFixed(1)};
+          float mdlt = texture2D(uMicroTex, clamp(muv, 0.0, 1.0)).r - 0.5;
           // wind sway grows with height above blade base
           float ph = uTime * (1.1 + aRand * 0.7) + ipos.x * 0.13 + ipos.z * 0.11;
           float sway = (sin(ph) + 0.5 * sin(ph * 2.3 + aRand * 6.0)) * 0.5;
@@ -325,6 +349,7 @@ export class World {
           // rain flattens grass
           float flatF = 1.0 - vWet * 0.30;
           wp.y = ipos.y + (wp.y - ipos.y) * flatF;
+          wp.y += min(mdlt + 0.03, 0.0);
           // distance fade: collapse beyond radius
           float d = distance(wp.xyz, uCamPos);
           float fade = 1.0 - smoothstep(uFadeR * 0.72, uFadeR, d);
@@ -368,6 +393,8 @@ export class World {
     const rnd = () => { seed = (seed * 69621) % 2147483647; return seed / 2147483647; };
     let placed = 0;
     const cell = WORLD_SIZE / GRID;
+    this.grassX = new Float32Array(this.grassCount);
+    this.grassZ = new Float32Array(this.grassCount);
     while (placed < this.grassCount) {
       const i = Math.floor(rnd() * GRID), j = Math.floor(rnd() * GRID);
       const k = j * GRID + i;
@@ -386,6 +413,11 @@ export class World {
       m.compose(posv, q, scl);
       this.grass.setMatrixAt(placed, m);
       rands[placed] = rnd();
+      this.grassX[placed] = x;
+      this.grassZ[placed] = z;
+      const bk = Math.floor(x / GRASS_BUCKET) * 4096 + Math.floor(z / GRASS_BUCKET);
+      const arr = this.grassBuckets.get(bk);
+      if (arr) arr.push(placed); else this.grassBuckets.set(bk, [placed]);
       placed++;
     }
     geo.setAttribute("aRand", new THREE.InstancedBufferAttribute(rands, 1));
@@ -396,6 +428,52 @@ export class World {
   /** quality scaler: reduce / restore instance draw count */
   setGrassQuality(count: number) {
     this.grass.count = Math.min(count, this.baseGrassCount);
+  }
+
+  /**
+   * Trample or dig grass near a point — hysteretic (crushed blades stay
+   * crushed), the visual seed of desire paths (design doc §30).
+   */
+  crushGrass(x: number, z: number, r: number, mode: "trample" | "dig") {
+    const b0 = Math.floor((x - r) / GRASS_BUCKET), b1 = Math.floor((x + r) / GRASS_BUCKET);
+    const c0 = Math.floor((z - r) / GRASS_BUCKET), c1 = Math.floor((z + r) / GRASS_BUCKET);
+    const m = new THREE.Matrix4();
+    const p = new THREE.Vector3();
+    const q = new THREE.Quaternion();
+    const s = new THREE.Vector3();
+    let touched = false;
+    for (let b = b0; b <= b1; b++) {
+      for (let c = c0; c <= c1; c++) {
+        const arr = this.grassBuckets.get(b * 4096 + c);
+        if (!arr) continue;
+        for (const gi of arr) {
+          const dx = this.grassX[gi] - x, dz = this.grassZ[gi] - z;
+          if (dx * dx + dz * dz > r * r) continue;
+          this.grass.getMatrixAt(gi, m);
+          m.decompose(p, q, s);
+          if (s.y < 0.1) continue; // already flattened to the turf
+          const f = mode === "dig" ? 0.04 : 0.55;
+          s.y = Math.max(s.y * f, 0.03);
+          s.x *= 0.9; s.z *= 0.9;
+          m.compose(p, q, s);
+          this.grass.setMatrixAt(gi, m);
+          touched = true;
+        }
+      }
+    }
+    if (touched) this.grass.instanceMatrix.needsUpdate = true;
+  }
+
+  /** per-frame: terrain push-down box + grass micro-window origin */
+  updateDigWindow() {
+    const micro = this.micro;
+    if (!micro) return;
+    const box = micro.digBox();
+    if (this.terrainShader) {
+      (this.terrainShader.uniforms.uDigBox.value as THREE.Vector4).set(box.cx, box.cz, box.half, 2.5);
+    }
+    const gm = this.grass.material as THREE.ShaderMaterial;
+    (gm.uniforms.uMicroOrigin.value as THREE.Vector2).set(micro.ox, micro.oz);
   }
 
   // -------------------------------------------------------------------- trees

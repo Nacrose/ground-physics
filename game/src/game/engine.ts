@@ -12,6 +12,7 @@ import { Player, InputState } from "./player";
 import { HUD } from "./hud";
 import { WeatherPlayer } from "./weather";
 import { PRESETS, WeatherEntry } from "./params";
+import { MicroTerrain } from "./contact";
 
 const HALF = WORLD_SIZE / 2;
 const TS_STEPS = [1, 4, 8, 16, 32, 64];
@@ -36,6 +37,7 @@ export class Game {
   private scene = new THREE.Scene();
   private terrain: TerrainData;
   private ground: Ground;
+  private micro!: MicroTerrain;
   private world!: World;
   private fx!: StormFX;
   private player!: Player;
@@ -43,12 +45,19 @@ export class Game {
   private weather: WeatherPlayer | null = null;
   private timelines = new Map<string, WeatherEntry[]>();
 
-  private input: InputState = { forward: 0, right: 0, sprint: false, jump: false, yaw: 0, pitch: 0, zoom: 6.2 };
+  private input: InputState = { forward: 0, right: 0, sprint: false, jump: false, dig: false, yaw: 0, pitch: 0, zoom: 6.2 };
   private keys = new Set<string>();
   private started = false;
   private raf = 0;
   private elapsed = 0;
   private lastFrame = 0;
+
+  // spade stroke state machine
+  private digging = false;
+  private digTimer = 0;
+  private digDur = 0.95;
+  private digApplied = false;
+  private digCooldown = 0;
 
   // sim clocks
   private groundAccum = 0;
@@ -105,11 +114,14 @@ export class Game {
     this.weather = new WeatherPlayer(PRESETS.find((p) => p.key === "thunderstorm")!, tl);
 
     // ---- modules ------------------------------------------------------------
-    this.world = new World(this.scene, this.terrain, this.ground, 52000);
-    this.fx = new StormFX(this.scene, this.terrain, this.ground, 5600);
+    this.micro = new MicroTerrain(this.scene, this.terrain, this.ground);
+    this.world = new World(this.scene, this.terrain, this.ground, 52000, this.micro);
+    this.fx = new StormFX(this.scene, this.terrain, this.ground, 5600, this.micro);
     // spawn on the road near the wagon
     const spawnZ = (0.30 + 0.08 * Math.sin((20 / WORLD_SIZE) * Math.PI * 1.7 + 0.4)) * WORLD_SIZE;
-    this.player = new Player(this.scene, this.terrain, this.ground, this.fx, 20 - HALF, spawnZ - HALF);
+    this.player = new Player(this.scene, this.terrain, this.ground, this.fx, this.micro,
+      20 - HALF, spawnZ - HALF,
+      (x, z, r, mode) => this.world.crushGrass(x, z, r, mode));
     this.hud = new HUD(this.container, this.terrain);
     this.wagonBaseY = this.world.wagon.position.y;
 
@@ -149,6 +161,7 @@ export class Game {
     this.weather = new WeatherPlayer(def, tl);
     this.ground.reset(def.initSat);
     this.ground.patternTime = 0;
+    this.micro.reset();
     this.world.wagon.position.y = this.wagonBaseY;
     this.world.wagon.rotation.z = 0;
     this.ground.packTexture(this.terrain.road);
@@ -206,6 +219,8 @@ export class Game {
     this.world.refreshGroundTexture();
     this.fx.rebuildPuddles();
     this.hud.paintMapOverlay(this.ground);
+    // holes slump while time skips forward too
+    this.micro.relaxFor(gameMinutes * 60);
   }
 
   private onKeyDown = async (e: KeyboardEvent) => {
@@ -281,11 +296,13 @@ export class Game {
     const rainHere = this.ground.rainAt(p.x, p.z);
     const tex = rep.texture;
     const stateColor = rep.consistency === 0 ? "#9fc97a" : rep.consistency === 1 ? "#e3c268" : "#e0685c";
+    const microRelief = this.micro.sampleDelta(p.x, p.z) * 100;
     const rows: Array<[string, string]> = [
       ["TEXTURE", `${tex.label} · ${tex.clay}% clay`],
       ["WATER CONTENT", `${rep.wPct.toFixed(1)} %  (PL ${tex.PL} · LL ${tex.LL})`],
       ["CONSISTENCY", rep.consistencyLabel],
       ["MATRIC SUCTION", `${rep.suctionKpa.toFixed(0)} kPa`],
+      ["RETENTION BRANCH", rep.branchLabel],
       ["APPARENT COHESION", `${rep.cEffKpa.toFixed(1)} kPa`],
       ["FRICTION φ′", `${rep.phiEffDeg.toFixed(1)}°`],
       ["BEARING q<sub>ult</sub>", `${rep.qUltKpa.toFixed(0)} kPa`],
@@ -294,6 +311,9 @@ export class Game {
       ["INFIL. CAPACITY", `${rep.infilCapMmH.toFixed(1)} mm/h`],
       ["PONDING", `${rep.pondMm.toFixed(1)} mm`],
       ["RUT DEPTH", `${(rep.rutM * 100).toFixed(1)} cm`],
+      ["MICRO RELIEF", `${microRelief >= 0 ? "+" : ""}${microRelief.toFixed(1)} cm`],
+      ["COMPACTION", `${rep.traffic} passes`],
+      ["DIG STATE", rep.disturbed ? "DISTURBED (loosened)" : "intact"],
       ["RAIN HERE", `${rainHere.toFixed(1)} mm/h`],
     ];
     const html = `
@@ -303,8 +323,68 @@ export class Game {
         <div class="hud-insp-row"${i === 2 ? ` style="color:${stateColor}"` : ""}>
           <span>${k}</span><span>${v}</span>
         </div>`).join("")}
-      <div class="hud-insp-foot">Green-Ampt column · 4 layers · Clapp-Hornberger</div>`;
+      <div class="hud-insp-foot">Green-Ampt column · 4 layers · dual-branch retention · micro 6.25 cm</div>`;
     this.hud.showInspector(html);
+  }
+
+  // -------------------------------------------------------------- spade strokes
+  /** one fixed-step tick of the dig state machine (hold F) */
+  private updateDig(dt: number) {
+    if (this.digCooldown > 0) {
+      this.digCooldown -= dt;
+      this.player.digPhase = null;
+      return;
+    }
+    if (!this.digging && this.input.dig && this.started) {
+      this.digging = true;
+      this.digTimer = 0;
+      this.digApplied = false;
+    }
+    if (!this.digging) return;
+    this.digTimer += dt;
+    const phase = this.digTimer / this.digDur;
+    this.player.digPhase = Math.min(phase, 1);
+    if (phase >= 0.55 && !this.digApplied) {
+      this.digApplied = true;
+      this.applyDigStroke();
+    }
+    if (phase >= 1) {
+      this.digging = false;
+      this.player.digPhase = null;
+      this.digTimer = 0;
+    }
+  }
+
+  private applyDigStroke() {
+    // aim point: 1.35 m ahead along the camera facing
+    const dirX = Math.sin(this.input.yaw);
+    const dirZ = Math.cos(this.input.yaw);
+    const aimX = this.player.pos.x + dirX * 1.35;
+    const aimZ = this.player.pos.z + dirZ * 1.35;
+    const res = this.micro.digStroke(aimX, aimZ, dirX, dirZ);
+    // grass dies where the crater and the spoil land
+    this.world.crushGrass(aimX, aimZ, 0.32, "dig");
+    this.world.crushGrass(res.spoil.x, res.spoil.z, 0.4, "dig");
+    // the four resistances, audible
+    this.fx.playDigHit(res.hard ? "hard" : res.suction ? "suck" : "cut");
+    // spoil landing: soft thud + dust if dry
+    const s = this.micro.touchAt(res.spoil.x, res.spoil.z);
+    this.fx.playDigHit("spoil");
+    if (s.wetness < 0.35 && s.mud < 0.2) {
+      this.fx.spawnDust(res.spoil.x, this.player.groundHeightAt(res.spoil.x, res.spoil.z) + 0.12, res.spoil.z);
+    }
+    // saturated extraction costs real time — the stroke machine waits
+    if (res.suction) this.digCooldown = 0.35;
+  }
+
+  /** QA: conservation ledger for the dig system */
+  digAudit() {
+    const a = this.micro.audit;
+    return {
+      ...a,
+      massErrKg: Math.abs(a.massInKg - a.massOutKg),
+      volNetM3: a.spoilBulkM3 - a.removedBulkM3, // positive: ground got bulkier (loosened)
+    };
   }
 
   // -------------------------------------------------------------------- loop
@@ -336,6 +416,7 @@ export class Game {
     this.input.right = (k.has("KeyD") || k.has("ArrowRight") ? 1 : 0) - (k.has("KeyA") || k.has("ArrowLeft") ? 1 : 0);
     this.input.sprint = k.has("ShiftLeft") || k.has("ShiftRight");
     this.input.jump = k.has("Space");
+    this.input.dig = k.has("KeyF");
 
     // ---- weather playback -------------------------------------------------------
     const w = this.weather;
@@ -349,16 +430,21 @@ export class Game {
       if (th) this.fx.playThunder(th.power);
     }
 
-    // ---- fixed-step player sim ---------------------------------------------------
+    // ---- fixed-step player sim + spade strokes ----------------------------------
     this.simAccum += dtReal;
     const SIM = 1 / 30;
     let steps = 0;
     while (this.simAccum >= SIM && steps < 4) {
       this.player.update(SIM, this.input, this.elapsed);
+      this.updateDig(SIM);
       this.simAccum -= SIM;
       steps++;
     }
     if (steps === 4) this.simAccum = 0;
+
+    // ---- micro tier: scroll window, relax slopes, upload texture -----------------
+    this.micro.update(dtReal, this.player.pos.x, this.player.pos.z);
+    this.world.updateDigWindow();
 
     // ---- ground physics tick (0.5 s real → dtGame seconds) ------------------------
     this.groundAccum += dtReal;
@@ -458,6 +544,7 @@ export class Game {
     window.removeEventListener("keyup", this.onKeyUp);
     window.removeEventListener("resize", this.resize);
     this.world?.dispose();
+    this.micro?.dispose();
     this.renderer?.dispose();
     if (this.renderer?.domElement.parentElement) {
       this.renderer.domElement.parentElement.removeChild(this.renderer.domElement);
