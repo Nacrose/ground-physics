@@ -9,6 +9,10 @@
  * inside the window, so holes are true holes with no z-fighting).
  *
  * Physics contract (docs/soil-state-spec.md):
+ *  - RENDER-SIDE SUB-CELL SMOOTHING: the physics stays on the 6.25 cm cell
+ *    lattice (the ledger is exact there), but the RENDER texture is a
+ *    two-pass binomial blur of the field — craters, prints and piles read
+ *    as smooth soil, never as cell-sized voxels;
  *  - slope relaxation is pairwise volume-conserving: one mechanism makes dry
  *    sand flow back into the hole, over-steep faces slump, and mud holes close
  *    themselves shut — at a state-dependent repose angle;
@@ -313,12 +317,13 @@ export class MicroTerrain {
           diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.11, 0.085, 0.06), mud * 0.65);
           diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.42, 0.335, 0.24) * mix(1.0, 0.5, wet), road * 0.75);
           diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.19, 0.22, 0.20), clamp(pond * 1.4, 0.0, 0.55));
-          // churned ground: dry crumbs pale it, wet churn darkens (strong mix —
-          // must stay readable under storm light, design doc §29 legibility)
+          // churned ground: dry crumbs pale it, wet churn darkens — soft
+          // graded coverage (the texture channels are blurred), so disturbed
+          // soil reads as soil, not as pale cell squares (doc §29 legibility)
           vec3 churnCol = mix(diffuseColor.rgb * 1.14 + 0.014, diffuseColor.rgb * 0.66, wet);
-          diffuseColor.rgb = lerp3(diffuseColor.rgb, churnCol, vChurn * 0.75);
-          // spoil: pale loose heap
-          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.32, 0.25, 0.18) * mix(1.0, 0.55, wet), vSpoil * 0.85);
+          diffuseColor.rgb = lerp3(diffuseColor.rgb, churnCol, vChurn * 0.45);
+          // spoil: loose heap tint
+          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.32, 0.25, 0.18) * mix(1.0, 0.55, wet), vSpoil * 0.55);
           // suction wet-ring: dark glossy mark
           diffuseColor.rgb *= mix(1.0, 0.62, vRing * 0.6);`)
         .replace("#include <roughnessmap_fragment>", `#include <roughnessmap_fragment>
@@ -765,7 +770,11 @@ export class MicroTerrain {
         const lateral = -dx * ca + dz * sa;
         const r2 = (along * along) / (halfB * halfB) + (lateral * lateral) / (halfA * halfA);
         if (r2 >= 1) { if (ringFlag) this.flags[j * NC + i] |= 4; continue; }
-        const dd = depth * Math.sqrt(1 - r2);
+        // parabola (1−r²), not the √(1−r²) paraboloid: the rim slope is
+        // FINITE (the sqrt profile has a vertical tangent → 1-cell cliff at
+        // the crater lip — the "voxels when you dig" look). Mean over the
+        // ellipse is ½·depth; the call sites size their peaks for it.
+        const dd = depth * (1 - r2);
         if (dd <= 0) continue;
         const v = j * NC + i;
         const before = this.delta[v];
@@ -819,11 +828,15 @@ export class MicroTerrain {
 
   /** a footfall: state-shaped crater + conserving rim ridge */
   stampBoot(x: number, z: number, yaw: number, s: SoilTouch, power = 1) {
-    // depth by state: dry barely shows → mud is a churned crater
-    const depth = (0.016 + s.wetness * 0.05 + s.mud * 0.1) * power;
-    const removed = -this.addProfile(x, z, yaw, 0.075, 0.125, depth, -1, false, false);
+    // depth by state: dry barely shows → mud is a churned crater (×4/3 for
+    // the parabola's ½ mean, so prints keep their phase-1 visual depth).
+    // Half-axes 0.11 × 0.19 (a wide boot print) so the print spans ≥2×3
+    // cells — small enough to read as a boot, large enough for the render
+    // blur to round it instead of stamping a cell square.
+    const depth = (0.022 + s.wetness * 0.067 + s.mud * 0.133) * power;
+    const removed = -this.addProfile(x, z, yaw, 0.11, 0.19, depth, -1, false, false);
     const rimFrac = s.mud > 0.5 ? 0.45 : s.wetness > 0.35 ? 0.35 : 0.22;
-    this.rimRedistribute(x, z, removed, 0.125, rimFrac);
+    this.rimRedistribute(x, z, removed, 0.19, rimFrac);
   }
 
   /** one spade stroke: penetration → cut → (adhesion) → extraction suction */
@@ -863,12 +876,13 @@ export class MicroTerrain {
     // bite, up to 0.55 m penetration in opened ground at a 0.32 s swing —
     // ≈2.4× the phase-1 throughput (substantial digging, spec §11)
     const bite = 0.30 * ds * 0.26 * ds * dPen * (hard ? 0.6 : 1);
-    // crater: the blade's own footprint (0.22 m wide × 0.18 m bite). The
-    // paraboloid peak 1.9·dPen makes the GEOMETRIC crater volume match the
-    // ledger bite exactly (mean of D√(1-r²) over the ellipse is (2/3)D).
+    // crater: the blade footprint opened ~15% wider than the blade so the
+    // rim spans ≥5 cells and the render blur can round the lip into soil.
+    // Parabola peak 2.0·dPen makes the GEOMETRIC crater volume match the
+    // ledger bite exactly (mean of D(1−r²) over the ellipse is ½D).
     const yaw = Math.atan2(dirX, dirZ);
-    const craterPeak = dPen * 1.9 * (hard ? 0.6 : 1);
-    const removed = -this.addProfile(x, z, yaw, 0.15 * ds, 0.13 * ds, craterPeak, -1, false, false);
+    const craterPeak = dPen * 2.0 * (hard ? 0.6 : 1);
+    const removed = -this.addProfile(x, z, yaw, 0.17 * ds, 0.145 * ds, craterPeak, -1, false, false);
     void removed; // crater shape is written; ledger uses the analytic bite
     // 3) spoil — same dry MASS, looser bulk (fill factor), unless already spoil
     const wasSpoil = nCell > 0 && spoilCells / nCell > 0.5;
@@ -946,16 +960,17 @@ export class MicroTerrain {
     return vol;
   }
 
-  /** a cone of loose spoil lands (paraboloid pile at the state's repose angle) */
+  /** a smooth dome of loose spoil lands (parabola (1−r²) at the state's
+   *  repose aspect — finite rim slope, mean ½H, so V = ½πr²H) */
   dropSpoil(x: number, z: number, vol: number, s: SoilTouch, yaw = 0) {
     const { tanRepose } = reposeOf(s);
     const pile = (cx: number, cz: number, v: number, minR: number) => {
-      // profile h√(1−r²) integrates to (2/3)πr²h; with h = r·tanρ:
-      // r = (3V/(2π·tanρ))^(1/3)
-      let r = Math.cbrt((3 * v) / (2 * Math.PI * Math.max(tanRepose, 0.05)));
+      // dome h(r) = H(1−r²): volume ½πr²H with H = r·tanρ
+      // → r = (2V/(π·tanρ))^½; H capped, then r recomputed → volume exact
+      let r = Math.sqrt((2 * v) / (Math.PI * Math.max(tanRepose, 0.05)));
       if (r < minR) r = minR; // thin wide pancake, height recomputed → volume exact
-      let h = (3 * v) / (2 * Math.PI * r * r);
-      if (h > 0.34) { h = 0.34; r = Math.sqrt((3 * v) / (2 * Math.PI * h)); }
+      let h = (2 * v) / (Math.PI * r * r);
+      if (h > 0.34) { h = 0.34; r = Math.sqrt((2 * v) / (Math.PI * h)); }
       this.addProfile(cx, cz, yaw, r, r, h, 1, true, false);
     };
     // dry fracturing clay: the bite breaks into clods — split the SAME volume
@@ -996,7 +1011,7 @@ export class MicroTerrain {
           if (diff > maxD) {
             const flux = Math.min((diff - maxD) * 0.5 * rate, 0.05);
             d[v] -= flux; d[v + 1] += flux;
-            f[v] |= 1; f[v + 1] |= 1;
+            f[v + 1] |= 1; // the RECEIVER holds loose fill; the donor keeps its own flag
           }
         }
         // pair down
@@ -1005,7 +1020,7 @@ export class MicroTerrain {
           if (diff > maxD) {
             const flux = Math.min((diff - maxD) * 0.5 * rate, 0.05);
             d[v] -= flux; d[v + n] += flux;
-            f[v] |= 1; f[v + n] |= 1;
+            f[v + n] |= 1; // receiver only — flags no longer creep across the window
           }
         }
       }
@@ -1413,7 +1428,11 @@ export class MicroTerrain {
             after = DELTA_MIN;
           }
           d[v] = after;
-          f[v] |= 1; // fresh scar → relaxation will smooth it
+          // a real scar (≥1 mm bitten this tick — a rill or gully cut, or the
+          // blade's churn) flags the cell; interrill rain-dusting must not —
+          // otherwise one storm loosens-reskins the entire window and the
+          // churn feedback (looseF 0.22 → 1.0) runs away
+          if (detachKg >= tex.rhoDry * 0.001 * CELL_AREA) f[v] |= 1;
           load[v] += detachKg;
           this.sedLedger.detachedKg += detachKg;
         }
@@ -1432,7 +1451,10 @@ export class MicroTerrain {
               after = DELTA_MAX;
             }
             d[v] = after;
-            f[v] |= 3; // churn + spoil: fresh loose deposit
+            // a visible layer (≥1 mm of loose fill) flags the cell churn+spoil;
+            // sub-mm dusting only thickens the surface — it must not reskin
+            // the whole window pale after one storm
+            if (depKg >= tex.rhoDry * 0.8 * 0.001 * CELL_AREA) f[v] |= 3;
             load[v] -= depKg;
             this.sedLedger.depositedKg += depKg;
           }
@@ -1526,23 +1548,45 @@ export class MicroTerrain {
     return d00 * (1 - u) * (1 - v) + d10 * u * (1 - v) + d01 * (1 - u) * v + d11 * u * v;
   }
 
-  /** pack the film render texture (R surface offset quadratic ±2 m, G depth) */
+  /** pack the film render texture (R surface offset quadratic ±2 m, G depth).
+   *  Render-side smoothing: both channels ride the same two-pass blur as
+   *  the ground texture, so the water surface follows the SMOOTHED bed and
+   *  the shoreline grades out instead of stopping at a cell edge.
+   *  Fast path: a window with no visible film skips the work entirely — the
+   *  sheet is hidden, so its texture content is irrelevant. */
   private uploadWaterTexture() {
-    const t = this.waterTexData;
+    const n = NC;
     let any = false;
-    for (let v = 0; v < NC * NC; v++) {
+    for (let v = 0; v < n * n; v++) {
+      if (this.hWater[v] > 6e-4) { any = true; break; }
+    }
+    if (!any) {
+      this.waterMesh.visible = false;
+      return;
+    }
+    const t = this.waterTexData;
+    const plane = this.scratch;
+    // R — surface offset (quadratic ±2 m), blurred
+    for (let v = 0; v < n * n; v++) {
       const off = this.delta[v] + this.hWater[v];
       const m = Math.min(Math.abs(off), WATER_ENCODE) / WATER_ENCODE;
-      const b = 128 + (off < 0 ? -1 : 1) * Math.round(127 * Math.sqrt(m));
-      t[v * 4] = Math.max(0, Math.min(255, b));
-      const dep = Math.min(this.hWater[v] / WATER_DEPTH_ENCODE, 1);
-      t[v * 4 + 1] = dep >= 1 / 255 ? Math.max(1, Math.round(dep * 255)) : 0;
+      plane[v] = 128 + (off < 0 ? -1 : 1) * 127 * Math.sqrt(m);
+    }
+    this.blurPlane(plane);
+    for (let v = 0; v < n * n; v++)
+      t[v * 4] = Math.max(0, Math.min(255, Math.round(plane[v])));
+    // G — depth, blurred (soft shoreline)
+    for (let v = 0; v < n * n; v++)
+      plane[v] = Math.min(this.hWater[v] / WATER_DEPTH_ENCODE, 1) * 255;
+    this.blurPlane(plane);
+    for (let v = 0; v < n * n; v++)
+      t[v * 4 + 1] = Math.max(0, Math.min(255, Math.round(plane[v])));
+    for (let v = 0; v < n * n; v++) {
       t[v * 4 + 2] = 0;
       t[v * 4 + 3] = 255;
-      if (this.hWater[v] > 6e-4) any = true;
     }
     this.waterTex.needsUpdate = true;
-    this.waterMesh.visible = any;
+    this.waterMesh.visible = true;
   }
 
   /** QA: water conservation identity for the film */
@@ -1569,26 +1613,94 @@ export class MicroTerrain {
     };
   }
 
+  /**
+   * RENDER-SIDE SUB-CELL SMOOTHING — two separable [1,2,1]/4 binomial passes
+   * (≈ Gaussian σ 0.9 cells ≈ 5.6 cm) over one channel plane, in place.
+   * This is the de-voxeliser: the physics field, the ledgers, the world
+   * store and the collision sampler all stay on the EXACT 6.25 cm cells —
+   * only what the eye sees is smoothed. Edges are clamped (replicated),
+   * which is safe because the shader's edge fade kills the window rim
+   * before it reaches the terrain seam.
+   */
+  private blurPlane(plane: Float32Array) {
+    const n = NC;
+    const tmp = this.scratchW;
+    for (let pass = 0; pass < 2; pass++) {
+      // horizontal sweep: plane → tmp
+      for (let j = 0; j < n; j++) {
+        const row = j * n;
+        for (let i = 0; i < n; i++) {
+          const c = plane[row + i];
+          const l = i > 0 ? plane[row + i - 1] : c;
+          const r = i < n - 1 ? plane[row + i + 1] : c;
+          tmp[row + i] = (l + 2 * c + r) * 0.25;
+        }
+      }
+      // vertical sweep: tmp → plane
+      for (let j = 0; j < n; j++) {
+        const row = j * n;
+        const up = j > 0 ? row - n : row;
+        const dn = j < n - 1 ? row + n : row;
+        for (let i = 0; i < n; i++) {
+          const c = tmp[row + i];
+          plane[row + i] = (tmp[up + i] + 2 * c + tmp[dn + i]) * 0.25;
+        }
+      }
+    }
+  }
+
+  /**
+   * Pack the ground overlay texture (R = delta, G/B/A = churn/spoil/ring),
+   * every channel through the render-side blur: a dug crater reads as a
+   * smooth bowl with a rounded lip and softly-graded disturbed soil around
+   * it — never a square of cell-sized voxels. The physics flags stay
+   * binary in this.flags; what lands in the texture is coverage.
+   */
   private uploadTexture() {
+    const n = NC;
     const t = this.texData;
+    // fast path: a pristine window (no edits, no flags) has a constant
+    // texture — walking around an untouched field costs nothing
+    let anyContent = false;
+    {
+      const d = this.delta, f = this.flags;
+      for (let v = 0; v < n * n; v++) {
+        if (d[v] !== 0 || f[v] !== 0) { anyContent = true; break; }
+      }
+    }
+    if (!anyContent && this.texWasClean) { this.texDirty = false; return; }
+    const plane = this.scratch;
+    // R — quadratic delta encode (byte 128 = 0 m, ±127 = ±1.5 m), blurred
+    for (let v = 0; v < n * n; v++) {
+      const dl = this.delta[v];
+      const m = Math.min(Math.abs(dl), DELTA_ENCODE) / DELTA_ENCODE;
+      plane[v] = 128 + (dl < 0 ? -1 : 1) * 127 * Math.sqrt(m);
+    }
+    this.blurPlane(plane);
+    for (let v = 0; v < n * n; v++)
+      t[v * 4] = Math.max(0, Math.min(255, Math.round(plane[v])));
+    // G / B / A — churn, spoil, wet-ring coverage, blurred the same way
+    for (let ch = 0; ch < 3; ch++) {
+      const bit = 1 << ch;
+      for (let v = 0; v < n * n; v++) plane[v] = (this.flags[v] & bit) ? 255 : 0;
+      this.blurPlane(plane);
+      for (let v = 0; v < n * n; v++)
+        t[v * 4 + 1 + ch] = Math.max(0, Math.min(255, Math.round(plane[v])));
+    }
     let cc = 0;
     for (let v = 0; v < NC * NC; v++) {
-      const dl = this.delta[v];
-      // quadratic encode: byte = 128 ± 127·sqrt(|d|/1.5)
-      const m = Math.min(Math.abs(dl), DELTA_ENCODE) / DELTA_ENCODE;
-      const b = 128 + (dl < 0 ? -1 : 1) * Math.round(127 * Math.sqrt(m));
-      t[v * 4] = Math.max(0, Math.min(255, b));
-      t[v * 4 + 1] = (this.flags[v] & 1) ? 255 : 0;
-      t[v * 4 + 2] = (this.flags[v] & 2) ? 255 : 0;
-      t[v * 4 + 3] = (this.flags[v] & 4) ? 255 : 0;
       if (this.flags[v] & 1) cc++;
     }
     this.churnCount = cc;
     this.tex.needsUpdate = true;
     this.texDirty = false;
+    this.texWasClean = !anyContent;
     // the film rides on the delta: keep its surface sheet in step
     this.uploadWaterTexture();
   }
+
+  /** last upload left the texture in the all-zero (pristine) state */
+  private texWasClean = false;
 
   /** reset (weather scenario switch — a fresh world forgets its edits) */
   reset() {
@@ -1613,6 +1725,7 @@ export class MicroTerrain {
     this.sedLedger.depositedKg = 0;
     this.sedLedger.handoffKg = 0;
     this.ground.loanPond.fill(0);
+    this.texWasClean = false;
     this.uploadTexture();
   }
 
