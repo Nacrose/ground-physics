@@ -13,6 +13,7 @@ import { GRID, WORLD_SIZE, TerrainData, sampleHeight, cellIndex } from "./terrai
 import { Ground } from "./ground";
 import { dropFallSpeed, medianDropMm } from "./params";
 import { MicroTerrain, MICRO_HALF } from "./contact";
+import { WATER_SURFACE_GLSL } from "./shaderlib";
 
 const HALF = WORLD_SIZE / 2;
 
@@ -282,10 +283,11 @@ export class StormFX {
         uFogDensity: { value: 0.0026 },
         uCamPos: { value: new THREE.Vector3() },
         // the contact window's film sheet owns the water INSIDE the window —
-        // the fine-tier sheet dissolves approaching it (no double-stacked
-        // water square that follows the player)
+        // the fine-tier sheet dissolves over the EXACT same 0.45 m band the
+        // film fades out over (7.45 -> 7.90 m): the two weights sum to one,
+        // so no thinned-water square ring follows the player
         uWinOrigin: { value: new THREE.Vector2(0, 0) },
-        uWinHalf: { value: MICRO_HALF - 0.5 },
+        uWinHalf: { value: MICRO_HALF - 0.55 },
       },
       vertexShader: `
         attribute float aDepth; // pond depth at this vertex [m]
@@ -297,46 +299,35 @@ export class StormFX {
         void main(){
           vWorld = position;
           vDepth = aDepth;
-          // 0 inside the micro window → 1 beyond a 1.2 m handoff band
+          // 0 inside the micro window -> 1 across the same 0.45 m band the
+          // contact film sheet fades OUT over (the weights sum to one)
           float wd = max(abs(position.x - uWinOrigin.x), abs(position.z - uWinOrigin.y));
-          vWin = smoothstep(uWinHalf, uWinHalf + 1.2, wd);
+          vWin = smoothstep(uWinHalf, uWinHalf + 0.45, wd);
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }`,
       fragmentShader: `
         uniform float uTime, uRain, uFogDensity;
-        uniform vec3 uSky, uSun, uSunDir, uFogColor, uCamPos, uWet;
+        uniform vec3 uSky, uSun, uSunDir, uFogColor, uCamPos;
         uniform vec2 uWindDir;
         varying vec3 vWorld;
         varying float vDepth;
         varying float vWin;
+        ${WATER_SURFACE_GLSL}
         void main(){
           if (vDepth < 0.0006) discard;
-          // Beer-Lambert-ish depth ramp: shallow film reads as a wet-earth
-          // sheen (the soil shows through), depth → full sky-reflecting water
-          float dN = 1.0 - exp(-vDepth * 8.0);
-          vec2 p = vWorld.xz;
-          // wind-aligned capillary waves — deeper water is livelier — + prickle
-          float w1 = sin(dot(p, uWindDir) * 2.6 + uTime * 2.2) * cos(p.x * 1.9 - uTime * 1.5);
-          float w2 = sin((p.x + p.y) * 3.4 + uTime * 3.0) * 0.5;
-          float prickle = uRain * (sin(p.x * 21.0 + uTime * 11.0) * sin(p.y * 17.0 - uTime * 9.0));
-          float amp = 0.030 + 0.055 * dN;
-          vec3 n = normalize(vec3(w1 * amp + w2 * amp + prickle * 0.10, 1.0,
-                                  w2 * amp - w1 * amp * 0.8 + prickle * 0.09));
-          vec3 v = normalize(uCamPos - vWorld);
-          float fres = pow(1.0 - max(dot(v, n), 0.0), 2.4);
-          float glint = pow(max(dot(reflect(-v, n), normalize(uSunDir)), 0.0), 90.0);
-          vec3 col = mix(uWet, uSky * (0.60 + 0.90 * fres), dN);
-          col += uSun * glint * 1.6;
-          // depth-gated veil MATCHING the contact film sheet's ramp: thin
-          // films are wet ground (the terrain shading owns that), real
-          // accumulation gets the veil — so water looks the same on either
-          // side of the contact-window edge (no wet square following you)
-          float veil = smoothstep(0.0008, 0.009, vDepth);
-          float alpha = veil * (0.30 + 0.58 * dN) * vWin;
+          // the shared water look — identical constants to the contact film
+          // sheet, so water reads the same on either side of the window edge
+          vec3 col;
+          float alpha;
+          waterLook(vWorld, vDepth, col, alpha);
+          alpha *= vWin;
           if (alpha < 0.004) discard;
           float fogF = 1.0 - exp(-uFogDensity * uFogDensity * dot(uCamPos - vWorld, uCamPos - vWorld));
           col = mix(col, uFogColor, clamp(fogF, 0.0, 1.0));
           gl_FragColor = vec4(col, alpha);
+          // SAME tone-map + output-encode as the terrain (see the film sheet)
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
         }`,
     });
     this.puddleMesh = new THREE.Mesh(geo, mat);
@@ -382,14 +373,25 @@ export class StormFX {
       const microD = micro ? micro.sampleDelta(x, z) : 0;
       const worldD = micro && microD === 0 ? micro.sampleWorldDelta(x, z) : 0;
       return sampleHeight(this.terrain, i * cell, j * cell)
-        + this.ground.dynLiftAt(x, z)
+        + this.ground.dynLiftBilerp(x, z)
         + microD + worldD;
     };
     for (let j = 0; j < GRID; j++) {
       for (let i = 0; i < GRID; i++) {
         const k = j * GRID + i;
         const depth = hPond[k] + ruts[k] * 0.35;
-        if (depth < 0.0009) continue; // ~0.9 mm minimum film (matches the contact sheet)
+        // ~0.9 mm minimum film (matches the contact sheet) — PLUS a one-cell
+        // dilation: a dry cell BORDERING a wet one still emits, because its
+        // shared corners carry partial depth — the waterline then tapers out
+        // through the shader's veil ramp instead of ending on a hard 4 m
+        // quad edge (the "cookie-cutter" shoreline)
+        let emit = depth >= 0.0009;
+        if (!emit) {
+          const wet = (kk: number) => hPond[kk] + ruts[kk] * 0.35 >= 0.0009;
+          if ((i > 0 && wet(k - 1)) || (i < GRID - 1 && wet(k + 1))
+            || (j > 0 && wet(k - GRID)) || (j < GRID - 1 && wet(k + GRID))) emit = true;
+        }
+        if (!emit) continue;
         const x0 = i * cell - HALF, x1 = x0 + cell;
         const z0 = j * cell - HALF, z1 = z0 + cell;
         const d00 = cornerDepth(i, j), d10 = cornerDepth(i + 1, j);

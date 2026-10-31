@@ -109,3 +109,73 @@ void mudSheen(inout vec3 col, vec3 nrm, vec3 wpos, float wet, float mud,
   col += sunCol * glint * sheen * 0.9;
 }
 `;
+
+/**
+ * The water surface — ONE look shared by BOTH water renderers (the contact
+ * film sheet at 6.25 cm and the fine-tier puddle sheet at 4 m), so water
+ * reads the same on either side of the contact-window edge.
+ *
+ * CALLER CONTRACT (all in scope before including):
+ *   uniform float uTime, uRain;
+ *   uniform vec2  uWindDir;
+ *   uniform vec3  uSky, uSun, uSunDir, uCamPos;
+ * and afterwards USES: writes col (rgb, fog NOT applied) + alpha [0..1]; the
+ * caller still owns the depth<0.6mm discard, its window/edge alpha fade and
+ * the fog mix.
+ *
+ * Look, layer by layer:
+ *   body  — CLEAR shallow water: a translucent olive-tea tint the BED shows
+ *           through (the terrain's own wet shading owns the darkening), then
+ *           Beer-Lambert depth toward the sky-reflecting slate of deep water
+ *   waves — two crossed capillary trains (wind-aligned + diagonal) + a rain
+ *           prickle; amplitude grows with depth (lively deep, glassy film)
+ *   glint — two-lobe sun specular: a tight sparkle riding the waves plus a
+ *           broad soft sheen, so the surface catches the sun like a real one
+ *   rim   — a meniscus: thin bright waterline where the film pinches out,
+ *           instead of a decal edge cut into the ground
+ *   veil  — alpha opens with ACCUMULATED depth only: a sub-cm film is wet
+ *           ground (near-invisible sheet), and even deep water keeps a
+ *           quarter of the bed readable through it — clarity, not paint
+ */
+export const WATER_SURFACE_GLSL = /* glsl */ `
+void waterLook(vec3 wpos, float depth, out vec3 col, out float alpha) {
+  // depth-normalised ramp (Beer-Lambert-ish): 0 = film, 1 = deep
+  float dN = 1.0 - exp(-depth * 7.0);
+  vec2 p = wpos.xz;
+  // two crossed capillary trains + rain prickle
+  float w1 = sin(dot(p, uWindDir) * 2.6 + uTime * 2.2) * cos(p.x * 1.9 - uTime * 1.5);
+  float w2 = sin((p.x + p.y) * 3.4 + uTime * 3.0) * 0.5;
+  float w3 = sin(dot(p, vec2(-uWindDir.y, uWindDir.x)) * 4.1 - uTime * 2.6) * 0.35;
+  // a short chop train (~0.7 m) so the surface has close-range texture too
+  float w4 = sin(dot(p, uWindDir) * 9.0 + uTime * 3.4) * sin(dot(p, vec2(-uWindDir.y, uWindDir.x)) * 7.5 - uTime * 2.9) * 0.30;
+  float prickle = uRain * (sin(p.x * 21.0 + uTime * 11.0) * sin(p.y * 17.0 - uTime * 9.0));
+  float amp = 0.030 + 0.055 * dN;
+  float ripple = w1 + w2 + w3 + w4;
+  vec3 n = normalize(vec3(ripple * amp + prickle * 0.10, 1.0,
+                          (w2 - w1 * 0.8 - w3 * 0.6) * amp + prickle * 0.09));
+  vec3 v = normalize(uCamPos - wpos);
+  float ndv = max(dot(v, n), 0.0);
+  float fres = pow(1.0 - ndv, 2.4);
+  // sun specular, two lobes: a broad sheen that catches whole wave faces
+  // (reads at any camera angle) + a tight sparkle riding the crests
+  vec3 sd = normalize(uSunDir);
+  float sp = max(dot(reflect(-v, n), sd), 0.0);
+  float glint = pow(sp, 48.0) * 0.5 + pow(sp, 10.0) * 0.07;
+  // body: clear tea over the (wet-shaded, matte) bed -> sky slate with depth;
+  // the shallow tint leans on uSky so it dims under storm light like everything
+  vec3 shallowT = mix(vec3(0.30, 0.345, 0.29), uSky * 0.42, 0.35);
+  vec3 deepT = uSky * (0.70 + 0.85 * fres);
+  col = mix(shallowT, deepT, dN);
+  // moving ripple shading on the body itself — the surface visibly LIVES
+  // even looking straight down (fresnel alone cannot do that)
+  col *= 0.91 + 0.16 * ripple * (0.25 + dN);
+  col += uSun * glint * (0.55 + 0.75 * dN);
+  // meniscus waterline: bright pinch where the film dies into the ground
+  float men = smoothstep(0.0006, 0.0014, depth) * (1.0 - smoothstep(0.0022, 0.0050, depth));
+  col += uSky * (fres * 0.55 + 0.22) * men;
+  // clarity: veil opens with accumulated depth, deep water keeps 22% bed
+  float veil = smoothstep(0.0009, 0.010, depth);
+  alpha = veil * (0.22 + 0.58 * dN);
+  alpha = min(alpha, 0.78);
+}
+`;

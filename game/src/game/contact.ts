@@ -43,7 +43,7 @@ import * as THREE from "three";
 import { WORLD_SIZE, GRID, TerrainData, sampleHeight, terrainNormal, cellIndex } from "./terrain";
 import { Ground } from "./ground";
 import { SOIL_TEXTURES } from "./params";
-import { NOISE_GLSL, MUD_SURFACE_GLSL, MUD_NORMAL_GLSL, MUD_SHEEN_GLSL } from "./shaderlib";
+import { NOISE_GLSL, MUD_SURFACE_GLSL, MUD_NORMAL_GLSL, MUD_SHEEN_GLSL, WATER_SURFACE_GLSL } from "./shaderlib";
 
 const NV = 257; // render vertices per side (cell corners)
 const NC = 256; // physics cells per side
@@ -152,6 +152,10 @@ export class MicroTerrain {
   private worldTexTimer = 0;
   private worldTexHasEdits = false;
   private gtRef: THREE.DataTexture | null = null;
+  /** shared terrain-normal field (built once by World — the SAME texture the
+   *  static mesh samples; injected into the overlay's fragment shader so both
+   *  meshes shade through one resolution-independent normal field) */
+  private tnRef: THREE.DataTexture | null = null;
   private shaderRef: { uniforms: { [k: string]: { value: unknown } } } | null = null;
   /** QA: set once onBeforeCompile actually ran on the overlay material */
   public compiled = false;
@@ -292,6 +296,7 @@ export class MicroTerrain {
       shader.uniforms.uMicroTex = { value: this.tex };
       shader.uniforms.uWorldTex = { value: this.worldTex };
       shader.uniforms.uGroundTex = { value: this.gtRef };
+      shader.uniforms.uTerrainN = { value: this.tnRef };
       shader.uniforms.uMicroOrigin = { value: new THREE.Vector2(this.ox, this.oz) };
       // rim blend band: micro delta owns the window interior, the world
       // (blurred) delta owns the rim — BOTH surfaces show the SAME field at
@@ -320,6 +325,7 @@ export class MicroTerrain {
           uniform vec2 uPortalDir;
           uniform float uPortalPush;
           varying vec2 vGroundUv;
+          varying vec2 vLpos;
           varying vec3 vWpos;
           varying float vChurn;
           varying float vSpoil;
@@ -348,16 +354,13 @@ export class MicroTerrain {
           vec2 mUv = (lp + vec2(${MICRO_HALF.toFixed(1)})) / ${MICRO_SIZE.toFixed(1)};
           vec4 mInfo = texture2D(uMicroTex, mUv);
           vGroundUv = (lp + uMicroOrigin) / ${WORLD_SIZE.toFixed(1)} + 0.5;
-          // gradient of the BLENDED surface (micro inside, world at the rim)
-          float he = ${(MICRO_CELL).toFixed(5)};
-          float wsc = ${(1 / WORLD_SIZE).toFixed(8)};
-          float hx1 = surfH(lp + vec2(he, 0.0), vGroundUv + vec2(wsc * he, 0.0));
-          float hx0 = surfH(lp - vec2(he, 0.0), vGroundUv - vec2(wsc * he, 0.0));
-          float hz1 = surfH(lp + vec2(0.0, he), vGroundUv + vec2(0.0, wsc * he));
-          float hz0 = surfH(lp - vec2(0.0, he), vGroundUv - vec2(0.0, wsc * he));
-          float dDdx = (hx1 - hx0) / ${(2 * MICRO_CELL).toFixed(4)};
-          float dDdz = (hz1 - hz0) / ${(2 * MICRO_CELL).toFixed(4)};
-          objectNormal = normalize(aBaseN + vec3(-dDdx, 0.0, -dDdz));`)
+          vLpos = lp;
+          // NOTE: the blended-surface gradient now rides in the FRAGMENT shader
+          // next to the shared terrain-normal field (see normal_fragment_begin).
+          // Per-vertex lighting here was exactly what made the window shade
+          // apart from the static mesh around it (the moving square); doing it
+          // per fragment on BOTH meshes also saves 4 texture evals per vertex
+          objectNormal = aBaseN;`)
         .replace("#include <begin_vertex>", `#include <begin_vertex>
           vChurn = mInfo.g; vSpoil = mInfo.b; vRing = mInfo.a;
           vec2 wpos2 = position.xz + uMicroOrigin;
@@ -373,15 +376,37 @@ export class MicroTerrain {
       shader.fragmentShader = shader.fragmentShader
         .replace("#include <common>", `#include <common>
           uniform sampler2D uGroundTex;
+          uniform sampler2D uTerrainN;
+          uniform sampler2D uMicroTex;
+          uniform sampler2D uWorldTex;
+          uniform float uMicroEdge;
           uniform vec3 uSkySheen;
           uniform vec3 uSunDirSheen;
           uniform vec3 uSunColSheen;
           varying vec2 vGroundUv;
+          varying vec2 vLpos;
           varying vec3 vWpos;
           varying float vChurn;
           varying float vSpoil;
           varying float vRing;
           vec3 lerp3(vec3 a, vec3 b, float t){ return a + (b-a)*t; }
+          // fragment twins of the vertex decode helpers — the normal
+          // reconstruction below needs the BLENDED surface gradient at
+          // display resolution (same trick, same constants as the vertex)
+          float microD(in vec2 u){
+            float b = texture2D(uMicroTex, clamp(u, 0.0, 1.0)).r;
+            return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
+          }
+          float worldD(in vec2 wuv){
+            float b = texture2D(uWorldTex, clamp(wuv, 0.0, 1.0)).r;
+            return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
+          }
+          float rimE(in vec2 lp){
+            return 1.0 - smoothstep(uMicroEdge, uMicroEdge + ${(RIM_OUT - RIM_IN).toFixed(2)}, max(abs(lp.x), abs(lp.y)));
+          }
+          float surfH(in vec2 lp, in vec2 wuv){
+            return mix(worldD(wuv), microD((lp + vec2(${MICRO_HALF.toFixed(1)})) / ${MICRO_SIZE.toFixed(1)}), rimE(lp));
+          }
           ${NOISE_GLSL}
           ${MUD_SURFACE_GLSL}
           ${MUD_NORMAL_GLSL}
@@ -394,6 +419,10 @@ export class MicroTerrain {
           mudSurface(diffuseColor.rgb, surfRough, vGroundUv, wet, mud, ${WORLD_SIZE.toFixed(1)});
           diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.42, 0.335, 0.24) * mix(1.0, 0.5, wet), road * 0.75);
           diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.19, 0.22, 0.20), clamp(pond * 1.4, 0.0, 0.55));
+          // ...and the ponded bed hands its gloss to the water above it: a
+          // submerged bed is matte (the film's own surface owns the specular),
+          // so water stops reading as "glossy flat ground"
+          surfRough = mix(surfRough, 0.62, clamp(pond * 1.3, 0.0, 0.8));
           // churned ground: dry crumbs pale it, wet churn darkens — soft
           // graded coverage (the texture channels are blurred), so disturbed
           // soil reads as soil, not as pale cell squares (doc §29 legibility)
@@ -411,6 +440,23 @@ export class MicroTerrain {
         .replace("#include <roughnessmap_fragment>", `#include <roughnessmap_fragment>
           roughnessFactor = surfRough;`)
         .replace("#include <normal_fragment_begin>", `#include <normal_fragment_begin>
+          // SHARED SHADING NORMAL — the exact twin of the static mesh's
+          // reconstruction: the same uTerrainN field, plus THIS surface's
+          // blended delta gradient (micro inside, world field at the rim),
+          // evaluated per fragment. Mesh vertex density no longer touches
+          // lighting: the 16 m window cannot shade apart from the world
+          // around it — the moving square is gone at the root
+          vec3 wN = texture2D(uTerrainN, vGroundUv).xyz * 2.0 - 1.0;
+          float he = ${(MICRO_CELL).toFixed(5)};
+          float wsc = ${(1 / WORLD_SIZE).toFixed(8)};
+          float hx1 = surfH(vLpos + vec2(he, 0.0), vGroundUv + vec2(wsc * he, 0.0));
+          float hx0 = surfH(vLpos - vec2(he, 0.0), vGroundUv - vec2(wsc * he, 0.0));
+          float hz1 = surfH(vLpos + vec2(0.0, he), vGroundUv + vec2(0.0, wsc * he));
+          float hz0 = surfH(vLpos - vec2(0.0, he), vGroundUv - vec2(0.0, wsc * he));
+          float dDdx = (hx1 - hx0) / ${(2 * MICRO_CELL).toFixed(4)};
+          float dDdz = (hz1 - hz0) / ${(2 * MICRO_CELL).toFixed(4)};
+          wN = normalize(wN + vec3(-dDdx, 0.0, -dDdz));
+          normal = normalize((viewMatrix * vec4(wN, 0.0)).xyz);
           // micro-relief glisten: mud creep + rain-pocked sheen (matches the
           // static terrain — same function, same inputs)
           mudNormal(normal, vGroundUv, gcell.r, gcell.b, ${WORLD_SIZE.toFixed(1)});
@@ -450,7 +496,7 @@ export class MicroTerrain {
     const uniforms: { [k: string]: { value: unknown } } = {
       uWaterTex: { value: this.waterTex },
       uMicroOrigin: { value: new THREE.Vector2(0, 0) },
-      uMicroEdge: { value: MICRO_HALF - 0.55 },
+      uMicroEdge: { value: MICRO_HALF - 0.55 }, // 7.45 — fine sheet fades in over the SAME 0.45 m band
       uTime: { value: 0 },
       uRain: { value: 0 },
       uSky: { value: new THREE.Color(0x8fa3b5) },
@@ -489,40 +535,33 @@ export class MicroTerrain {
         }`,
       fragmentShader: `
         uniform float uTime, uRain, uFogDensity;
-        uniform vec3 uSky, uSun, uSunDir, uFogColor, uCamPos, uWet;
+        uniform vec3 uSky, uSun, uSunDir, uFogColor, uCamPos;
         uniform vec2 uWindDir;
         varying vec3 vWorld;
         varying float vDepth;
         varying float vEdge;
+        ${WATER_SURFACE_GLSL}
         void main(){
           if (vDepth < 0.0006) discard;
-          // Beer-Lambert-ish depth ramp: shallow film = wet-earth sheen (the
-          // soil shows through), depth = full sky-reflecting water — the film
-          // now grades the same way as the fine-tier puddle sheet
-          float dN = 1.0 - exp(-vDepth * 8.0);
-          vec2 p = vWorld.xz;
-          // wind-aligned capillary waves — deeper water is livelier — + prickle
-          float w1 = sin(dot(p, uWindDir) * 2.6 + uTime * 2.2) * cos(p.x * 1.9 - uTime * 1.5);
-          float w2 = sin((p.x + p.y) * 3.4 + uTime * 3.0) * 0.5;
-          float prickle = uRain * (sin(p.x * 21.0 + uTime * 11.0) * sin(p.y * 17.0 - uTime * 9.0));
-          float amp = 0.030 + 0.055 * dN;
-          vec3 n = normalize(vec3(w1 * amp + w2 * amp + prickle * 0.10, 1.0,
-                                  w2 * amp - w1 * amp * 0.8 + prickle * 0.09));
-          vec3 v = normalize(uCamPos - vWorld);
-          float fres = pow(1.0 - max(dot(v, n), 0.0), 2.4);
-          float glint = pow(max(dot(reflect(-v, n), normalize(uSunDir)), 0.0), 90.0);
-          vec3 col = mix(uWet, uSky * (0.60 + 0.90 * fres), dN);
-          col += uSun * glint * 1.5;
-          // depth-gated veil: a sub-mm film is WET GROUND (the terrain's own
-          // wetness shading owns that look, everywhere in the world); the
-          // sheet only veils once water actually ACCUMULATES — matching the
-          // fine-tier puddle sheet's ramp so the window edge stops reading
-          // as a wet square in dry country (the "square that follows you")
-          float veil = smoothstep(0.0008, 0.009, vDepth);
-          float alpha = veil * (0.30 + 0.58 * dN) * vEdge;
+          // the shared water look (identical constants to the fine-tier
+          // puddle sheet — water reads the same on either side of the
+          // contact-window edge)
+          vec3 col;
+          float alpha;
+          waterLook(vWorld, vDepth, col, alpha);
+          // window handoff: the film dissolves across the SAME band the fine
+          // sheet fades in over (7.45 -> 7.90 m), so the two weights sum to
+          // one — no thinned-water ring at the window edge
+          alpha *= vEdge;
+          if (alpha < 0.004) discard;
           float fogF = 1.0 - exp(-uFogDensity * uFogDensity * dot(uCamPos - vWorld, uCamPos - vWorld));
           col = mix(col, uFogColor, clamp(fogF, 0.0, 1.0));
           gl_FragColor = vec4(col, alpha);
+          // through the SAME tone-map + output-encode as the terrain below
+          // (raw ShaderMaterial output skips ACES + sRGB and reads as a flat
+          // bright plate — the water used to sit OUTSIDE the scene tonally)
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
         }`,
     });
     const wm = new THREE.Mesh(this.geo, mat);
@@ -661,6 +700,19 @@ export class MicroTerrain {
     if (this.shaderRef) this.shaderRef.uniforms.uGroundTex.value = gt;
   }
 
+  /** World wires its shared terrain-normal texture in (built once, sampled by
+   *  BOTH ground meshes — the resolution-independent shading field that kills
+   *  the visible window edge) */
+  setTerrainNormalTex(tn: THREE.DataTexture) {
+    this.tnRef = tn;
+    if (this.shaderRef) this.shaderRef.uniforms.uTerrainN.value = tn;
+  }
+
+  /** QA: the shared normal field is wired */
+  hasTerrainNormalTex(): boolean {
+    return !!this.tnRef;
+  }
+
   /** micro-window origin in world coords (tunnel muck routing queries it) */
   originX() { return this.ox; }
   originZ() { return this.oz; }
@@ -697,7 +749,7 @@ export class MicroTerrain {
         const wx = this.ox - MICRO_HALF + (i + 0.5) * MICRO_CELL;
         const wz = this.oz - MICRO_HALF + (j + 0.5) * MICRO_CELL;
         this.cellBase[j * NC + i] = sampleHeight(this.terrain, wx + GRID_HALF, wz + GRID_HALF)
-          + this.ground.dynLiftAt(wx, wz);
+          + this.ground.dynLiftBilerp(wx, wz);
       }
     }
     // vertex attributes (corner lattice)
@@ -709,7 +761,7 @@ export class MicroTerrain {
         const wx = this.ox + lx;
         const wz = this.oz + lz;
         const h = sampleHeight(this.terrain, wx + GRID_HALF, wz + GRID_HALF)
-          + this.ground.dynLiftAt(wx, wz);
+          + this.ground.dynLiftBilerp(wx, wz);
         bh[v] = h;
         terrainNormal(this.terrain, wx + GRID_HALF, wz + GRID_HALF, nrm);
         bn[v * 3] = nrm[0]; bn[v * 3 + 1] = nrm[1]; bn[v * 3 + 2] = nrm[2];

@@ -12,6 +12,13 @@ import { NOISE_GLSL, MUD_SURFACE_GLSL, MUD_NORMAL_GLSL, MUD_SHEEN_GLSL } from ".
 
 const HALF = WORLD_SIZE / 2;
 const GRASS_BUCKET = 4; // m — spatial hash cell for trample queries
+/** terrain shading-normal texture: one texel per 2 m over the world, the SAME
+ *  field both meshes sample per-fragment — vertex density stops mattering, so
+ *  the 16 m contact window cannot shade apart from the ground around it */
+const NTEX = 384;
+/** fine-lift encode: R channel = lift ±0.5 m (linear-filtered over the 4 m
+ *  cell centres — the same bilerp the contact overlay bakes) */
+const LIFT_ENCODE = 1.0; // full-scale metres encoded by (r - 0.5) * LIFT_ENCODE
 
 export interface WorldUniforms {
   time: { value: number };
@@ -45,6 +52,14 @@ export class World {
   rocks: THREE.InstancedMesh;
   wagon: THREE.Group;
   terrainMesh: THREE.Mesh;
+  /** shared terrain-normal field (see NTEX) — sampled by BOTH ground meshes */
+  terrainNormalTex: THREE.DataTexture;
+  /** fine-tier dynamic lift (erosion / deposition / consolidation) so the
+   *  WHOLE world mesh wears its gullies and settled ground, not just the
+   *  16 m contact window — the window edge stays height-continuous */
+  liftTex: THREE.DataTexture;
+  private liftTexData = new Uint8Array(GRID * GRID);
+  private liftTexPrev = new Float32Array(GRID * GRID);
 
   private cloudMats: THREE.SpriteMaterial[] = [];
   private canopyMat: THREE.MeshStandardMaterial;
@@ -85,6 +100,42 @@ export class World {
     this.groundTex.magFilter = THREE.LinearFilter;
     this.groundTex.needsUpdate = true;
     if (this.micro) this.micro.setGroundTexture(this.groundTex);
+
+    // ---- shared shading-normal texture (2 m texels, world-anchored) ------
+    // baked once from the same terrainNormal() both meshes used to bake per
+    // vertex — now sampled per FRAGMENT by both, so the 1.5 m static lattice
+    // and the 6.25 cm overlay lattice shade through ONE identical field
+    {
+      const nd = new Uint8Array(NTEX * NTEX * 4);
+      const n: [number, number, number] = [0, 1, 0];
+      for (let j = 0; j < NTEX; j++) {
+        for (let i = 0; i < NTEX; i++) {
+          // texel centre -> world metres
+          const x = ((i + 0.5) / NTEX) * WORLD_SIZE - HALF;
+          const z = ((j + 0.5) / NTEX) * WORLD_SIZE - HALF;
+          terrainNormal(terrain, x + HALF, z + HALF, n);
+          const k = (j * NTEX + i) * 4;
+          nd[k] = Math.round((n[0] * 0.5 + 0.5) * 255);
+          nd[k + 1] = Math.round((n[1] * 0.5 + 0.5) * 255);
+          nd[k + 2] = Math.round((n[2] * 0.5 + 0.5) * 255);
+          nd[k + 3] = 255;
+        }
+      }
+      this.terrainNormalTex = new THREE.DataTexture(nd, NTEX, NTEX, THREE.RGBAFormat);
+      this.terrainNormalTex.minFilter = THREE.LinearFilter;
+      this.terrainNormalTex.magFilter = THREE.LinearFilter;
+      this.terrainNormalTex.needsUpdate = true;
+      // hand the shared field to the contact overlay (before first render —
+      // same pattern as setGroundTexture)
+      if (this.micro) this.micro.setTerrainNormalTex(this.terrainNormalTex);
+    }
+
+    // ---- fine-lift texture (R = ±0.5 m encode, 4 m cell centres) ---------
+    this.liftTexData.fill(128);
+    this.liftTex = new THREE.DataTexture(this.liftTexData, GRID, GRID, THREE.RedFormat);
+    this.liftTex.minFilter = THREE.LinearFilter;
+    this.liftTex.magFilter = THREE.LinearFilter;
+    this.liftTex.needsUpdate = true;
 
     this.buildTerrainMesh();
     this.buildSky();
@@ -142,6 +193,9 @@ export class World {
       // visible from anywhere in the world (same field the overlay's rim
       // blends into — one continuous surface across the window edge)
       shader.uniforms.uWorldEditTex = { value: this.micro ? this.micro.worldTex : neutralEdit };
+      // the shared shading-normal + fine-lift fields (see constructor)
+      shader.uniforms.uTerrainN = { value: this.terrainNormalTex };
+      shader.uniforms.uLiftTex = { value: this.liftTex };
       shader.uniforms.uDigBox = { value: new THREE.Vector4(0, 0, 0, 0) }; // xy centre, z half, w sink
       // tunnel portal cut: vec4(x, z, halfAlong, halfAcross), separate push
       shader.uniforms.uPortal = { value: new THREE.Vector4(0, 0, 0, 0) };
@@ -161,26 +215,32 @@ uniform vec4 uPortal;
 uniform vec2 uPortalDir;
 uniform float uPortalPush;
 uniform sampler2D uWorldEditTex;
+uniform sampler2D uLiftTex;
 // quadratic decode of the far-field edit cache — identical to the contact
 // overlay's worldD(), so both meshes read the exact same height field
 float worldD(in vec2 wuv){
   float b = texture2D(uWorldEditTex, clamp(wuv, 0.0, 1.0)).r;
   return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
+}
+// fine-tier lift (erosion / deposition / consolidation), bilinear over the
+// 4 m cell centres — the exact same field the contact overlay bakes into
+// aBaseH, so gullies and settled ground continue across the window edge
+float liftAt(in vec2 wuv){
+  return (texture2D(uLiftTex, clamp(wuv, 0.0, 1.0)).r - 0.5) * ${LIFT_ENCODE.toFixed(1)};
 }`)
         .replace("#include <beginnormal_vertex>", `#include <beginnormal_vertex>
           vGroundUv = vec2(position.x / ${WORLD_SIZE.toFixed(1)} + 0.5, position.z / ${WORLD_SIZE.toFixed(1)} + 0.5);
-          // ditch / pile shading: fold the edit-field gradient into the baked
-          // analytic normals, so far-away edits SHADE like the real thing
-          float wte = ${(WTEXEL / WORLD_SIZE).toFixed(8)};
-          float wdX = (worldD(vGroundUv + vec2(wte, 0.0)) - worldD(vGroundUv - vec2(wte, 0.0))) / ${(2 * WTEXEL).toFixed(3)};
-          float wdZ = (worldD(vGroundUv + vec2(0.0, wte)) - worldD(vGroundUv - vec2(0.0, wte))) / ${(2 * WTEXEL).toFixed(3)};
-          objectNormal = normalize(normal + vec3(-wdX, 0.0, -wdZ));`)
+          // NOTE: shading normals are reconstructed per-FRAGMENT from the
+          // shared uTerrainN field (see the fragment shader) — vertex density
+          // no longer touches lighting, which is what killed the window square`)
         .replace("#include <begin_vertex>",
           `#include <begin_vertex>
            // world-visible edits: the blurred micro field displaces the whole
            // world mesh — dig a ditch, walk 100 m away, look back: it's there
            float wdel = worldD(vGroundUv);
-           transformed.y += wdel;
+           // ...and the fine tier's evolving topography rides everywhere too
+           float wlift = liftAt(vGroundUv);
+           transformed.y += wdel + wlift;
            // tunnel portal cut — rotated anisotropic box (along × across), 0.6 m edge
            vec2 prel = position.xz - uPortal.xy;
            vec2 prot = vec2(prel.x * uPortalDir.x + prel.y * uPortalDir.y,
@@ -193,6 +253,7 @@ float worldD(in vec2 wuv){
         .replace("#include <common>", `#include <common>
           uniform sampler2D uGroundTex;
           uniform sampler2D uWorldEditTex;
+          uniform sampler2D uTerrainN;
           uniform vec4 uDigBox;
           uniform vec3 uSkySheen;
           uniform vec3 uSunDirSheen;
@@ -200,6 +261,12 @@ float worldD(in vec2 wuv){
           varying vec2 vGroundUv;
           varying vec3 vWpos;
           vec3 lerp3(vec3 a, vec3 b, float t){ return a + (b-a)*t; }
+          // quadratic decode of the far-field edit cache (fragment twin of the
+          // vertex function — the normal reconstruction needs it per fragment)
+          float worldD(in vec2 wuv){
+            float b = texture2D(uWorldEditTex, clamp(wuv, 0.0, 1.0)).r;
+            return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
+          }
           ${NOISE_GLSL}
           ${MUD_SURFACE_GLSL}
           ${MUD_NORMAL_GLSL}
@@ -223,6 +290,10 @@ float worldD(in vec2 wuv){
           diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.42, 0.335, 0.24) * mix(1.0, 0.5, wet), road * 0.75);
           // water-tinted where ponded
           diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.19, 0.22, 0.20), clamp(pond * 1.4, 0.0, 0.55));
+          // ...and the ponded bed hands its gloss to the water above it: a
+          // submerged bed is matte (the film's own surface owns the specular),
+          // so water stops reading as "glossy flat ground"
+          surfRough = mix(surfRough, 0.62, clamp(pond * 1.3, 0.0, 0.8));
           // the far-field edit channels: churned trails + spoil heaps keep
           // their disturbed-earth tint outside the contact window (the SAME
           // tints the overlay uses — the trail doesn't change colour at the rim)
@@ -235,6 +306,16 @@ float worldD(in vec2 wuv){
         .replace("#include <roughnessmap_fragment>", `#include <roughnessmap_fragment>
           roughnessFactor = surfRough;`)
         .replace("#include <normal_fragment_begin>", `#include <normal_fragment_begin>
+          // SHARED SHADING NORMAL: the same uTerrainN field + the same
+          // world-edit gradient the contact overlay evaluates per fragment —
+          // lighting is mesh-density-independent, so the 16 m window edge
+          // cannot shade apart from the world around it (the moving square)
+          vec3 wN = texture2D(uTerrainN, vGroundUv).xyz * 2.0 - 1.0;
+          float wte = ${(WTEXEL / WORLD_SIZE).toFixed(8)};
+          float wdX = (worldD(vGroundUv + vec2(wte, 0.0)) - worldD(vGroundUv - vec2(wte, 0.0))) / ${(2 * WTEXEL).toFixed(3)};
+          float wdZ = (worldD(vGroundUv + vec2(0.0, wte)) - worldD(vGroundUv - vec2(0.0, wte))) / ${(2 * WTEXEL).toFixed(3)};
+          wN = normalize(wN + vec3(-wdX, 0.0, -wdZ));
+          normal = normalize((viewMatrix * vec4(wN, 0.0)).xyz);
           // micro-relief glisten: mud creep + rain-pocked sheen (same
           // function, same inputs as the contact overlay)
           mudNormal(normal, vGroundUv, gcell.r, gcell.b, ${WORLD_SIZE.toFixed(1)});
@@ -403,6 +484,7 @@ float worldD(in vec2 wuv){
         uWorldSize: { value: WORLD_SIZE },
         uMicroTex: { value: this.micro ? this.micro.tex : new THREE.DataTexture(new Uint8Array([128, 128, 128, 128]), 1, 1, THREE.RGBAFormat) },
         uWorldEditTex: { value: this.micro ? this.micro.worldTex : new THREE.DataTexture(new Uint8Array([128, 0, 0, 255]), 1, 1, THREE.RGBAFormat) },
+        uLiftTex: { value: this.liftTex },
         uMicroOrigin: { value: new THREE.Vector2(0, 0) },
         uFogColor: { value: new THREE.Color(0xe6d2ac) },
         uFogDensity: { value: 0.0026 },
@@ -413,7 +495,7 @@ float worldD(in vec2 wuv){
         uniform float uTime, uWind, uWorldSize, uFadeR;
         uniform vec2 uWindDir, uMicroOrigin;
         uniform vec3 uCamPos;
-        uniform sampler2D uGroundTex, uMicroTex, uWorldEditTex;
+        uniform sampler2D uGroundTex, uMicroTex, uWorldEditTex, uLiftTex;
         varying vec2 vUv;
         varying float vRand;
         varying float vWet;
@@ -454,6 +536,9 @@ float worldD(in vec2 wuv){
           flatF = max(flatF, 0.3);
           wp.y = ipos.y + (wp.y - ipos.y) * flatF;
           wp.y += min(sinkD + 0.03, 0.0);
+          // blades ride the fine tier's evolving topography too (erosion /
+          // consolidation), so grass never floats over eroded ground
+          wp.y += (texture2D(uLiftTex, guv).r - 0.5) * ${LIFT_ENCODE.toFixed(1)};
           // distance fade: collapse beyond radius
           float d = distance(wp.xyz, uCamPos);
           float fade = 1.0 - smoothstep(uFadeR * 0.72, uFadeR, d);
@@ -765,6 +850,26 @@ float worldD(in vec2 wuv){
   /** ground texture refresh after physics tick */
   refreshGroundTexture() {
     this.groundTex.needsUpdate = true;
+    this.refreshLiftTexture();
+  }
+
+  /** re-encode the fine-tier lift field (erosion / deposition / consolidation)
+   *  into the world lift texture — dirtied only when the field actually moved
+   *  (µm-level drift is quantisation, not topography) */
+  private refreshLiftTexture() {
+    const ero = this.ground.eroM, set = this.ground.settleM;
+    const t = this.liftTexData, prev = this.liftTexPrev;
+    let changed = false;
+    for (let k = 0; k < GRID * GRID; k++) {
+      const lift = ero[k] - set[k];
+      if (Math.abs(lift - prev[k]) > 5e-4) {
+        prev[k] = lift;
+        const enc = Math.max(0, Math.min(255, Math.round(128 + lift / LIFT_ENCODE * 127)));
+        t[k] = enc;
+        changed = true;
+      }
+    }
+    if (changed) this.liftTex.needsUpdate = true;
   }
 
   dispose() {
