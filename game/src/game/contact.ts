@@ -509,13 +509,19 @@ export class MicroTerrain {
           float dDdx = (hx1 - hx0) / (2.0 * he);
           float dDdz = (hz1 - hz0) / (2.0 * he);
           wN = normalize(wN + vec3(-dDdx, 0.0, -dDdz));
-          normal = normalize((viewMatrix * vec4(wN, 0.0)).xyz);
           // micro-relief glisten: mud creep + rain-pocked sheen (matches the
-          // static terrain — same function, same inputs)
-          mudNormal(normal, vGroundUv, gcell.r, gcell.b, ${WORLD_SIZE.toFixed(1)});
+          // static terrain — same function, same inputs). The perturbation
+          // rides the WORLD normal; the view-space shading normal is derived
+          // from the perturbed one so lighting and sheen agree.
+          mudNormal(wN, vGroundUv, gcell.r, gcell.b, ${WORLD_SIZE.toFixed(1)});
+          normal = normalize((viewMatrix * vec4(wN, 0.0)).xyz);
           // wet-earth sheen: sky fresnel + sun glint — identical to the
-          // static mesh, so mud looks the same on either side of the rim
-          mudSheen(totalEmissiveRadiance, normal, vWpos, gcell.r, gcell.b,
+          // static mesh, so mud looks the same on either side of the rim.
+          // wN (WORLD space) is what the fresnel dot expects: a view-space
+          // normal there read ndv≈0 everywhere — reflectance pinned at the
+          // grazing maximum, a sky glow that shaded the window apart from
+          // the world mesh (the "square box around the player")
+          mudSheen(totalEmissiveRadiance, wN, vWpos, gcell.r, gcell.b,
                    uSkySheen, uSunDirSheen, uSunColSheen);`);
       this.shaderRef = shader;
       if (this.pendingPortal) {
@@ -715,6 +721,35 @@ export class MicroTerrain {
         t[k * 4 + 1] = Math.round((255 * churn) / dCnt);
         t[k * 4 + 2] = Math.round((255 * spoil) / dCnt);
         t[k * 4 + 3] = Math.max(0, Math.min(255, Math.round((-dMin / DELTA_ENCODE) * 255)));
+      }
+    }
+    // ---- displacement cone: spread the trench footprint outward so the
+    // COARSE static lattice can sample it. The static terrain's vertices
+    // sit on a 4 m lattice; a spade ditch (0.3-1 m wide) lands inside ONE
+    // 0.75 m texel and between two vertices — it displaces NOTHING and the
+    // ditch you dug vanishes the moment you walk away (the "I can only see
+    // my edits inside the square" report). Two dilation passes spread the
+    // deep byte outward one texel at a time with a fixed byte step, giving
+    // a ~2-texel (~1.5 m) cone around every hole: a 1 m trench renders as
+    // a ~3.5 m dish at >=0.1 m depth on the world mesh — visible from
+    // across the valley, honest about being a cache (the window still owns
+    // the crisp geometry; the sparse store still owns the physics).
+    {
+      const STEP = 34; // byte-space falloff per texel (quadratic decode: steep near deep, shallow near neutral)
+      const di0 = Math.max(0, ti0 - 2), di1 = Math.min(WTEX - 1, ti1 + 2);
+      const dj0 = Math.max(0, tj0 - 2), dj1 = Math.min(WTEX - 1, tj1 + 2);
+      for (let pass = 0; pass < 2; pass++) {
+        for (let tj = dj0; tj <= dj1; tj++) {
+          for (let ti = di0; ti <= di1; ti++) {
+            const k = tj * WTEX + ti;
+            let r = t[k * 4];
+            if (ti > 0) { const n = t[(tj * WTEX + ti - 1) * 4] + STEP; if (n < r) r = n; }
+            if (ti < WTEX - 1) { const n = t[(tj * WTEX + ti + 1) * 4] + STEP; if (n < r) r = n; }
+            if (tj > 0) { const n = t[((tj - 1) * WTEX + ti) * 4] + STEP; if (n < r) r = n; }
+            if (tj < WTEX - 1) { const n = t[((tj + 1) * WTEX + ti) * 4] + STEP; if (n < r) r = n; }
+            t[k * 4] = r;
+          }
+        }
       }
     }
     // dilate the churn trail one texel (max of half the neighbours): a

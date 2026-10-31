@@ -67,9 +67,12 @@ void mudSurface(inout vec3 col, inout float rough, vec2 wuv, float wet, float mu
 /**
  * Micro-relief normal perturbation for glisten: soft fbm undulation whose
  * amplitude grows with mud (ripple creep) and wetness (rain-pocked sheen).
- * CALLER CONTRACT: objectNormal in scope, vGroundUv + uWorldSizeM as above,
- * wet + mud floats in scope. Appends to objectNormal — call AFTER the
- * base+delta gradient is already folded in.
+ * CALLER CONTRACT: nrm is the WORLD-space surface normal (before
+ * viewMatrix transforms it into three's shading `normal`), vGroundUv +
+ * uWorldSizeM as above, wet + mud floats in scope. Appends to nrm — call
+ * AFTER the base+delta gradient is already folded in; the view-space
+ * shading normal must be derived FROM the result so the lighting and the
+ * sheen ride the same perturbed surface.
  */
 export const MUD_NORMAL_GLSL = /* glsl */ `
 void mudNormal(inout vec3 nrm, vec2 wuv, float wet, float mud, float worldSizeM) {
@@ -89,9 +92,16 @@ void mudNormal(inout vec3 nrm, vec2 wuv, float wet, float mud, float worldSizeM)
  * environment map: a fresnel reflection of the sky hemisphere (reads even
  * under a black storm sky, grows at grazing angles like real wet ground)
  * plus a tight sun glint off the perturbed normal (sparkles when the sun
- * is out). CALLER CONTRACT: call AFTER mudNormal so the glint rides the
- * micro-relief; needs vWpos (world position varying), cameraPosition
- * (three.js built-in), sky/sun colours + sun direction as uniforms.
+ * is out). CALLER CONTRACT: nrm must be the WORLD-space surface normal
+ * (the same vector viewMatrix turns into the shading normal — NOT the
+ * view-space `normal` three.js builds: the fresnel dot below mixes nrm
+ * with the world-space view ray, and a view-space normal there reads
+ * ndv≈0 at every camera angle — the reflectance pinned at its GRAZING
+ * maximum, a ~20% sky glow over the whole wet window that shaded the
+ * overlay apart from the static mesh = the "square box" report). Call
+ * AFTER mudNormal so the glint rides the micro-relief; needs vWpos (world
+ * position varying), cameraPosition (three.js built-in), sky/sun colours
+ * + sun direction as uniforms.
  *
  * Reflectance is PHYSICALLY CAPPED: real wet soil is a rough dielectric —
  * ~4% at nadir rising to at most ~a quarter at grazing (smooth silt

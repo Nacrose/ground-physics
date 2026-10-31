@@ -322,13 +322,19 @@ float liftAt(in vec2 wuv){
           float wdX = (worldD(vGroundUv + vec2(wte, 0.0)) - worldD(vGroundUv - vec2(wte, 0.0))) / ${(2 * WTEXEL).toFixed(3)};
           float wdZ = (worldD(vGroundUv + vec2(0.0, wte)) - worldD(vGroundUv - vec2(0.0, wte))) / ${(2 * WTEXEL).toFixed(3)};
           wN = normalize(wN + vec3(-wdX, 0.0, -wdZ));
-          normal = normalize((viewMatrix * vec4(wN, 0.0)).xyz);
           // micro-relief glisten: mud creep + rain-pocked sheen (same
-          // function, same inputs as the contact overlay)
-          mudNormal(normal, vGroundUv, gcell.r, gcell.b, ${WORLD_SIZE.toFixed(1)});
+          // function, same inputs as the contact overlay). The perturbation
+          // rides the WORLD normal; the shading normal derives from it so
+          // lighting and sheen agree on the same surface.
+          mudNormal(wN, vGroundUv, gcell.r, gcell.b, ${WORLD_SIZE.toFixed(1)});
+          normal = normalize((viewMatrix * vec4(wN, 0.0)).xyz);
           // wet-earth sheen: sky fresnel + sun glint on the perturbed normal
-          // (emissive — a reflection is there even in shadow)
-          mudSheen(totalEmissiveRadiance, normal, vWpos, gcell.r, gcell.b,
+          // (emissive — a reflection is there even in shadow). wN is the
+          // WORLD normal — the fresnel dot mixes it with the world-space
+          // view ray; passing the view-space shading normal there read ndv≈0 at
+          // every angle and pinned the reflectance at its grazing maximum
+          // (a sky glow that shaded this mesh apart from the overlay)
+          mudSheen(totalEmissiveRadiance, wN, vWpos, gcell.r, gcell.b,
                    uSkySheen, uSunDirSheen, uSunColSheen);`);
     };
     const mesh = new THREE.Mesh(geo, mat);
