@@ -92,6 +92,15 @@ void mudNormal(inout vec3 nrm, vec2 wuv, float wet, float mud, float worldSizeM)
  * is out). CALLER CONTRACT: call AFTER mudNormal so the glint rides the
  * micro-relief; needs vWpos (world position varying), cameraPosition
  * (three.js built-in), sky/sun colours + sun direction as uniforms.
+ *
+ * Reflectance is PHYSICALLY CAPPED: real wet soil is a rough dielectric —
+ * ~4% at nadir rising to at most ~a quarter at grazing (smooth silt
+ * glistening). The earlier pow(1-ndv, 2.2) * 1.15 added up to 90% of a
+ * BRIGHT sky over whole hillsides on soaked worlds — the "white layer over
+ * the terrain" that read as a floating sheet above the ground and filled
+ * ditches with snow. Now: Schlick-ish 4%->26%, sky dimmed to water-sky
+ * brightness × 0.55, glint at the same budget — a sheen you have to squint
+ * for at nadir and can still catch at grazing, never a wash.
  */
 export const MUD_SHEEN_GLSL = /* glsl */ `
 void mudSheen(inout vec3 col, vec3 nrm, vec3 wpos, float wet, float mud,
@@ -100,13 +109,15 @@ void mudSheen(inout vec3 col, vec3 nrm, vec3 wpos, float wet, float mud,
   if (sheen < 0.01) return;
   vec3 vDir = normalize(wpos - cameraPosition);
   float ndv = max(dot(nrm, -vDir), 0.0);
-  // sky sheen: soft fresnel — subtle looking straight down, strong at
-  // grazing, exactly how wet earth catches the sky
-  float fres = pow(1.0 - ndv, 2.2);
-  col += skyCol * fres * sheen * 1.15;
+  // wet-earth reflectance curve: 4% looking straight down -> 26% at grazing
+  // (a rough dielectric, not a mirror — hard ceiling, no blowout)
+  float refl = 0.04 + 0.22 * pow(1.0 - ndv, 3.0);
+  // sky sheen: the sky env is tuned BRIGHT for the water surface (0.62-0.82
+  // in clear sky) — wet soil only returns a fraction of it
+  col += skyCol * refl * sheen * 0.55;
   // sun glint: tight lobe, perturbed normal gives it sparkle
   float glint = pow(max(dot(reflect(vDir, nrm), normalize(sunDir)), 0.0), 60.0);
-  col += sunCol * glint * sheen * 0.9;
+  col += sunCol * glint * sheen * 0.55;
 }
 `;
 
@@ -163,8 +174,11 @@ void waterLook(vec3 wpos, float depth, out vec3 col, out float alpha) {
   float glint = pow(sp, 48.0) * 0.5 + pow(sp, 10.0) * 0.07;
   // body: clear tea over the (wet-shaded, matte) bed -> sky slate with depth;
   // the shallow tint leans on uSky so it dims under storm light like everything
+  // deepT is CAPPED at ~1.0 x sky (was 0.70 + 0.85*fres = 1.55x at grazing —
+  // every distant pond clipped to a white plate at grazing camera angles);
+  // grazing water still brightens toward the sky, it just can't blow past it
   vec3 shallowT = mix(vec3(0.30, 0.345, 0.29), uSky * 0.42, 0.35);
-  vec3 deepT = uSky * (0.70 + 0.85 * fres);
+  vec3 deepT = uSky * (0.55 + 0.45 * fres);
   col = mix(shallowT, deepT, dN);
   // moving ripple shading on the body itself — the surface visibly LIVES
   // even looking straight down (fresnel alone cannot do that)

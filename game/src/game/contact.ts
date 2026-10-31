@@ -57,14 +57,19 @@ export const MICRO_HALF = MICRO_SIZE / 2;
  *  ±1.5 m encode as the micro tex), G = churn coverage, B = spoil. */
 export const WTEX = 1024;
 export const WTEXEL = WORLD_SIZE / WTEX; // 0.75 m
+/** vertex-mirror resolution: half the far-field cache (1.5 m texels) */
+export const WVTEX = WTEX / 2;
 const MICRO_PER_TEXEL = WTEXEL / MICRO_CELL; // 12 micro cells per texel
 /** (retired) the static mesh no longer sinks under the overlay — it
  * discards its fragments inside the window instead (see world.ts) */
 /** rim blend: micro delta owns the middle of the window, the world (blurred)
  *  delta owns the rim, so the overlay hands its geometry to the static mesh
- *  with BOTH surfaces showing the SAME field at the seam (no step, no moat) */
-const RIM_IN = MICRO_HALF - 1.8; // 6.2 m — micro delta full inside this
-const RIM_OUT = MICRO_HALF - 1.1; // 6.9 m — world delta owns it from here out
+ *  with BOTH surfaces showing the SAME field at the seam (no step, no moat).
+ *  The band is 2.5 m wide — at grazing angles a 0.7 m handoff read as a
+ *  visible line following the player (the "square"); ~3 blade-lengths of
+ *  gradual blend reads as nothing at all */
+const RIM_IN = MICRO_HALF - 3.2; // 4.8 m — micro delta full inside this
+const RIM_OUT = MICRO_HALF - 0.7; // 7.3 m — world delta owns it from here out
 const GRID_HALF = WORLD_SIZE / 2; // world → terrain-grid frame shift
 /** delta clamp [m] — RGBA8 R channel encodes ±1.5 m (quadratic: sub-cm
  *  resolution near 0 for footprints, ~1.7 cm at full range for tunnel
@@ -148,6 +153,21 @@ export class MicroTerrain {
    *  visible from anywhere, and the overlay's rim blends into it. */
   worldTex!: THREE.DataTexture;
   private worldTexData = new Uint8Array(WTEX * WTEX * 4);
+  /** DEDICATED vertex-stage mirrors of tex/worldTex. In this three build a
+   *  sampler that a fragment stage also declares never receives its binding
+   *  in the VERTEX stage — the displacement silently read neutral and every
+   *  hole, rut and footprint rendered as a flat tint ("mud is just a
+   *  rendering box layer"). Objects the fragment never touches bind fine,
+   * so the displacement samplers get their own textures, refilled in
+   * lockstep with the ones the fragment reads. */
+  vertTex!: THREE.DataTexture;
+  private vertTexData = new Uint8Array(NC * NC * 4);
+  /** half-resolution mirror of the far-field cache (512², 1.5 m/texel —
+   *  exactly the static mesh's vertex lattice; and vertex-stage texture
+   *  fetches of full-res 1024² RGBA mirrors proved unreliable on some
+   *  GL stacks, while 256²/192² fetches are rock solid) */
+  worldVertTex!: THREE.DataTexture;
+  private worldVertTexData = new Uint8Array(WVTEX * WVTEX * 4);
   private worldTexDirty = false;
   private worldTexTimer = 0;
   private worldTexHasEdits = false;
@@ -281,6 +301,12 @@ export class MicroTerrain {
     this.tex.minFilter = THREE.LinearFilter;
     this.tex.magFilter = THREE.LinearFilter;
     this.tex.needsUpdate = true;
+    // the vertex-only displacement mirror (see the field comment above)
+    this.vertTex = new THREE.DataTexture(this.vertTexData, NC, NC, THREE.RGBAFormat);
+    this.vertTex.minFilter = THREE.LinearFilter;
+    this.vertTex.magFilter = THREE.LinearFilter;
+    this.vertTexData.set(this.texData);
+    this.vertTex.needsUpdate = true;
 
     const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.96, metalness: 0, dithering: true });
     // the overlay wins the depth test against the resurfaced static mesh by
@@ -295,6 +321,10 @@ export class MicroTerrain {
       if (shader.vertexShader.includes("#include <begin_vertex>")) this.displacementInjected = true;
       shader.uniforms.uMicroTex = { value: this.tex };
       shader.uniforms.uWorldTex = { value: this.worldTex };
+      // vertex-only twins — DEDICATED mirror textures (see the field comment:
+      // the shared objects never bind in the vertex stage)
+      shader.uniforms.uMicroV = { value: this.vertTex };
+      shader.uniforms.uWorldV = { value: this.worldVertTex };
       shader.uniforms.uGroundTex = { value: this.gtRef };
       shader.uniforms.uTerrainN = { value: this.tnRef };
       shader.uniforms.uMicroOrigin = { value: new THREE.Vector2(this.ox, this.oz) };
@@ -317,8 +347,14 @@ export class MicroTerrain {
         .replace("#include <common>", `#include <common>
           attribute float aBaseH;
           attribute vec3 aBaseN;
-          uniform sampler2D uMicroTex;
-          uniform sampler2D uWorldTex;
+          // VERTEX-ONLY samplers: a uniform shared by both shader stages never
+          // receives its texture binding in the VERTEX stage of this three
+          // build — the overlay's own displacement silently read neutral and
+          // every hole, footprint and rut rendered as a flat tint (the "mud is
+          // just a rendering box layer" report). The displacement twins below
+          // are declared ONLY here, so they bind — geometry moves again.
+          uniform sampler2D uMicroV;
+          uniform sampler2D uWorldV;
           uniform vec2 uMicroOrigin;
           uniform float uMicroEdge;
           uniform vec4 uPortal;
@@ -332,12 +368,12 @@ export class MicroTerrain {
           varying float vRing;
           // quadratic decode: byte 128 = 0 m, ±127 = ±1.5 m; sub-cm near 0
           float microD(in vec2 u){
-            float b = texture2D(uMicroTex, clamp(u, 0.0, 1.0)).r;
+            float b = texture2D(uMicroV, clamp(u, 0.0, 1.0)).r;
             return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
           }
           // the far-field edit cache — same quadratic encode, world-anchored
           float worldD(in vec2 wuv){
-            float b = texture2D(uWorldTex, clamp(wuv, 0.0, 1.0)).r;
+            float b = texture2D(uWorldV, clamp(wuv, 0.0, 1.0)).r;
             return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
           }
           // rim factor: 1 in the window interior, 0 past RIM_OUT
@@ -352,7 +388,9 @@ export class MicroTerrain {
         .replace("#include <beginnormal_vertex>", `#include <beginnormal_vertex>
           vec2 lp = position.xz;
           vec2 mUv = (lp + vec2(${MICRO_HALF.toFixed(1)})) / ${MICRO_SIZE.toFixed(1)};
-          vec4 mInfo = texture2D(uMicroTex, mUv);
+          // uMicroV: the VERTEX-ONLY sampler (dual-stage samplers do not bind
+          // in the vertex stage — the churn/spoil/ring varyings read neutral)
+          vec4 mInfo = texture2D(uMicroV, mUv);
           vGroundUv = (lp + uMicroOrigin) / ${WORLD_SIZE.toFixed(1)} + 0.5;
           vLpos = lp;
           // NOTE: the blended-surface gradient now rides in the FRAGMENT shader
@@ -425,18 +463,27 @@ export class MicroTerrain {
           surfRough = mix(surfRough, 0.62, clamp(pond * 1.3, 0.0, 0.8));
           // churned ground: dry crumbs pale it, wet churn darkens — soft
           // graded coverage (the texture channels are blurred), so disturbed
-          // soil reads as soil, not as pale cell squares (doc §29 legibility)
+          // soil reads as soil, not as pale cell squares (doc §29 legibility).
+          // The SOURCE blends toward the world cache's channels across the
+          // rim and the FACTORS are the static mesh's (churn 0.6, spoil 0.55),
+          // so a trail crossing the window edge keeps exactly the tint it
+          // wears outside it — the rim cannot shade apart from the world
+          vec4 weRim = texture2D(uWorldTex, vGroundUv);
+          float rimF = rimE(vLpos);
+          float churnE = mix(weRim.g, vChurn, rimF);
+          float spoilE = mix(weRim.b, vSpoil, rimF);
+          float ringE = vRing * rimF; // the suction ring is micro-only: fades with the rim
           vec3 churnCol = mix(diffuseColor.rgb * 1.14 + 0.014, diffuseColor.rgb * 0.66, wet);
-          diffuseColor.rgb = lerp3(diffuseColor.rgb, churnCol, vChurn * 0.45);
+          diffuseColor.rgb = lerp3(diffuseColor.rgb, churnCol, churnE * 0.6);
           // spoil: loose heap tint
-          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.32, 0.25, 0.18) * mix(1.0, 0.55, wet), vSpoil * 0.55);
+          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.32, 0.25, 0.18) * mix(1.0, 0.55, wet), spoilE * 0.55);
           // suction wet-ring: dark glossy mark
-          diffuseColor.rgb *= mix(1.0, 0.62, vRing * 0.6);
+          diffuseColor.rgb *= mix(1.0, 0.62, ringE * 0.6);
           // churn/spoil/ring also carry their gloss (kept here so the whole
           // roughness story lives in one place)
-          surfRough = mix(surfRough, 0.97, vChurn * (1.0 - wet) * 0.7);
-          surfRough = mix(surfRough, 0.98, vSpoil * 0.8);
-          surfRough = mix(surfRough, 0.16, vRing * 0.7);`)
+          surfRough = mix(surfRough, 0.97, churnE * (1.0 - wet) * 0.7);
+          surfRough = mix(surfRough, 0.98, spoilE * 0.8);
+          surfRough = mix(surfRough, 0.16, ringE * 0.7);`)
         .replace("#include <roughnessmap_fragment>", `#include <roughnessmap_fragment>
           roughnessFactor = surfRough;`)
         .replace("#include <normal_fragment_begin>", `#include <normal_fragment_begin>
@@ -447,14 +494,20 @@ export class MicroTerrain {
           // lighting: the 16 m window cannot shade apart from the world
           // around it — the moving square is gone at the root
           vec3 wN = texture2D(uTerrainN, vGroundUv).xyz * 2.0 - 1.0;
-          float he = ${(MICRO_CELL).toFixed(5)};
+          // gradient sampling step: micro-fine inside the window, the world
+          // cache's 0.75 m texel at the rim — the static mesh differentiates
+          // worldD over the SAME ±WTEXEL baseline, so both meshes tilt
+          // identically at the seam (a ±6 cm step samples ONE world texel:
+          // zero gradient — the rim used to shade flat where the static
+          // mesh sloped, a lighting seam exactly on the window edge)
+          float he = mix(${WTEXEL.toFixed(3)}, ${MICRO_CELL.toFixed(5)}, rimE(vLpos));
           float wsc = ${(1 / WORLD_SIZE).toFixed(8)};
           float hx1 = surfH(vLpos + vec2(he, 0.0), vGroundUv + vec2(wsc * he, 0.0));
           float hx0 = surfH(vLpos - vec2(he, 0.0), vGroundUv - vec2(wsc * he, 0.0));
           float hz1 = surfH(vLpos + vec2(0.0, he), vGroundUv + vec2(0.0, wsc * he));
           float hz0 = surfH(vLpos - vec2(0.0, he), vGroundUv - vec2(0.0, wsc * he));
-          float dDdx = (hx1 - hx0) / ${(2 * MICRO_CELL).toFixed(4)};
-          float dDdz = (hz1 - hz0) / ${(2 * MICRO_CELL).toFixed(4)};
+          float dDdx = (hx1 - hx0) / (2.0 * he);
+          float dDdz = (hz1 - hz0) / (2.0 * he);
           wN = normalize(wN + vec3(-dDdx, 0.0, -dDdz));
           normal = normalize((viewMatrix * vec4(wN, 0.0)).xyz);
           // micro-relief glisten: mud creep + rain-pocked sheen (matches the
@@ -584,6 +637,30 @@ export class MicroTerrain {
     this.worldTex.minFilter = THREE.LinearFilter;
     this.worldTex.magFilter = THREE.LinearFilter;
     this.worldTex.needsUpdate = true;
+    // vertex-only mirror (same reason as vertTex): 2x2 box-downsampled
+    this.refillWorldVertTex();
+    this.worldVertTex = new THREE.DataTexture(this.worldVertTexData, WVTEX, WVTEX, THREE.RGBAFormat);
+    this.worldVertTex.minFilter = THREE.LinearFilter;
+    this.worldVertTex.magFilter = THREE.LinearFilter;
+    this.worldVertTex.needsUpdate = true;
+  }
+  /** downsample the far-field cache into the vertex mirror (trench-dominant:
+ *  the deepest texel of each 2x2 wins — a ditch stays a ditch at 1.5 m) */
+  private refillWorldVertTex() {
+    const src = this.worldTexData, dst = this.worldVertTexData;
+    for (let j = 0; j < WVTEX; j++) {
+      for (let i = 0; i < WVTEX; i++) {
+        let bestR = 255, bestG = 0, bestB = 0;
+        for (let dj = 0; dj < 2; dj++) {
+          for (let di = 0; di < 2; di++) {
+            const k = ((j * 2 + dj) * WTEX + (i * 2 + di)) * 4;
+            if (src[k] < bestR) { bestR = src[k]; bestG = src[k + 1]; bestB = src[k + 2]; }
+          }
+        }
+        const d = (j * WVTEX + i) * 4;
+        dst[d] = bestR; dst[d + 1] = bestG; dst[d + 2] = bestB; dst[d + 3] = 255;
+      }
+    }
   }
 
   /**
@@ -655,6 +732,8 @@ export class MicroTerrain {
         t[k * 4 + 1] = Math.round(Math.min(255, g));
       }
     }
+    this.refillWorldVertTex();
+    this.worldVertTex.needsUpdate = true;
     this.worldTex.needsUpdate = true;
     this.worldTexHasEdits = true;
   }
@@ -1973,6 +2052,8 @@ export class MicroTerrain {
       if (this.flags[v] & 1) cc++;
     }
     this.churnCount = cc;
+    this.vertTexData.set(t);
+    this.vertTex.needsUpdate = true;
     this.tex.needsUpdate = true;
     this.texDirty = false;
     this.texWasClean = !anyContent;
@@ -2004,6 +2085,8 @@ export class MicroTerrain {
       this.worldTexData[k * 4 + 2] = 0;
       this.worldTexData[k * 4 + 3] = 0;
     }
+    this.refillWorldVertTex();
+    this.worldVertTex.needsUpdate = true;
     this.worldTex.needsUpdate = true;
     this.worldTexHasEdits = false;
     this.hWater.fill(0);

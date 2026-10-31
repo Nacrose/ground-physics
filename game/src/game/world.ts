@@ -193,6 +193,10 @@ export class World {
       // visible from anywhere in the world (same field the overlay's rim
       // blends into — one continuous surface across the window edge)
       shader.uniforms.uWorldEditTex = { value: this.micro ? this.micro.worldTex : neutralEdit };
+      // vertex-only twin of the far-field cache — the DEDICATED mirror
+      // texture (the shared object never binds in the vertex stage; the
+      // mirror is refilled in lockstep with every splat)
+      shader.uniforms.uWorldEditV = { value: this.micro ? this.micro.worldVertTex : neutralEdit };
       // the shared shading-normal + fine-lift fields (see constructor)
       shader.uniforms.uTerrainN = { value: this.terrainNormalTex };
       shader.uniforms.uLiftTex = { value: this.liftTex };
@@ -214,12 +218,15 @@ uniform vec4 uDigBox;
 uniform vec4 uPortal;
 uniform vec2 uPortalDir;
 uniform float uPortalPush;
-uniform sampler2D uWorldEditTex;
+uniform sampler2D uWorldEditV; // VERTEX-ONLY twin of uWorldEditTex (see note below)
 uniform sampler2D uLiftTex;
 // quadratic decode of the far-field edit cache — identical to the contact
-// overlay's worldD(), so both meshes read the exact same height field
+// overlay's worldD(), so both meshes read the exact same height field.
+// Samples the VERTEX-ONLY sampler: a uniform shared by both stages never
+// gets its texture bound for the vertex stage in this three build, and the
+// displacement silently read neutral — ditches rendered as flat tints
 float worldD(in vec2 wuv){
-  float b = texture2D(uWorldEditTex, clamp(wuv, 0.0, 1.0)).r;
+  float b = texture2D(uWorldEditV, clamp(wuv, 0.0, 1.0)).r;
   return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
 }
 // fine-tier lift (erosion / deposition / consolidation), bilinear over the
@@ -517,7 +524,11 @@ float liftAt(in vec2 wuv){
           float wb = texture2D(uWorldEditTex, guv).r;
           float wdlt = sign(wb - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(wb - 0.5) * 2.0, 2.0);
           vec2 lpos = ipos.xz - uMicroOrigin;
-          float inWin = 1.0 - smoothstep(6.4, 7.2, max(abs(lpos.x), abs(lpos.y)));
+          // the SAME 4.8-7.3 m band the overlay's rim blend uses — grass
+          // sinks into the micro field and hands off to the world cache
+          // across one shared gradual band (a mismatched band here drew its
+          // own square of popping blades around the player)
+          float inWin = 1.0 - smoothstep(4.8, 7.3, max(abs(lpos.x), abs(lpos.y)));
           float sinkD = min(mdlt * inWin, wdlt);
           // trampled trails: churned ground reads THROUGH the grass — blades
           // on churned texels shrink and desaturate toward trampled straw
@@ -661,8 +672,11 @@ float liftAt(in vec2 wuv){
     const micro = this.micro;
     if (!micro) return;
     const box = micro.digBox();
+    // overlay hidden (QA / debug): nothing owns the window ground, so the
+    // static mesh must render everywhere — no discard hole in the terrain
+    const half = micro.mesh.visible ? box.half : 0.001;
     if (this.terrainShader) {
-      (this.terrainShader.uniforms.uDigBox.value as THREE.Vector4).set(box.cx, box.cz, box.half, 0);
+      (this.terrainShader.uniforms.uDigBox.value as THREE.Vector4).set(box.cx, box.cz, half, 0);
     }
     const gm = this.grass.material as THREE.ShaderMaterial;
     (gm.uniforms.uMicroOrigin.value as THREE.Vector2).set(micro.ox, micro.oz);
