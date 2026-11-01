@@ -29,6 +29,7 @@ export class World {
   ground: Ground;
   uniforms: WorldUniforms;
   groundTex: THREE.DataTexture;
+  groundTex2: THREE.DataTexture;
 
   sun: THREE.DirectionalLight;
   hemi: THREE.HemisphereLight;
@@ -77,7 +78,16 @@ export class World {
     this.groundTex.minFilter = THREE.LinearFilter;
     this.groundTex.magFilter = THREE.LinearFilter;
     this.groundTex.needsUpdate = true;
-    if (this.micro) this.micro.setGroundTexture(this.groundTex);
+    // ---- ground texture #2 (R gel, G crust, B stick, A soil idx) — the mud
+    // material view: thixotropic structure, desiccation, adhesion, texture ----
+    this.groundTex2 = new THREE.DataTexture(ground.texData2, GRID, GRID, THREE.RGBAFormat);
+    this.groundTex2.minFilter = THREE.LinearFilter;
+    this.groundTex2.magFilter = THREE.LinearFilter;
+    this.groundTex2.needsUpdate = true;
+    if (this.micro) {
+      this.micro.setGroundTexture(this.groundTex);
+      this.micro.setGroundTexture2(this.groundTex2);
+    }
 
     this.buildTerrainMesh();
     this.buildSky();
@@ -121,6 +131,7 @@ export class World {
     const u = this.uniforms;
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uGroundTex = { value: this.groundTex };
+      shader.uniforms.uGroundTex2 = { value: this.groundTex2 };
       shader.uniforms.uWorldSize = { value: WORLD_SIZE };
       shader.uniforms.uDigBox = { value: new THREE.Vector4(0, 0, 0, 0) }; // xy centre, z half, w sink
       // tunnel portal cut: vec4(x, z, halfAlong, halfAcross), separate push
@@ -152,22 +163,60 @@ uniform float uPortalPush;`)
       shader.fragmentShader = shader.fragmentShader
         .replace("#include <common>", `#include <common>
           uniform sampler2D uGroundTex;
+          uniform sampler2D uGroundTex2;
           varying vec2 vGroundUv;
-          vec3 lerp3(vec3 a, vec3 b, float t){ return a + (b-a)*t; }`)
+          vec3 lerp3(vec3 a, vec3 b, float t){ return a + (b-a)*t; }
+          // desiccation-crack mask for a dried mud crust: ~55 cm plates with
+          // per-plate seam-width jitter (real mudcracks vary plate to plate);
+          // sin-free hash — this runs per-fragment over whole dry scenes
+          float crackSeam(vec2 uvw, float plateM){
+            vec2 wpM = uvw * ${WORLD_SIZE.toFixed(1)};
+            vec2 cp = wpM / plateM;
+            vec2 cid = floor(cp);
+            vec3 p3s = fract(vec3(cid.xyx) * 0.1031);
+            p3s += dot(p3s, p3s.yzx + 33.33);
+            float hsh = fract((p3s.x + p3s.y) * p3s.z);
+            vec2 f = fract(cp);
+            float edge = min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y));
+            return 1.0 - smoothstep(0.015 + 0.05 * hsh, 0.06 + 0.06 * hsh, edge);
+          }`)
         .replace("#include <color_fragment>", `#include <color_fragment>
           vec4 gcell = texture2D(uGroundTex, vGroundUv);
+          vec4 g2 = texture2D(uGroundTex2, vGroundUv);
           float wet = gcell.r; float pond = gcell.g; float mud = gcell.b; float road = gcell.a;
+          float gelF = g2.r; float crust = g2.g; float soilId = g2.a;
           // rain darkening (freshly wetted ground goes 2-3 stops darker)
           diffuseColor.rgb *= mix(1.0, 0.46, wet);
-          // mud: blend to dark saturated clay
-          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.11, 0.085, 0.06), mud * 0.65);
+          // mud color follows the soil's own fines: sand mud is tan, loam mud
+          // mid brown, silty-clay mud the dark grey-brown glossy stuff;
+          // remolded (freshly trafficked) mud reads a shade darker
+          vec3 mudSand = vec3(0.20, 0.165, 0.12);
+          vec3 mudLoam = vec3(0.15, 0.11, 0.08);
+          vec3 mudClay = vec3(0.105, 0.088, 0.072);
+          vec3 mudCol = soilId > 0.75 ? mudClay : (soilId > 0.4 ? mudLoam : mudSand);
+          mudCol *= 1.0 - 0.18 * (1.0 - gelF);
+          diffuseColor.rgb = lerp3(diffuseColor.rgb, mudCol, mud * 0.65);
           // dirt road: dusty brown track
           diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.42, 0.335, 0.24) * mix(1.0, 0.5, wet), road * 0.75);
           // water-tinted where ponded
-          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.19, 0.22, 0.20), clamp(pond * 1.4, 0.0, 0.55));`)
+          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.19, 0.22, 0.20), clamp(pond * 1.4, 0.0, 0.55));
+          // desiccation: drying mud pales into cracked plates with dark seams
+          // (rain re-slakes the crust and the pattern fades away again).
+          // The SURFACE skin dries long before the column does, so the crust
+          // shows while the soil is still moist — only fresh saturation hides it
+          float crustVis = crust * (1.0 - pond) * (1.0 - 0.55 * clamp(wet - 0.35, 0.0, 1.0));
+          if (crustVis > 0.015) {
+            float seam = crackSeam(vGroundUv, 0.55);
+            diffuseColor.rgb = lerp3(diffuseColor.rgb, diffuseColor.rgb * 1.26 + vec3(0.05), crustVis * 0.5);
+            diffuseColor.rgb *= 1.0 - seam * crustVis * 0.55;
+          }`)
         .replace("#include <roughnessmap_fragment>", `#include <roughnessmap_fragment>
           roughnessFactor = mix(roughnessFactor, 0.20, wet * 0.85);
-          roughnessFactor = mix(roughnessFactor, 0.32, mud);`);
+          // glisten: liquid mud carries a water film — fresh remolded churn
+          // glistens hardest; the drying crust kills the sheen (matte dust)
+          float crustV = crust * (1.0 - 0.55 * clamp(wet - 0.35, 0.0, 1.0));
+          roughnessFactor = mix(roughnessFactor, 0.13, mud * (1.0 - crustV) * (0.55 + 0.45 * (1.0 - gelF)));
+          roughnessFactor = mix(roughnessFactor, 0.86, mud * crustV);`);
     };
     const mesh = new THREE.Mesh(geo, mat);
     mesh.receiveShadow = true;
@@ -670,6 +719,7 @@ uniform float uPortalPush;`)
   /** ground texture refresh after physics tick */
   refreshGroundTexture() {
     this.groundTex.needsUpdate = true;
+    this.groundTex2.needsUpdate = true;
   }
 
   dispose() {

@@ -24,6 +24,9 @@ export interface InputState {
 
 export type TrampleFn = (x: number, z: number, r: number, mode: "trample" | "dig") => void;
 
+const JEANS_BASE = new THREE.Color(0x35404d);
+const BOOT_MUD_COL = new THREE.Color(0x241a12);
+
 export class Player {
   group: THREE.Group; // character root
   pos = new THREE.Vector3(0, 0, 0);
@@ -51,6 +54,13 @@ export class Player {
   camera: THREE.PerspectiveCamera;
   private camPitch = 0.18;
   private camZoom = 6.2;
+  /** mud caked on the boots 0..1 — picked up in plastic/liquid mud, dries
+   *  and flakes off on dry ground; weighs the walk down and glosses the legs */
+  bootMud = 0;
+  /** dwell timer while standing still on soft mud (viscoplastic creep) */
+  private dwellT = 0;
+  private legMatL!: THREE.MeshStandardMaterial;
+  private legMatR!: THREE.MeshStandardMaterial;
   /** miner's lantern — the only light underground */
   private lantern: THREE.PointLight | null = null;
   /** spade swing animation phase 0..1, or null when idle */
@@ -92,9 +102,11 @@ export class Player {
       mesh.castShadow = true;
       return mesh;
     };
-    this.legL = mkLimb(jeans, 0.17, 0.82);
+    this.legMatL = jeans.clone();
+    this.legMatR = jeans.clone();
+    this.legL = mkLimb(this.legMatL, 0.17, 0.82);
     this.legL.position.set(0.115, 0.82, 0);
-    this.legR = mkLimb(jeans, 0.17, 0.82);
+    this.legR = mkLimb(this.legMatR, 0.17, 0.82);
     this.legR.position.set(-0.115, 0.82, 0);
     this.armL = mkLimb(coat, 0.13, 0.6);
     this.armL.position.set(0.29, 1.38, 0);
@@ -166,8 +178,23 @@ export class Player {
     const filmDepth = this.micro.waterAt(this.pos.x, this.pos.z);
     if (filmDepth > this.pondM) this.pondM = filmDepth;
     const filmSlow = Math.min(filmDepth / 0.25, 1) * 0.45;
-    const slow = Math.max(0.18, 1 - 0.68 * this.mud - Math.max(
-      Math.min(this.pondM / 0.25, 1) * 0.45, filmSlow));
+    // slow: mud drag + pond/film wading + sticky-limit adhesion (FAO: soil
+    // that "sticks to both fingers and tends to stretch") + caked boots
+    const slow = Math.max(0.16, 1 - 0.68 * this.mud - Math.max(
+      Math.min(this.pondM / 0.25, 1) * 0.45, filmSlow)
+      - sample.stick * 0.09 * (1 - this.mud * 0.45)
+      - 0.11 * this.bootMud);
+
+    // ----- boot mud: pick it up in mud, dry it off on dry ground ----------
+    if (this.onGround) {
+      if (this.mud > 0.3 || this.pondM > 0.01) {
+        this.bootMud = Math.min(1, this.bootMud
+          + dt * (0.05 + 0.45 * this.mud + 0.2 * sample.stick));
+      } else if (filmDepth < 0.01) {
+        const dryHere = 1 - this.micro.touchAt(this.pos.x, this.pos.z).wetness;
+        this.bootMud = Math.max(0, this.bootMud - dt * (0.015 + 0.05 * dryHere));
+      }
+    }
     const baseSpeed = input.sprint ? 7.2 : 4.1;
     const maxSpeed = baseSpeed * slow;
 
@@ -192,6 +219,17 @@ export class Player {
     const target = moving ? maxSpeed * slopeFactor : 0;
     const accel = moving ? 14 : 16;
     this.speed += (target - this.speed) * Math.min(dt * accel, 1);
+
+    // ----- standing in soft mud: the load dwells, mud creeps ---------------
+    // (Herschel-Bulkley: below yield it holds you; past yield you keep going
+    //  down — that's why a rested wagon sinks by sitting, not by arriving)
+    if (this.onGround && !moving && this.mud > 0.25) {
+      this.dwellT += dt;
+      if (this.dwellT >= 0.5) {
+        this.ground.creepSink(this.pos.x, this.pos.z, 55, this.dwellT);
+        this.dwellT = 0.5;
+      }
+    } else this.dwellT = 0;
 
     if (moving) {
       this.pos.x += move.x * this.speed * dt;
@@ -232,6 +270,10 @@ export class Player {
           }
         }
         this.fx.playStep(this.stepKind(s), Math.min(1.8, impact * 0.6));
+        // a hard landing in soft mud throws brown churn
+        if (sample.mud > 0.2) {
+          this.fx.spawnMudChurn(this.pos.x, groundH + 0.05, this.pos.z, Math.min(1.6, impact));
+        }
         // the crater of a hard landing + the rut it leaves behind
         this.micro.stampBoot(this.pos.x, this.pos.z, this.yaw, s, 1.6 + impact * 0.6);
         this.trample?.(this.pos.x, this.pos.z, 0.2, "trample");
@@ -274,6 +316,11 @@ export class Player {
     this.group.position.set(this.pos.x, this.pos.y + bob, this.pos.z);
     this.group.rotation.y = this.yaw;
 
+    // ----- muddy boots: legs darken + gloss as mud cakes on -----------------
+    this.legMatL.color.copy(JEANS_BASE).lerp(BOOT_MUD_COL, this.bootMud * 0.85);
+    this.legMatR.color.copy(JEANS_BASE).lerp(BOOT_MUD_COL, this.bootMud * 0.85);
+    this.legMatL.roughness = this.legMatR.roughness = 0.95 - this.bootMud * 0.55;
+
     // footprint every half stride — a real write into the deformable ground
     const footSign = Math.sin(this.walkPhase) > 0 ? 1 : -1;
     if (footSign !== this.lastFootSign) {
@@ -296,6 +343,8 @@ export class Player {
         }
         if (this.pondM > 0.015 || this.mud > 0.5) {
           this.fx.spawnSplash(this.pos.x, groundH + 0.04, this.pos.z);
+          // each footfall churns brown droplets out of soft mud
+          this.fx.spawnMudChurn(fx0, groundH + 0.06, fz0, input.sprint ? 1.1 : 0.7);
           // sprinting through soft clay churns ruts
           if (input.sprint && this.mud > 0.45) {
             this.ground.applyWheelLoad(this.pos.x, this.pos.z, 55, true);

@@ -78,6 +78,21 @@ export const CFG = {
    *  without the cap a closed bowl silently lakes up 13+ m of phantom water) */
   depressionMaxM: 0.25,
   rhoW: 1000.0,
+  // ---- mud material (thixotropy / creep / stickiness / desiccation) --------
+  // Mud is a Herschel-Bulkley solid-liquid: it has a yield stress (no sink
+  // below it), shear-thins, and its clay particles re-flocculate at REST —
+  // gel strength rebuilds while water content stays constant (10 s vs 10 min
+  // gel readings in drilling fluids; geotech calls the same thing sensitivity).
+  gelTauH: 180, // gel recovery τ [h] = gelTauH / clay%  (30% clay ≈ 6 h)
+  sensitivityPerClay: 0.07, // S_t = 1 + clay% · this  (30% → 3.1, 18% → 2.3)
+  remoldPerPass: 0.55, // structure knock-down per plastic/liquid wheel pass
+  remoldPerStroke: 0.72, // knock-down per spade stroke / hard landing
+  mudCreepRate: 0.0016, // viscoplastic sinkage [m/s] at q/qult = 2
+  mudCreepRampS: 8, // dwell seconds until creep is fully developed
+  stickPeak: 1.0, // peak adhesion scale (sticky-limit window, FAO classes)
+  crustGrowPerDryH: 0.22, // desiccation crust growth per drying-hour
+  crustSlakePerWetH: 6, // rain re-slaking decay per wetting-hour
+  crustSealFrac: 0.35, // infiltration sealing by a fully developed crust
 };
 
 export const DEG = Math.PI / 180.0;

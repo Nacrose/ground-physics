@@ -24,6 +24,8 @@ export interface HUDState {
   wagonVerdict: string;
   wagonRutCm: number;
   mudHere: number;
+  /** mud caked on the player's boots 0..1 (weight drag + leg visual) */
+  bootMud: number;
   /** adit status line, or null when no tunnel is driven */
   tunnelLine: string | null;
 }
@@ -47,6 +49,7 @@ export class HUD {
   private tsEl!: HTMLElement;
   private fpsEl!: HTMLElement;
   private wagonEl!: HTMLElement;
+  private mudEl!: HTMLElement;
   private inspectorEl!: HTMLElement;
   private flashEl!: HTMLElement;
   private hintEl!: HTMLElement;
@@ -88,11 +91,13 @@ export class HUD {
     this.tunnelEl.style.display = "none";
     this.rainEl = div("hud-line", "");
     this.windEl = div("hud-line", "");
+    this.mudEl = div("hud-line hud-wagon", "");
+    this.mudEl.style.display = "none";
     this.tempEl = div("hud-line", "");
     this.tsEl = div("hud-line hud-dim", "");
     this.wagonEl = div("hud-line hud-wagon", "");
     this.fpsEl = div("hud-fps", "");
-    meta.append(this.presetEl, this.rainEl, this.windEl, this.tempEl, this.tsEl, this.wagonEl, this.tunnelEl);
+    meta.append(this.presetEl, this.rainEl, this.windEl, this.mudEl, this.tempEl, this.tsEl, this.wagonEl, this.tunnelEl);
     panel.append(this.weatherWordEl, this.timeEl, meta, this.fpsEl);
     this.root.appendChild(panel);
 
@@ -252,6 +257,14 @@ export class HUD {
       this.wagonEl.textContent = `WAGON — ${s.wagonVerdict}${s.wagonRutCm > 1 ? ` · ${Math.round(s.wagonRutCm)} CM RUT` : ""}`;
       this.wagonEl.dataset.v = s.wagonVerdict.startsWith("BOGGED") ? "bog" :
         s.wagonVerdict.startsWith("MARGINAL") ? "mar" : "ok";
+      // GROUND line: mud factor underfoot + mud caked on the boots
+      const mudPct = Math.round(s.mudHere * 100);
+      if (mudPct > 3 || s.bootMud > 0.04) {
+        this.mudEl.textContent =
+          `GROUND — ${mudPct > 3 ? `MUD ${mudPct}%` : "FIRM"}${s.bootMud > 0.04 ? ` · BOOTS +${Math.round(s.bootMud * 100)}%` : ""}`;
+        this.mudEl.dataset.v = mudPct > 55 ? "bog" : mudPct > 25 ? "mar" : "ok";
+        this.mudEl.style.display = "";
+      } else this.mudEl.style.display = "none";
       if (s.tunnelLine) {
         this.tunnelEl.style.display = "";
         this.tunnelEl.textContent = s.tunnelLine;

@@ -73,6 +73,7 @@ export interface SoilTouch {
   sr: number; // saturation of the column
   wPct: number;
   textureIdx: number;
+  gel: number; // thixotropic structure 0..1 (1 = rested/intact)
 }
 
 export interface DigResult {
@@ -85,7 +86,12 @@ export interface DigResult {
 
 /** repose angle (tan) + relaxation rate by ground state */
 function reposeOf(s: SoilTouch): { tanRepose: number; rate: number } {
-  if (s.mud > 0.6 || s.consistency === 2) return { tanRepose: 0.14, rate: 0.8 }; // mud: 8°, oozes
+  if (s.mud > 0.6 || s.consistency === 2) {
+    // thixotropy: freshly remolded mud oozes flat and fast (8°, rate 1.2);
+    // a rested gel holds its ridges and takes a crisper print (13.5°, 0.45)
+    const gel = s.gel ?? 1;
+    return { tanRepose: 0.14 + 0.1 * gel, rate: 0.45 + 0.75 * (1 - gel) };
+  }
   if (s.wetness > 0.8 && s.sr > 0.9) return { tanRepose: 0.47, rate: 0.3 }; // wet clay: 25°
   if (s.wetness > 0.35) return { tanRepose: 1.0, rate: 0.12 }; // moist loam: 45°, faces stand
   return { tanRepose: 0.62, rate: 0.5 }; // dry sand: 32°, flows back
@@ -117,6 +123,7 @@ export class MicroTerrain {
   private texData = new Uint8Array(NC * NC * 4);
   private texDirty = true;
   private gtRef: THREE.DataTexture | null = null;
+  private gt2Ref: THREE.DataTexture | null = null;
   private shaderRef: { uniforms: { [k: string]: { value: unknown } } } | null = null;
   /** QA: set once onBeforeCompile actually ran on the overlay material */
   public compiled = false;
@@ -244,6 +251,7 @@ export class MicroTerrain {
       if (shader.vertexShader.includes("#include <begin_vertex>")) this.displacementInjected = true;
       shader.uniforms.uMicroTex = { value: this.tex };
       shader.uniforms.uGroundTex = { value: this.gtRef };
+      shader.uniforms.uGroundTex2 = { value: this.gt2Ref };
       shader.uniforms.uMicroOrigin = { value: new THREE.Vector2(this.ox, this.oz) };
       shader.uniforms.uMicroEdge = { value: MICRO_HALF - 0.7 };
       // portal cut (tunnel.ts): the same rotated smoothstep box the terrain
@@ -257,6 +265,8 @@ export class MicroTerrain {
           attribute float aBaseH;
           attribute vec3 aBaseN;
           uniform sampler2D uMicroTex;
+          uniform sampler2D uGroundTex;
+          uniform sampler2D uGroundTex2;
           uniform vec2 uMicroOrigin;
           uniform float uMicroEdge;
           uniform vec4 uPortal;
@@ -270,18 +280,51 @@ export class MicroTerrain {
           float microD(in vec2 u){
             float b = texture2D(uMicroTex, clamp(u, 0.0, 1.0)).r;
             return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
+          }
+          // hash + bilinear value noise (for churned-mud smear ridges) —
+          // sin-free hash: 66k overlay vertices re-evaluate this every frame,
+          // so it must stay off the transcendental pipeline
+          float h21(vec2 p){
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+          }
+          float vnoise(vec2 p){
+            vec2 ip = floor(p), fp = fract(p);
+            fp = fp * fp * (3.0 - 2.0 * fp);
+            float a = h21(ip), b = h21(ip + vec2(1.0, 0.0));
+            float c = h21(ip + vec2(0.0, 1.0)), d = h21(ip + vec2(1.0, 1.0));
+            return mix(mix(a, b, fp.x), mix(c, d, fp.x), fp.y);
           }`)
         .replace("#include <beginnormal_vertex>", `#include <beginnormal_vertex>
           vec2 mUv = (position.xz + vec2(${MICRO_HALF.toFixed(1)})) / ${MICRO_SIZE.toFixed(1)};
           vec4 mInfo = texture2D(uMicroTex, mUv);
+          vec2 wpos2 = position.xz + uMicroOrigin;
+          vec2 guv = wpos2 / ${(WORLD_SIZE).toFixed(1)} + 0.5;
+          vec4 g1 = texture2D(uGroundTex, clamp(guv, 0.0, 1.0));
+          vec4 g2 = texture2D(uGroundTex2, clamp(guv, 0.0, 1.0));
+          float mudF = g1.b;
+          float gelF = g2.r;
           float eStep = ${(2 * MICRO_CELL / MICRO_SIZE).toFixed(5)};
           float dDdx = (microD(mUv + vec2(eStep, 0.0)) - microD(mUv - vec2(eStep, 0.0))) / ${(2 * MICRO_CELL).toFixed(4)};
           float dDdz = (microD(mUv + vec2(0.0, eStep)) - microD(mUv - vec2(0.0, eStep))) / ${(2 * MICRO_CELL).toFixed(4)};
-          objectNormal = normalize(aBaseN + vec3(-dDdx, 0.0, -dDdz));`)
+          // churned mud is SMEARED: boot-drag ridges ride the delta gradient.
+          // Fresh churn (low gel) reads strongest — the rested gel keeps its
+          // crisp print geometry. Two anisotropically STRETCHED value-noise
+          // octaves (elongated along different axes) so the smears read as
+          // dragged ridges, never as a regular grid. Skipped entirely on
+          // un-churned ground (the common case — 66k verts, every frame)
+          float smear = mInfo.g * mudF * (0.55 - 0.35 * gelF);
+          vec3 nOff = vec3(-dDdx, 0.0, -dDdz);
+          if (smear > 0.004) {
+            float sN1 = vnoise(wpos2 * vec2(2.6, 5.4)) * 0.6 + vnoise(wpos2 * vec2(7.0, 12.0)) * 0.4 - 0.5;
+            float sN2 = vnoise(wpos2 * vec2(5.2, 2.8) + 19.7) * 0.6 + vnoise(wpos2 * vec2(11.0, 6.5)) * 0.4 - 0.5;
+            nOff += vec3(sN1 * smear, 0.0, sN2 * smear);
+          }
+          objectNormal = normalize(aBaseN + nOff);`)
         .replace("#include <begin_vertex>", `#include <begin_vertex>
           vChurn = mInfo.g; vSpoil = mInfo.b; vRing = mInfo.a;
-          vec2 wpos2 = position.xz + uMicroOrigin;
-          vGroundUv = wpos2 / ${(WORLD_SIZE).toFixed(1)} + 0.5;
+          vGroundUv = guv;
           float edge = 1.0 - smoothstep(uMicroEdge, uMicroEdge + 0.45, max(abs(position.x), abs(position.z)));
           // portal cut mask (matches the terrain shader's, rotated to the
           // adit axis — uPortalDir is the unit heading, .zw the half-extents)
@@ -294,16 +337,41 @@ export class MicroTerrain {
       shader.fragmentShader = shader.fragmentShader
         .replace("#include <common>", `#include <common>
           uniform sampler2D uGroundTex;
+          uniform sampler2D uGroundTex2;
           varying vec2 vGroundUv;
           varying float vChurn;
           varying float vSpoil;
           varying float vRing;
-          vec3 lerp3(vec3 a, vec3 b, float t){ return a + (b-a)*t; }`)
+          vec3 lerp3(vec3 a, vec3 b, float t){ return a + (b-a)*t; }
+          // desiccation-crack mask for a dried mud crust: ~55 cm plates with
+          // per-plate seam-width jitter (real mudcracks vary plate to plate);
+          // sin-free hash — cheap per-fragment
+          float crackSeam(vec2 uvw, float plateM){
+            vec2 wpM = uvw * ${(WORLD_SIZE).toFixed(1)};
+            vec2 cp = wpM / plateM;
+            vec2 cid = floor(cp);
+            vec3 p3s = fract(vec3(cid.xyx) * 0.1031);
+            p3s += dot(p3s, p3s.yzx + 33.33);
+            float hsh = fract((p3s.x + p3s.y) * p3s.z);
+            vec2 f = fract(cp);
+            float edge = min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y));
+            return 1.0 - smoothstep(0.015 + 0.05 * hsh, 0.06 + 0.06 * hsh, edge);
+          }`)
         .replace("#include <color_fragment>", `#include <color_fragment>
           vec4 gcell = texture2D(uGroundTex, vGroundUv);
+          vec4 g2 = texture2D(uGroundTex2, vGroundUv);
           float wet = gcell.r; float pond = gcell.g; float mud = gcell.b; float road = gcell.a;
+          float gelF = g2.r; float crust = g2.g; float soilId = g2.a;
           diffuseColor.rgb *= mix(1.0, 0.46, wet);
-          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.11, 0.085, 0.06), mud * 0.65);
+          // mud: color follows the soil's own fines — sand mud is tan and
+          // granular, loam mid brown, silty clay is the dark grey-brown stuff;
+          // remolded churn (fresh traffic) reads a shade darker still
+          vec3 mudSand = vec3(0.20, 0.165, 0.12);
+          vec3 mudLoam = vec3(0.15, 0.11, 0.08);
+          vec3 mudClay = vec3(0.105, 0.088, 0.072);
+          vec3 mudCol = soilId > 0.75 ? mudClay : (soilId > 0.4 ? mudLoam : mudSand);
+          mudCol *= 1.0 - 0.18 * (1.0 - gelF);
+          diffuseColor.rgb = lerp3(diffuseColor.rgb, mudCol, mud * 0.65);
           diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.42, 0.335, 0.24) * mix(1.0, 0.5, wet), road * 0.75);
           diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.19, 0.22, 0.20), clamp(pond * 1.4, 0.0, 0.55));
           // churned ground: dry crumbs pale it, wet churn darkens (strong mix —
@@ -313,10 +381,23 @@ export class MicroTerrain {
           // spoil: pale loose heap
           diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.32, 0.25, 0.18) * mix(1.0, 0.55, wet), vSpoil * 0.85);
           // suction wet-ring: dark glossy mark
-          diffuseColor.rgb *= mix(1.0, 0.62, vRing * 0.6);`)
+          diffuseColor.rgb *= mix(1.0, 0.62, vRing * 0.6);
+          // desiccation: a drying mud crust pales into cracked plates with
+          // dark seams — fades away as rain re-slakes the skin back to mud.
+          // The surface skin dries long before the column does
+          float crustVis = crust * (1.0 - pond) * (1.0 - 0.55 * clamp(wet - 0.35, 0.0, 1.0));
+          if (crustVis > 0.015) {
+            float seam = crackSeam(vGroundUv, 0.55);
+            diffuseColor.rgb = lerp3(diffuseColor.rgb, diffuseColor.rgb * 1.26 + vec3(0.05), crustVis * 0.5);
+            diffuseColor.rgb *= 1.0 - seam * crustVis * 0.55;
+          }`)
         .replace("#include <roughnessmap_fragment>", `#include <roughnessmap_fragment>
           roughnessFactor = mix(roughnessFactor, 0.20, wet * 0.85);
-          roughnessFactor = mix(roughnessFactor, 0.32, mud);
+          // glisten: liquid mud carries a water film — fresh remolded churn
+          // glistens hardest; the drying crust kills the sheen (matte dust)
+          float crustV = crust * (1.0 - 0.55 * clamp(wet - 0.35, 0.0, 1.0));
+          roughnessFactor = mix(roughnessFactor, 0.13, mud * (1.0 - crustV) * (0.55 + 0.45 * (1.0 - gelF)));
+          roughnessFactor = mix(roughnessFactor, 0.86, mud * crustV);
           roughnessFactor = mix(roughnessFactor, 0.97, vChurn * (1.0 - wet) * 0.7);
           roughnessFactor = mix(roughnessFactor, 0.98, vSpoil * 0.8);
           roughnessFactor = mix(roughnessFactor, 0.16, vRing * 0.7);`);
@@ -393,13 +474,28 @@ export class MicroTerrain {
         varying vec3 vWorld;
         varying float vDepth;
         varying float vEdge;
+        // hashed value noise — the rain crinkle is an irregular, drifting
+        // field, not two orthogonal sine families (that reads as a grid);
+        // sin-free hash keeps the film fragment cheap
+        float h21w(vec2 p){
+          vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+          p3 += dot(p3, p3.yzx + 33.33);
+          return fract((p3.x + p3.y) * p3.z);
+        }
+        float vn2w(vec2 p){
+          vec2 ip = floor(p), fp = fract(p);
+          fp = fp * fp * (3.0 - 2.0 * fp);
+          float a = h21w(ip), b = h21w(ip + vec2(1.0, 0.0));
+          float c = h21w(ip + vec2(0.0, 1.0)), d = h21w(ip + vec2(1.0, 1.0));
+          return mix(mix(a, b, fp.x), mix(c, d, fp.x), fp.y);
+        }
         void main(){
           if (vDepth < 0.0003) discard;
-          // animated normal: two travelling wave fields + rain prickle
+          // animated normal: two travelling wave fields + drifting hashed crinkle
           vec2 p = vWorld.xz;
           float w1 = sin(p.x * 1.7 + uTime * 1.9) * cos(p.y * 1.3 - uTime * 1.4);
           float w2 = sin((p.x + p.y) * 2.6 + uTime * 2.7) * 0.5;
-          float prickle = uRain * (sin(p.x * 23.0 + uTime * 12.0) * sin(p.y * 19.0 - uTime * 10.0));
+          float prickle = uRain * (vn2w(p * 7.0 + vec2(uTime * 2.3, -uTime * 1.7)) * 2.0 - 1.0);
           vec3 n = normalize(vec3(w1 * 0.05 + w2 * 0.05 + prickle * 0.09, 1.0, w2 * 0.05 - w1 * 0.04 + prickle * 0.08));
           vec3 v = normalize(uCamPos - vWorld);
           float fres = pow(1.0 - max(dot(v, n), 0.0), 2.2);
@@ -442,6 +538,12 @@ export class MicroTerrain {
   setGroundTexture(gt: THREE.DataTexture) {
     this.gtRef = gt;
     if (this.shaderRef) this.shaderRef.uniforms.uGroundTex.value = gt;
+  }
+
+  /** second ground texture (gel / crust / stick / soil index) — mud material view */
+  setGroundTexture2(gt2: THREE.DataTexture) {
+    this.gt2Ref = gt2;
+    if (this.shaderRef) this.shaderRef.uniforms.uGroundTex2.value = gt2;
   }
 
   /** micro-window origin in world coords (tunnel muck routing queries it) */
@@ -709,6 +811,7 @@ export class MicroTerrain {
       sr: this.ground.sr[k],
       wPct: this.ground.wPct[k],
       textureIdx: this.terrain.soil[k],
+      gel: this.ground.gel[k],
     };
   }
 
@@ -799,8 +902,9 @@ export class MicroTerrain {
 
   /** a footfall: state-shaped crater + conserving rim ridge */
   stampBoot(x: number, z: number, yaw: number, s: SoilTouch, power = 1) {
-    // depth by state: dry barely shows → mud is a churned crater
-    const depth = (0.016 + s.wetness * 0.05 + s.mud * 0.1) * power;
+    // depth by state: dry barely shows → mud is a churned crater; remolded
+    // mud (low gel) takes the deeper print, rested mud holds firmer
+    const depth = (0.016 + s.wetness * 0.05 + s.mud * 0.1 * (1.3 - 0.45 * (s.gel ?? 1))) * power;
     const removed = -this.addProfile(x, z, yaw, 0.075, 0.125, depth, -1, false, false);
     const rimFrac = s.mud > 0.5 ? 0.45 : s.wetness > 0.35 ? 0.35 : 0.22;
     this.rimRedistribute(x, z, removed, 0.125, rimFrac);

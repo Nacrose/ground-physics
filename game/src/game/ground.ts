@@ -60,6 +60,16 @@ export interface CellReport {
   branchLabel: string;
   traffic: number;
   disturbed: number; // wet-hours of loose structure (0 = intact)
+  /** thixotropic structure 0..1 — 1 = fully gelled/intact, 0 = freshly
+   *  remolded (s_u/S_t of intact). Recover with rest at constant water. */
+  gel: number;
+  /** desiccation crust 0..1 — dried mud skin (cracks, seals infiltration) */
+  mudCrust: number;
+  /** adhesion 0..1 in the Atterberg sticky-limit window (FAO stickiness) */
+  stick: number;
+  /** liquidity index (w-PL)/(LL-PL) — where in the plastic range we are */
+  li: number;
+  gelState: string; // REMOLDED / GELLING / INTACT
 }
 
 export class Ground {
@@ -110,6 +120,15 @@ export class Ground {
   patternTime = 0;
   /** packed render texture data RGBA: R wetness, G pond, B mud, A road */
   public texData = new Uint8Array(N * 4);
+  /** second packed render texture RGBA: R gel, G crust, B stick, A soil idx
+   *  (the mud-material view: structure, desiccation, adhesion, texture) */
+  public texData2 = new Uint8Array(N * 4);
+  /** thixotropic gel structure 0..1 per cell (see CellReport.gel) */
+  gel = new Float32Array(N);
+  /** desiccation crust 0..1 per cell (dried mud skin) */
+  mudCrust = new Float32Array(N);
+  /** stickiness 0..1 per cell (Atterberg sticky-limit window) */
+  stick = new Float32Array(N);
 
   constructor(terrain: TerrainData, initSat: number) {
     this.terrain = terrain;
@@ -127,6 +146,7 @@ export class Ground {
       this.hPond[k] = 0; this.infiltF[k] = 0; this.keCum[k] = 0; this.rut[k] = 0;
       this.branch[k] = 0; this.traffic[k] = 0; this.disturbed[k] = 0; this.compAcc[k] = 0;
       this.wetFlux[k] = 0;
+      this.gel[k] = 1; this.mudCrust[k] = 0; this.stick[k] = 0;
     }
     this.basinOutflowM3 = 0;
     this.loanPond.fill(0);
@@ -284,7 +304,8 @@ export class Ground {
       const avail = hP[k];
       if (avail <= 1e-7) { F[k] = Math.max(F[k], 2e-3); this.wetFlux[k] = 0; continue; }
       const tex = SOIL_TEXTURES[soil[k]];
-      const seal = 1 - CFG.keSealFrac * Math.min(ke[k] / CFG.keSealJ, 1);
+      const seal = 1 - CFG.keSealFrac * Math.min(ke[k] / CFG.keSealJ, 1)
+        - CFG.crustSealFrac * this.mudCrust[k]; // dried-mud skin seals too
       // disturbed soil infiltrates faster (crust broken, structure open);
       // compacted paths shed water — the desire-path feedback (spec §2)
       const kTraffic = 1 - 0.12 * Math.min(this.traffic[k], 5);
@@ -386,6 +407,32 @@ export class Ground {
               this.consolidatedM3 += inc * CELL * CELL;
             }
           }
+        }
+      }
+    }
+
+    // 5.75) mud MATERIAL state — thixotropy + desiccation. Two things water
+    // content alone never explains: (a) mud churned by traffic/rain-KE
+    // remolds to a fraction of its strength, then re-gels with REST at the
+    // same water content (drilling fluids: 10 s vs 10 min gel strength;
+    // geotech: sensitivity S_t); (b) mud that dries leaves a shrinking,
+    // cracking crust until rain re-slakes it.
+    {
+      const dth = dt / 3600;
+      for (let k = 0; k < N; k++) {
+        const tex = SOIL_TEXTURES[soil[k]];
+        // (a) gel recovery — clay-fraction-scaled (sand has no gel to rebuild)
+        if (tex.clay > 2 && this.gel[k] < 1) {
+          const tau = CFG.gelTauH / tex.clay; // 30% clay ≈ 6 game-hours
+          this.gel[k] += (1 - this.gel[k]) * Math.min(dth / tau, 1);
+        }
+        // (b) desiccation crust: grows while a muddy past is drying, slakes
+        // fast when re-wetted or ponded (rain softens the skin back to mud)
+        const cr = this.mudCrust[k];
+        if (this.branch[k] === 0 && this.mudFactor[k] > 0.22 && this.consistency[k] < 2) {
+          this.mudCrust[k] = Math.min(1, cr + CFG.crustGrowPerDryH * dth * (0.4 + 0.6 * this.sr[k]));
+        } else if (this.branch[k] === 1 || this.hPond[k] > 5e-3 || this.consistency[k] === 2) {
+          this.mudCrust[k] = Math.max(0, cr - CFG.crustSlakePerWetH * dth);
         }
       }
     }
@@ -570,6 +617,24 @@ export class Ground {
       const sigmaEff = sigmaV - uPos + Sr * suction;
       const tauF = cEff + sigmaEff * Math.tan(phiEff * DEG);
 
+      // thixotropic structure (spec: remolded clay carries s_u / S_t of its
+      // intact strength; the gel rebuilds with rest — Passchendaele mud that
+      // a rested track firms up over, a trafficked one deepens)
+      const S_t = 1 + tex.clay * CFG.sensitivityPerClay;
+      const kGel = 1 / (1 + (S_t - 1) * (1 - this.gel[k]));
+      qUlt *= kGel;
+
+      // stickiness: the Atterberg sticky-limit window (FAO stickiness class
+      // 2-3 territory — soil "sticks to both fingers and tends to stretch").
+      // Rises from just below PL, peaks mid-plastic, fades as it goes liquid;
+      // clay controls adhesion, silt mud is soupy, sand is granular.
+      {
+        const lo = tex.PL * 0.8, hi = tex.LL + 8;
+        const tw = (wPct - lo) / (hi - lo);
+        const win = (tw <= 0 || tw >= 1) ? 0 : Math.sin(tw * Math.PI);
+        this.stick[k] = Math.min(1, win * (0.35 + 0.65 * tex.clay / 30)) * CFG.stickPeak;
+      }
+
       this.wPct[k] = wPct;
       this.sr[k] = Sr;
       this.suction[k] = suction;
@@ -586,11 +651,22 @@ export class Ground {
   }
 
   // ------------------------------------------------------------- interactions
-  /** player/vehicle rutting: punching shear into soft ground [m sinkage] */
-  applyWheelLoad(x: number, y: number, contactKpa: number, isPlayer: boolean): { sinkage: number; verdict: string } {
+  /** player/vehicle rutting: punching shear into soft ground [m sinkage].
+   *  dwellS > 0 adds viscoplastic CREEP — mud past yield keeps yielding under
+   *  a resting load (why a wagon sinks by sitting, not just by arriving). */
+  applyWheelLoad(x: number, y: number, contactKpa: number, isPlayer: boolean,
+    dwellS = 0): { sinkage: number; verdict: string } {
     const k = cellIndex(x, y);
     // every pass leaves compaction memory (hysteretic — spec rule 8)
     if (this.traffic[k] < 255) this.traffic[k]++;
+    // plastic/liquid traffic REMOLDS the clay structure (thixotropy loss):
+    // a MOVING pass agitates hard; a parked load only creeps and slowly
+    // churns. Dry soil just re-arranges grains — desire-path asymmetry.
+    if (this.consistency[k] >= 1) {
+      this.gel[k] *= dwellS > 1
+        ? Math.max(0.89, 1 - 0.0035 * Math.min(dwellS, 30))
+        : CFG.remoldPerPass;
+    }
     const qUlt = this.qUlt[k] * (1 + 0.05 * Math.min(this.traffic[k], 5));
     const E = 120 * Math.max(this.suction[k] * this.sr[k] + 3, 10);
     const sEl = (contactKpa * CFG.footingB * (1 - 0.3 * 0.3)) / E;
@@ -599,10 +675,35 @@ export class Ground {
     const [Nq] = bearingFactors(tex.phiEff);
     let sPl = excess > 0 ? Math.min(excess / Math.max(tex.gammaDry * Nq, 1), CFG.maxRutM) : 0;
     if (this.consistency[k] === 2) sPl = Math.max(sPl, isPlayer ? 0.22 : 0.35);
+    // sustained contact: creep grows the plastic sinkage toward its cap
+    if (dwellS > 0 && contactKpa > qUlt) {
+      const ratio = contactKpa / qUlt;
+      const ramp = Math.min(dwellS / CFG.mudCreepRampS, 1);
+      sPl = Math.min(sPl + CFG.mudCreepRate * (ratio - 1) * dwellS * ramp,
+        isPlayer ? 0.3 : CFG.maxRutM);
+    }
     const sTotal = Math.max(0, Math.min(sEl + sPl, isPlayer ? 0.32 : CFG.maxRutM));
     this.rut[k] = Math.min(this.rut[k] + sTotal * (isPlayer ? 0.35 : 1), CFG.maxRutM + 0.2);
     const verdict = sTotal < 0.05 ? "PASSABLE" : sTotal < 0.25 ? "MARGINAL (rutting)" : "BOGGED";
     return { sinkage: sTotal, verdict };
+  }
+
+  /** viscoplastic creep of a RESTING contact (no traffic/compaction memory):
+   *  below yield stress mud holds elastically; past yield it keeps yielding.
+   *  Called by the player while standing in soft mud. Returns increment [m]. */
+  creepSink(x: number, y: number, contactKpa: number, dwellS: number): number {
+    if (dwellS <= 0) return 0;
+    const k = cellIndex(x, y);
+    const q = this.qUlt[k];
+    if (q <= 1) return 0;
+    const ratio = contactKpa / q;
+    if (ratio <= 1) return 0; // below yield: a gel holds the boot up
+    const ramp = Math.min(dwellS / CFG.mudCreepRampS, 1);
+    const inc = Math.min(CFG.mudCreepRate * (ratio - 1) * dwellS * ramp, 0.01);
+    this.rut[k] = Math.min(this.rut[k] + inc * 0.5, CFG.maxRutM + 0.2);
+    // standing churn also slowly remolds what it rests on
+    if (this.consistency[k] >= 1) this.gel[k] = Math.max(0, this.gel[k] - 0.01 * dwellS);
+    return inc;
   }
 
   /**
@@ -616,6 +717,8 @@ export class Ground {
     const k = cellIndex(x, y);
     const cons = this.consistency[k];
     const w = cons === 1 ? (sprint ? 1.6 : 1.3) : cons === 0 ? (sprint ? 1.2 : 0.9) : 0;
+    // walking through LIQUID mud slowly remolds it (each footfall stirs)
+    if (cons === 2) this.gel[k] *= sprint ? 0.995 : 0.998;
     if (w <= 0) return;
     this.compAcc[k] += w;
     this.traffic[k] = Math.min(255, Math.floor(this.compAcc[k]));
@@ -626,6 +729,7 @@ export class Ground {
   markDug(x: number, y: number) {
     const k = cellIndex(x, y);
     this.disturbed[k] = 24;
+    this.gel[k] *= CFG.remoldPerStroke; // the blade remolds as it cuts
     this.keCum[k] *= 0.25; // crust shattered
     // lift moist subsoil into the top layer (mixed, loosened)
     const th0 = this.theta[0][k], th1 = this.theta[1][k];
@@ -635,16 +739,21 @@ export class Ground {
   }
 
   /** movement penalty & visual sinkage at a world position */
-  sampleMud(x: number, y: number): { mud: number; pondM: number; slow: number; sink: number; rut: number } {
+  sampleMud(x: number, y: number): { mud: number; pondM: number; slow: number; sink: number; rut: number;
+    stick: number; gel: number } {
     const k = cellIndex(x, y);
     const mud = this.mudFactor[k];
     const pond = this.hPond[k];
     const pondSlow = Math.min(pond / 0.25, 1) * 0.45;
-    const slow = Math.max(0.18, 1 - 0.68 * mud - pondSlow);
+    // sticky plastic mud drags at the boot even before you "sink"
+    const stickDrag = this.stick[k] * 0.09 * (1 - mud * 0.45);
+    const slow = Math.max(0.18, 1 - 0.68 * mud - pondSlow - stickDrag);
     // a compacted path is a hard path: prints sink less (spec §2)
     const kComp = 1 - 0.08 * Math.min(this.traffic[k], 5);
-    const sink = (mud * 0.24 + Math.min(this.rut[k], 0.2)) * kComp;
-    return { mud, pondM: pond, slow, sink, rut: this.rut[k] };
+    // remolded (low-gel) liquid mud takes a deeper print than rested mud
+    const kRemold = 1 + 0.4 * (1 - this.gel[k]) * (this.consistency[k] === 2 ? 1 : 0.25);
+    const sink = (mud * 0.24 * kRemold + Math.min(this.rut[k], 0.2)) * kComp;
+    return { mud, pondM: pond, slow, sink, rut: this.rut[k], stick: this.stick[k], gel: this.gel[k] };
   }
 
   rainAt(x: number, y: number): number {
@@ -673,17 +782,20 @@ export class Ground {
     const uPos = this.hPond[k] > 5e-3 && Sr >= 0.999 ? CFG.gammaW * this.hPond[k] * 1000 : 0;
     const sigmaEff = sigmaV - uPos + Sr * this.suction[k];
     const tauF = cEff + sigmaEff * Math.tan(phiEff * DEG);
+    const S_t = 1 + tex.clay * CFG.sensitivityPerClay;
+    const kGel = 1 / (1 + (S_t - 1) * (1 - this.gel[k]));
+    const li = (this.wPct[k] - tex.PL) / Math.max(tex.LL - tex.PL, 1e-3);
     return {
       texture: tex,
       wPct: this.wPct[k],
       theta: [this.theta[0][k], this.theta[1][k], this.theta[2][k], this.theta[3][k]],
       sr: Sr,
       suctionKpa: this.suction[k],
-      cEffKpa: cEff,
+      cEffKpa: cEff * kGel,
       phiEffDeg: phiEff,
       qUltKpa: this.qUlt[k],
       cbr: this.cbr[k],
-      tauFKpa: tauF,
+      tauFKpa: tauF * kGel,
       consistency: this.consistency[k] as 0 | 1 | 2,
       consistencyLabel: ["SOLID", "PLASTIC", "LIQUID — MUD"][this.consistency[k]],
       pondMm: this.hPond[k] * 1000,
@@ -693,17 +805,30 @@ export class Ground {
       branchLabel: this.branch[k] === 1 ? "WETTING (scan)" : "DRYING (main)",
       traffic: this.traffic[k],
       disturbed: this.disturbed[k],
+      gel: this.gel[k],
+      mudCrust: this.mudCrust[k],
+      stick: this.stick[k],
+      li,
+      gelState: this.gel[k] < 0.35 ? "REMOLDED" : this.gel[k] < 0.85 ? "GELLING" : "INTACT",
     };
   }
 
-  /** pack render texture: R wetness, G pond, B mud, A road */
+  /** pack render textures. #1 RGBA: R wetness, G pond, B mud, A road.
+   *  #2 RGBA: R gel (structure), G crust (desiccation), B stick (adhesion),
+   *  A soil texture index (0 / 0.5 / 1 = sand / loam / silty clay loam). */
   packTexture(road: Float32Array) {
     const d = this.texData;
+    const d2 = this.texData2;
+    const soilByte = [0, 128, 255];
     for (let k = 0; k < N; k++) {
       d[k * 4 + 0] = Math.min(255, this.wetness[k] * 255) | 0;
       d[k * 4 + 1] = Math.min(255, Math.min(Math.max(this.hPond[k], this.loanPond[k]) / 0.12, 1) * 255) | 0;
       d[k * 4 + 2] = Math.min(255, this.mudFactor[k] * 255) | 0;
       d[k * 4 + 3] = Math.min(255, road[k] * 255) | 0;
+      d2[k * 4 + 0] = Math.min(255, this.gel[k] * 255) | 0;
+      d2[k * 4 + 1] = Math.min(255, this.mudCrust[k] * 255) | 0;
+      d2[k * 4 + 2] = Math.min(255, this.stick[k] * 255) | 0;
+      d2[k * 4 + 3] = soilByte[this.terrain.soil[k]] | 0;
     }
   }
 }

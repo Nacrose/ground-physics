@@ -36,6 +36,13 @@ export class StormFX {
   private dustLife: Float32Array;
   private dustPos: Float32Array;
   private dustIdx = 0;
+  /** mud churn droplets: ballistic brown globules (boot / wheel / spade) */
+  private mudDrops: THREE.InstancedMesh;
+  private mudDropCount = 64;
+  private mudLife: Float32Array;
+  private mudPos: Float32Array;
+  private mudVel: Float32Array;
+  private mudIdx = 0;
   private rainSeeds: Float32Array; // per-drop random phase
   private dropSpeed = 8.5;
   private lastSuction = 0;
@@ -59,12 +66,16 @@ export class StormFX {
     this.buildRain();
     this.buildSplashes();
     this.buildDust();
+    this.buildMudDrops();
     this.buildPuddles();
 
     this.splashLife = new Float32Array(this.splashCount).fill(-1);
     this.splashPos = new Float32Array(this.splashCount * 3);
     this.dustLife = new Float32Array(this.dustCount).fill(-1);
     this.dustPos = new Float32Array(this.dustCount * 3);
+    this.mudLife = new Float32Array(this.mudDropCount).fill(-1);
+    this.mudPos = new Float32Array(this.mudDropCount * 3);
+    this.mudVel = new Float32Array(this.mudDropCount * 3);
   }
 
   // -------------------------------------------------------------------- rain
@@ -191,6 +202,38 @@ export class StormFX {
     this.dustLife[i] = 0;
     this.dustPos[i * 3] = x; this.dustPos[i * 3 + 1] = y; this.dustPos[i * 3 + 2] = z;
     void scale;
+  }
+
+  // ---------------------------------------------------------------- mud drops
+  private buildMudDrops() {
+    const geo = new THREE.SphereGeometry(0.038, 6, 5);
+    const mat = new THREE.MeshStandardMaterial({ color: 0x2a1d12, roughness: 0.42, metalness: 0 });
+    this.mudDrops = new THREE.InstancedMesh(geo, mat, this.mudDropCount);
+    this.mudDrops.frustumCulled = false;
+    this.mudDrops.renderOrder = 6;
+    const m = new THREE.Matrix4();
+    for (let i = 0; i < this.mudDropCount; i++) {
+      m.makeTranslation(0, -999, 0);
+      this.mudDrops.setMatrixAt(i, m);
+    }
+    this.scene.add(this.mudDrops);
+  }
+
+  /** a churn strike in soft mud — brown droplets fly (boot, wheel, spade) */
+  spawnMudChurn(x: number, y: number, z: number, power = 1) {
+    const n = Math.min(3 + Math.round(power * 3), 6);
+    for (let d = 0; d < n; d++) {
+      const i = this.mudIdx = (this.mudIdx + 1) % this.mudDropCount;
+      const a = Math.random() * Math.PI * 2;
+      const spd = (0.5 + Math.random() * 0.9) * power;
+      this.mudLife[i] = 0;
+      this.mudPos[i * 3] = x + Math.cos(a) * 0.1;
+      this.mudPos[i * 3 + 1] = y + 0.05;
+      this.mudPos[i * 3 + 2] = z + Math.sin(a) * 0.1;
+      this.mudVel[i * 3] = Math.cos(a) * spd;
+      this.mudVel[i * 3 + 1] = (1.4 + Math.random() * 1.6) * power;
+      this.mudVel[i * 3 + 2] = Math.sin(a) * spd;
+    }
   }
 
   // ----------------------------------------------------------------- puddles
@@ -550,6 +593,33 @@ export class StormFX {
       this.dustLife[i] = age + dt >= 0.85 ? -1 : age + dt;
     }
     this.dust.instanceMatrix.needsUpdate = true;
+
+    // mud droplets: ballistic arcs, shrink as they fly
+    const mdm = new THREE.Matrix4();
+    const mdq = new THREE.Quaternion();
+    const mds = new THREE.Vector3();
+    const mdp = new THREE.Vector3();
+    for (let i = 0; i < this.mudDropCount; i++) {
+      const life = this.mudLife[i];
+      if (life < 0) {
+        mdm.makeTranslation(0, -999, 0);
+        this.mudDrops.setMatrixAt(i, mdm);
+        continue;
+      }
+      const age = life + dt;
+      this.mudVel[i * 3 + 1] -= 9.8 * dt;
+      this.mudPos[i * 3] += this.mudVel[i * 3] * dt;
+      this.mudPos[i * 3 + 1] += this.mudVel[i * 3 + 1] * dt;
+      this.mudPos[i * 3 + 2] += this.mudVel[i * 3 + 2] * dt;
+      const fade = Math.max(0, 1 - age / 0.7);
+      mdp.set(this.mudPos[i * 3], this.mudPos[i * 3 + 1], this.mudPos[i * 3 + 2]);
+      mdq.identity();
+      mds.setScalar(0.6 + 0.55 * fade);
+      mdm.compose(mdp, mdq, mds);
+      this.mudDrops.setMatrixAt(i, mdm);
+      this.mudLife[i] = age >= 0.7 ? -1 : age;
+    }
+    this.mudDrops.instanceMatrix.needsUpdate = true;
 
     // puddle shader
     const pm = this.puddleMesh.material as THREE.ShaderMaterial;

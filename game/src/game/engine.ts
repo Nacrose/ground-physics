@@ -79,6 +79,8 @@ export class Game {
   private wagonVerdict = "PASSABLE";
   private wagonRutCm = 0;
   private wagonTimer = 0;
+  /** game-seconds the wagon load has rested since the last wheel tick */
+  private wagonDwellGame = 0;
 
   // lightning
   private flash = 0;
@@ -333,6 +335,7 @@ export class Game {
       ["TEXTURE", `${tex.label} · ${tex.clay}% clay`],
       ["WATER CONTENT", `${rep.wPct.toFixed(1)} %  (PL ${tex.PL} · LL ${tex.LL})`],
       ["CONSISTENCY", rep.consistencyLabel],
+      ["LIQUIDITY INDEX", `${(rep.li * 100).toFixed(0)} %  (0 = PL · 100 = LL)`],
       ["UNIT WEIGHT γ", `${gammaBulk.toFixed(1)} kN/m³  (dry ${tex.gammaDry.toFixed(1)})`],
       ["MATRIC SUCTION", `${rep.suctionKpa.toFixed(0)} kPa`],
       ["RETENTION BRANCH", rep.branchLabel],
@@ -346,6 +349,9 @@ export class Game {
       ["RUT DEPTH", `${(rep.rutM * 100).toFixed(1)} cm`],
       ["MICRO RELIEF", `${microRelief >= 0 ? "+" : ""}${microRelief.toFixed(1)} cm`],
       ["COMPACTION", `${rep.traffic} passes`],
+      ["STRUCTURE", `${rep.gelState} · gel ${(rep.gel * 100).toFixed(0)}%`],
+      ["ADHESION", rep.stick > 0.03 ? `${(rep.stick * 100).toFixed(0)}% — sticky limit` : "none"],
+      ["DESICCATION", rep.mudCrust > 0.03 ? `crust ${(rep.mudCrust * 100).toFixed(0)}% (cracking)` : "none"],
       ["DIG STATE", rep.disturbed ? `DISTURBED (loosened, ${rep.disturbed} wet-h left)` : "intact"],
       ["RAIN HERE", `${rainHere.toFixed(1)} mm/h`],
     ];
@@ -651,10 +657,13 @@ export class Game {
 
       // ---- wagon trafficability story ------------------------------------------
       this.wagonTimer += 0.5;
+      this.wagonDwellGame += dtGame; // game-seconds the load has rested here
       if (this.wagonTimer >= 3) {
         this.wagonTimer = 0;
         const wx = this.world.wagon.position.x, wz = this.world.wagon.position.z;
-        const res = this.ground.applyWheelLoad(wx, wz, 150, false);
+        // dwell feeds the viscoplastic creep — a parked wagon sinks by sitting
+        const res = this.ground.applyWheelLoad(wx, wz, 150, false, this.wagonDwellGame);
+        this.wagonDwellGame = 0;
         this.wagonVerdict = res.verdict;
         const rut = this.ground.rut[
           Math.max(0, Math.min(36863, Math.floor((wz + HALF) / 4) * 192 + Math.floor((wx + HALF) / 4)))];
@@ -705,6 +714,7 @@ export class Game {
         wagonVerdict: this.wagonVerdict,
         wagonRutCm: this.wagonRutCm,
         mudHere: this.player.mud,
+        bootMud: this.player.bootMud,
         tunnelLine: this.tunnelHudLine(),
       });
       if (this.inspectorOpen && Math.floor(now2.tMin * 2) % 2 === 0) {
