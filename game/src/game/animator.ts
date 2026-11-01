@@ -59,6 +59,10 @@ export class Animator {
     this.time += dt;
     const acc = this.acc;
     acc.clear();
+    // every frame starts from the REST pose — the flush below ADDS deltas,
+    // so without this the pose accumulates frame-over-frame and the rig
+    // winds up (chest reached 12 rad in 2 s of walk before this line)
+    this.skel.reset();
     const p = this.gaitPhase;
     const spd = this.gaitSpeed;
 
