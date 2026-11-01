@@ -465,7 +465,7 @@ export class MicroTerrain {
           // graded coverage (the texture channels are blurred), so disturbed
           // soil reads as soil, not as pale cell squares (doc §29 legibility).
           // The SOURCE blends toward the world cache's channels across the
-          // rim and the FACTORS are the static mesh's (churn 0.6, spoil 0.55),
+          // rim and the FACTORS are the static mesh's (churn 0.85, spoil 0.75),
           // so a trail crossing the window edge keeps exactly the tint it
           // wears outside it — the rim cannot shade apart from the world
           vec4 weRim = texture2D(uWorldTex, vGroundUv);
@@ -473,10 +473,13 @@ export class MicroTerrain {
           float churnE = mix(weRim.g, vChurn, rimF);
           float spoilE = mix(weRim.b, vSpoil, rimF);
           float ringE = vRing * rimF; // the suction ring is micro-only: fades with the rim
-          vec3 churnCol = mix(diffuseColor.rgb * 1.14 + 0.014, diffuseColor.rgb * 0.66, wet);
-          diffuseColor.rgb = lerp3(diffuseColor.rgb, churnCol, churnE * 0.6);
-          // spoil: loose heap tint
-          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.32, 0.25, 0.18) * mix(1.0, 0.55, wet), spoilE * 0.55);
+          vec3 churnCol = mix(diffuseColor.rgb * 1.28 + 0.016, diffuseColor.rgb * 0.66, wet);
+          // the SAME blend factors the static mesh uses (0.85 / 0.75) — a
+          // trail crossing the window edge keeps exactly the tint it wears
+          // outside it; the rim cannot shade apart from the world
+          diffuseColor.rgb = lerp3(diffuseColor.rgb, churnCol, churnE * 0.85);
+          // spoil: loose heap tint (0.75 — matches the static mesh)
+          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.32, 0.25, 0.18) * mix(1.0, 0.55, wet), spoilE * 0.75);
           // suction wet-ring: dark glossy mark
           diffuseColor.rgb *= mix(1.0, 0.62, ringE * 0.6);
           // churn/spoil/ring also carry their gloss (kept here so the whole
@@ -650,17 +653,21 @@ export class MicroTerrain {
     this.worldVertTex.magFilter = THREE.LinearFilter;
     this.worldVertTex.needsUpdate = true;
   }
-  /** downsample the far-field cache into the vertex mirror (trench-dominant:
- *  the deepest texel of each 2x2 wins — a ditch stays a ditch at 1.5 m) */
+  /** downsample the far-field cache into the vertex mirror. The mirror
+ * feeds the static mesh's vertex displacement, so the texel that wins each
+ * 2×2 is the one FURTHEST from neutral (max |byte−128|): a ditch stays a
+ * ditch at 1.5 m AND a spoil heap stays a heap — the extreme the eye
+ * tracks survives the downsample. */
   private refillWorldVertTex() {
     const src = this.worldTexData, dst = this.worldVertTexData;
     for (let j = 0; j < WVTEX; j++) {
       for (let i = 0; i < WVTEX; i++) {
-        let bestR = 255, bestG = 0, bestB = 0;
+        let bestR = 128, bestDev = 0, bestG = 0, bestB = 0;
         for (let dj = 0; dj < 2; dj++) {
           for (let di = 0; di < 2; di++) {
             const k = ((j * 2 + dj) * WTEX + (i * 2 + di)) * 4;
-            if (src[k] < bestR) { bestR = src[k]; bestG = src[k + 1]; bestB = src[k + 2]; }
+            const dev = Math.abs(src[k] - 128);
+            if (dev > bestDev) { bestDev = dev; bestR = src[k]; bestG = src[k + 1]; bestB = src[k + 2]; }
           }
         }
         const d = (j * WVTEX + i) * 4;
@@ -714,31 +721,35 @@ export class MicroTerrain {
           }
         }
         const k = tj * WTEX + ti;
-        // trench-dominant delta (a hole beats the mean; the mean keeps piles)
-        const dl = dMin < -0.02 ? Math.max(dMin * 0.75, DELTA_MIN) : dSum / dCnt;
+        // trench-dominant delta (a hole beats the mean; the mean keeps
+        // piles) — 0.85 keeps most of a spade crater's depth in the cache
+        // so the displacement cone below starts from an honest floor
+        const dl = dMin < -0.02 ? Math.max(dMin * 0.85, DELTA_MIN) : dSum / dCnt;
         const m = Math.min(Math.abs(dl), DELTA_ENCODE) / DELTA_ENCODE;
         t[k * 4] = Math.max(0, Math.min(255, Math.round(128 + (dl < 0 ? -1 : 1) * 127 * Math.sqrt(m))));
-        t[k * 4 + 1] = Math.round((255 * churn) / dCnt);
-        t[k * 4 + 2] = Math.round((255 * spoil) / dCnt);
+        t[k * 4 + 1] = Math.round(Math.min(255, (255 * churn * 1.4) / dCnt));
+        t[k * 4 + 2] = Math.round(Math.min(255, (255 * spoil) / dCnt));
         t[k * 4 + 3] = Math.max(0, Math.min(255, Math.round((-dMin / DELTA_ENCODE) * 255)));
       }
     }
-    // ---- displacement cone: spread the trench footprint outward so the
-    // COARSE static lattice can sample it. The static terrain's vertices
-    // sit on a 4 m lattice; a spade ditch (0.3-1 m wide) lands inside ONE
-    // 0.75 m texel and between two vertices — it displaces NOTHING and the
-    // ditch you dug vanishes the moment you walk away (the "I can only see
-    // my edits inside the square" report). Two dilation passes spread the
-    // deep byte outward one texel at a time with a fixed byte step, giving
-    // a ~2-texel (~1.5 m) cone around every hole: a 1 m trench renders as
-    // a ~3.5 m dish at >=0.1 m depth on the world mesh — visible from
-    // across the valley, honest about being a cache (the window still owns
-    // the crisp geometry; the sparse store still owns the physics).
+    // ---- displacement cones: spread dig footprints outward so the COARSE
+    // static lattice (1.5 m vertices) can sample them. A spade ditch
+    // (0.3-1 m wide) lands inside ONE 0.75 m texel and between two
+    // vertices — undilated it displaces NOTHING and the ditch vanishes the
+    // moment you walk away (the "I can only see my edits inside ~6 m"
+    // report). A 5-pass min-dilation with an 18-byte step gives every hole
+    // a ~4 m radius dish: a 1.2 m spade crater reads on the world mesh as
+    // a ~7 m wide, >= 0.2 m deep dish — a silhouette + shading change you
+    // can see from across the valley, honest about being a cache (the
+    // window still owns the crisp geometry; the sparse store still owns
+    // the physics). The matching MAX-cone spreads spoil mounds outward
+    // (3 passes, 20-byte step) so heaps read as broad bumps, not single-
+    // vertex noise.
     {
-      const STEP = 34; // byte-space falloff per texel (quadratic decode: steep near deep, shallow near neutral)
-      const di0 = Math.max(0, ti0 - 2), di1 = Math.min(WTEX - 1, ti1 + 2);
-      const dj0 = Math.max(0, tj0 - 2), dj1 = Math.min(WTEX - 1, tj1 + 2);
-      for (let pass = 0; pass < 2; pass++) {
+      const STEP = 18; // byte-space falloff per texel (quadratic decode: steep near deep, shallow near neutral)
+      const di0 = Math.max(0, ti0 - 5), di1 = Math.min(WTEX - 1, ti1 + 5);
+      const dj0 = Math.max(0, tj0 - 5), dj1 = Math.min(WTEX - 1, tj1 + 5);
+      for (let pass = 0; pass < 5; pass++) {
         for (let tj = dj0; tj <= dj1; tj++) {
           for (let ti = di0; ti <= di1; ti++) {
             const k = tj * WTEX + ti;
@@ -751,20 +762,44 @@ export class MicroTerrain {
           }
         }
       }
+      // spoil mound cone (max-dilation, gentler): a heap's mean delta
+      // spreads ~3 texels so the 1.5 m lattice samples a broad bump
+      const MSTEP = 20;
+      for (let pass = 0; pass < 3; pass++) {
+        for (let tj = dj0; tj <= dj1; tj++) {
+          for (let ti = di0; ti <= di1; ti++) {
+            const k = tj * WTEX + ti;
+            let r = t[k * 4];
+            if (ti > 0) { const n = t[(tj * WTEX + ti - 1) * 4] - MSTEP; if (n > r) r = n; }
+            if (ti < WTEX - 1) { const n = t[(tj * WTEX + ti + 1) * 4] - MSTEP; if (n > r) r = n; }
+            if (tj > 0) { const n = t[((tj - 1) * WTEX + ti) * 4] - MSTEP; if (n > r) r = n; }
+            if (tj < WTEX - 1) { const n = t[((tj + 1) * WTEX + ti) * 4] - MSTEP; if (n > r) r = n; }
+            if (r > 128) t[k * 4] = r; // only raises ground, never fills holes
+          }
+        }
+      }
     }
-    // dilate the churn trail one texel (max of half the neighbours): a
-    // 0.3 m spade line reads as a ~1.5 m bare-earth trail at distance
-    for (let tj = tj0; tj <= tj1; tj++) {
-      for (let ti = ti0; ti <= ti1; ti++) {
-        const k = tj * WTEX + ti;
-        let g = t[k * 4 + 1];
-        if (ti > ti0) g = Math.max(g, t[(tj * WTEX + ti - 1) * 4 + 1] * 0.5);
-        if (ti < ti1) g = Math.max(g, t[(tj * WTEX + ti + 1) * 4 + 1] * 0.5);
-        if (tj > tj0) g = Math.max(g, t[((tj - 1) * WTEX + ti) * 4 + 1] * 0.5);
-        if (tj < tj1) g = Math.max(g, t[((tj + 1) * WTEX + ti) * 4 + 1] * 0.5);
-        // read-through: dilation uses the PRE-dilation neighbours as we
-        // sweep (good enough — one pass, monotone)
-        t[k * 4 + 1] = Math.round(Math.min(255, g));
+    // dilate the churn + spoil trails three texels (max of 0.7 × the
+    // neighbours): a 0.3 m spade line reads as a ~5 m bare-earth trail at
+    // distance — wide enough to pick out from across the valley, and the
+    // grass shader darkens with the same channel
+    {
+      const gi0 = Math.max(0, ti0 - 3), gi1 = Math.min(WTEX - 1, ti1 + 3);
+      const gj0 = Math.max(0, tj0 - 3), gj1 = Math.min(WTEX - 1, tj1 + 3);
+      for (let pass = 0; pass < 3; pass++) {
+        for (let tj = gj0; tj <= gj1; tj++) {
+          for (let ti = gi0; ti <= gi1; ti++) {
+            const k = tj * WTEX + ti;
+            for (let c = 1; c <= 2; c++) {
+              let g = t[k * 4 + c];
+              if (ti > 0) g = Math.max(g, t[(tj * WTEX + ti - 1) * 4 + c] * 0.7);
+              if (ti < WTEX - 1) g = Math.max(g, t[(tj * WTEX + ti + 1) * 4 + c] * 0.7);
+              if (tj > 0) g = Math.max(g, t[((tj - 1) * WTEX + ti) * 4 + c] * 0.7);
+              if (tj < WTEX - 1) g = Math.max(g, t[((tj + 1) * WTEX + ti) * 4 + c] * 0.7);
+              t[k * 4 + c] = Math.round(Math.min(255, g));
+            }
+          }
+        }
       }
     }
     this.refillWorldVertTex();

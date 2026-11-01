@@ -305,9 +305,12 @@ float liftAt(in vec2 wuv){
           // their disturbed-earth tint outside the contact window (the SAME
           // tints the overlay uses — the trail doesn't change colour at the rim)
           vec4 we = texture2D(uWorldEditTex, vGroundUv);
-          vec3 churnCol = mix(diffuseColor.rgb * 1.14 + 0.014, diffuseColor.rgb * 0.66, wet);
-          diffuseColor.rgb = lerp3(diffuseColor.rgb, churnCol, we.g * 0.6);
-          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.32, 0.25, 0.18) * mix(1.0, 0.55, wet), we.b * 0.55);
+          vec3 churnCol = mix(diffuseColor.rgb * 1.28 + 0.016, diffuseColor.rgb * 0.66, wet);
+          // churn/spoil blends (0.85 / 0.75): a dug trail must stay legible
+          // from across the valley — MATCH the overlay's rim factors below
+          // or the trail changes tint crossing the window edge
+          diffuseColor.rgb = lerp3(diffuseColor.rgb, churnCol, we.g * 0.85);
+          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.32, 0.25, 0.18) * mix(1.0, 0.55, wet), we.b * 0.75);
           surfRough = mix(surfRough, 0.97, we.g * (1.0 - wet) * 0.7);
           surfRough = mix(surfRough, 0.98, we.b * 0.8);`)
         .replace("#include <roughnessmap_fragment>", `#include <roughnessmap_fragment>
