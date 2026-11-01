@@ -1,3 +1,8 @@
+# JS / build
+node_modules/
+dist/
+build/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -7,6 +12,6 @@ venv/
 
 # OS / editor
 .DS_Store
-Thumbs.db
+Thumbs.db/
 .idea/
 .vscode/
