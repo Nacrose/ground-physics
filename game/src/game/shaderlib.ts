@@ -58,12 +58,21 @@ float crackSeam(vec2 wuv, float plateM, float worldSizeM) {
  * and afterwards USES: none (works on col/rough in place).
  *
  * Look, layer by layer:
- *   wet   — soil darkens ~2 stops, hue kept (wet earth, not paint)
+ *   wet   — ONE monotone perceptual ramp: dry 1.0 -> OMC 0.85 -> FC 0.59 ->
+ *           plastic 0.49 -> saturated 0.40. (The old mix(col, col*0.4, wet)
+ *           collapsed to col*(1-0.6*wet^2): flat through the whole field
+ *           range — OMC read bone-dry and the mid states shared one color.)
  *   mud   — PATCHY coverage (1.8 m noise fields break the 4 m physics-cell
- *           blobs into dry islands and wet hollows); the BODY colour follows
- *           the soil's own fines (sand mud tan, loam mud mid brown, silty-
- *           clay mud dark grey-brown) with 9 cm grain and 34 cm mottle;
- *           freshly REMOLDED mud (gel broken by wheel/spade) reads darker
+ *           blobs into dry islands and wet hollows); the BODY is the soil's
+ *           own bare fines SATURATED past the liquid limit — an absolute
+ *           dark body ~15% darker than the same soil merely saturated,
+ *           mottled ±13% for wet sheen streaks. It must sit BELOW every
+ *           wet-soil state in the ramp, always. (The old body mixed toward
+ *           base*1.85+0.03 — speckle brighter than dry grass: mud read
+ *           LIGHTER than the wet soil around it, and after drying +
+ *           crusting the mud field became the palest wet patch of ground.)
+ *           Freshly REMOLDED mud (gel broken by wheel/spade) reads darker;
+ *           drying mud pales a touch before the crust takes over.
  *   dry   — the REAL crust field (grows while drying, slakes away in rain)
  *           pales the surface into ~55 cm cracked plates; the surface skin
  *           dries long before the column, so plates show while still moist
@@ -79,27 +88,31 @@ void mudSurface(inout vec3 col, inout float rough, vec2 wuv, float wet, float mu
   float nG = shNoise(mp * 11.0);            // ~9 cm grain
   // patchy coverage: mud never covers a cell uniformly
   float cov = clamp(mud * (0.55 + 0.60 * nP) * (0.82 + 0.18 * nM), 0.0, 1.0);
-  // wet soil: darkens, hue kept
-  vec3 wetSoil = col * mix(1.0, 0.40, wet);
-  // mud body: the soil's OWN fines set the colour, brightened by mottle and
-  // grain so it still reads as SOIL under a black storm sky; remoulded
-  // (freshly trafficked, gel broken) mud reads a shade darker
+  // moisture ramp: one monotone curve with a visible step between every
+  // state (OMC is damp, saturated is 2.4 stops down — never the same color)
+  col *= 1.0 - 0.60 * pow(clamp(wet, 0.0, 1.0), 0.62);
+  // mud body: the soil's own bare FINES, saturated past the liquid limit —
+  // darker than the same soil in any wet state (a mud pool also buries the
+  // vegetation tint, so this is absolute, not col-relative). Mottle is ±13%
+  // wet-sheen streaking, not brightness speckle. Remoulded churn darkens;
+  // drying mud pales slightly ahead of the crust.
   float gelF = g2.r, crust = g2.g, soilId = g2.a;
-  vec3 mudBase = soilId > 0.75 ? vec3(0.105, 0.088, 0.072)
-               : (soilId > 0.4 ? vec3(0.150, 0.110, 0.080)
-                               : vec3(0.200, 0.165, 0.120));
-  vec3 mudCol = mix(mudBase, mudBase * 1.85 + vec3(0.03), 0.30 + 0.70 * nM);
-  mudCol *= 0.76 + 0.48 * nG;
+  vec3 mudBase = soilId > 0.75 ? vec3(0.096, 0.082, 0.068)
+               : (soilId > 0.4 ? vec3(0.138, 0.103, 0.072)
+                               : vec3(0.192, 0.152, 0.104));
+  vec3 mudCol = mudBase * (0.87 + 0.26 * nM) * (0.92 + 0.16 * nG);
   mudCol *= 1.0 - 0.18 * (1.0 - gelF);
-  col = mix(col, wetSoil, clamp(wet, 0.0, 1.0));
-  col = mix(col, mudCol, cov * 0.88);
+  mudCol *= mix(0.88, 1.0, clamp(wet, 0.0, 1.0));
+  col = mix(col, mudCol, cov * 0.9);
   // desiccation: the crust field pales into cracked plates with dark seams
   // (rain re-slakes the crust and the pattern fades away again). Only fresh
   // saturation hides it — the surface skin dries first
   float crustV = crust * (1.0 - 0.55 * clamp(wet - 0.35, 0.0, 1.0));
   if (crustV > 0.015) {
     float seam = crackSeam(wuv, 0.55, worldSizeM);
-    col = mix(col, col * 1.26 + vec3(0.05), crustV * 0.5);
+    // plates pale strongly off the DARK mud body (crusted dried mud is the
+    // one pale state — still never lighter than dry virgin ground)
+    col = mix(col, col * 1.38 + vec3(0.055), crustV * 0.5);
     col *= 1.0 - seam * crustV * 0.55;
   }
   // roughness: wet sheen -> remould-state glisten -> crusted matte.
