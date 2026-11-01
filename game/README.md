@@ -63,6 +63,7 @@ Everything you see happening to the ground is a real-time port of the
 | strength | matric suction → Fredlund apparent cohesion → Mohr-Coulomb → Terzaghi `q_ult`, CBR |
 | consistency | Atterberg states (solid / plastic / liquid-mud) with softening past the liquid limit |
 | trafficability | punching-shear rutting: the wagon re-loads the road every 3 s and leaves 70 cm ruts in liquid ground; your sprint churns ruts too |
+| contact (prints) | a 16 m micro-relief window at 6.25 cm carries real geometry, not decals: boot-anatomy prints (ball + deeper heel, arch untouched), volume-conserving squeeze-out lips, peel-out suction that flings lumps behind the toe and cakes your boots, sole smears that dry out on firm ground |
 
 The scripted story matches the reference Python run: **thunderstorm turns the
 valley 37% mud, `q_ult` collapses from ~450 to ~200 kPa, and the wagon goes
@@ -77,9 +78,10 @@ Target device: MacBook Air M1 base (8-core GPU, fanless) at 30 fps.
 * auto quality scaler: a 5 s FPS EMA steps between LOW…ULTRA
   (grass 14k→52k instances, rain 1.6k→5.6k streaks, pixel ratio 0.9→1.5,
   shadow map 1024→2048); `G` overrides it manually
-* one instanced draw call each for grass, rain, splashes, footprints, trees,
-  rocks; terrain shading (wetness / ponding / mud / road) is a single
-  `DataTexture` updated in place
+* one instanced draw call each for grass, rain, splashes, trees, rocks;
+  terrain shading (wetness / ponding / mud / road) is a single `DataTexture`
+  updated in place; prints and ruts are displacement in a 16 m micro-relief
+  window — no footprint decals anywhere
 * ACES tone mapping, exponential fog doubles as the draw-distance control
 
 ## Code layout
@@ -93,10 +95,12 @@ src/
     terrain.ts         same Gaussian catchment recipe as rwengine state.py
     params.ts          soil texture tables + presets (ported from config.py)
     ground.ts          Green-Ampt, routing, full geotech chain (the physics)
+    contact.ts         16 m micro-terrain: boot prints, ruts, spade work, spoil
+                       relaxation — volume-conserving soil deformation
     weather.ts         timeline playback + lightning scheduling
     world.ts           terrain mesh, sky, clouds, grass, trees, rocks, wagon
     fx.ts              rain streaks, splashes, puddles, procedural audio
-    player.ts          third-person rider, mud mechanics, footprints, camera
+    player.ts          third-person rider, mud mechanics, boot-mud pickup/shed, camera
     hud.ts             minimap, weather panel, inspector, cinematic overlays
 tools/extract_weather.py   regenerates public/weather/*.json from rwengine
 ```

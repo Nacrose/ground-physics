@@ -113,12 +113,15 @@ export interface DigResult {
 
 /** repose angle (tan) + relaxation rate by ground state */
 function reposeOf(s: SoilTouch): { tanRepose: number; rate: number } {
-  if (s.mud > 0.6 || s.consistency === 2) {
+  // only true SLURRY (past the liquid limit) flows. Wet-but-plastic mud has
+  // yield strength: a boot print keeps its walls and only sags slowly.
+  if (s.consistency === 2) {
     // thixotropy: freshly remolded mud oozes flat and fast (8°, rate 1.2);
     // a rested gel holds its ridges and takes a crisper print (13.5°, 0.45)
     const gel = s.gel ?? 1;
     return { tanRepose: 0.14 + 0.1 * gel, rate: 0.45 + 0.75 * (1 - gel) };
   }
+  if (s.mud > 0.3) return { tanRepose: 0.85, rate: 0.18 }; // plastic mud: ~40°, creeps
   if (s.wetness > 0.8 && s.sr > 0.9) return { tanRepose: 0.47, rate: 0.3 }; // wet clay: 25°
   if (s.wetness > 0.35) return { tanRepose: 1.0, rate: 0.12 }; // moist loam: 45°, faces stand
   return { tanRepose: 0.62, rate: 0.5 }; // dry sand: 32°, flows back
@@ -481,13 +484,25 @@ export class MicroTerrain {
           vec4 gcell = texture2D(uGroundTex, vGroundUv);
           vec4 g2 = texture2D(uGroundTex2, vGroundUv);
           float wet = gcell.r; float pond = gcell.g; float mud = gcell.b; float road = gcell.a;
+          // churn/spoil/ring coverage FIRST — fresh churn SMASHES the
+          // desiccation crust (a boot print has no intact plates), so the
+          // material stack below must see the broken-through crust
+          vec4 weRim = texture2D(uWorldTex, clamp((vGroundUv - uWorldRect.xy) / uWorldRect.zw, 0.0, 1.0));
+          float rimF = rimE(vLpos);
+          float churnE = mix(weRim.g, vChurn, rimF);
+          float spoilE = mix(weRim.b, vSpoil, rimF);
+          float ringE = vRing * rimF; // the suction ring is micro-only: fades with the rim
           // wet + mud: the shared surface look (identical to the static
           // mesh) — g2 carries the mud MATERIAL state (gel/crust/soil) so the
           // palette, glisten and desiccation plates are physics-driven,
-          // exactly the same call the static mesh makes
+          // exactly the same call the static mesh makes. Churned ground
+          // wears its crust broken (85%) and the suction ring softens it too —
+          // the print interior renders as exposed moist mud, not pale plates
+          vec4 g2c = g2;
+          g2c.g *= 1.0 - 0.85 * churnE - 0.25 * ringE;
           float gelF = g2.r; float crust = g2.g; float soilId = g2.a;
           float surfRough = 0.96;
-          mudSurface(diffuseColor.rgb, surfRough, vGroundUv, wet, mud, ${WORLD_SIZE.toFixed(1)}, g2);
+          mudSurface(diffuseColor.rgb, surfRough, vGroundUv, wet, mud, ${WORLD_SIZE.toFixed(1)}, g2c);
           diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.42, 0.335, 0.24) * mix(1.0, 0.5, wet), road * 0.75);
           diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.19, 0.22, 0.20), clamp(pond * 1.4, 0.0, 0.55));
           // ...and the ponded bed hands its gloss to the water above it: a
@@ -501,12 +516,13 @@ export class MicroTerrain {
           // rim and the FACTORS are the static mesh's (churn 0.85, spoil 0.75),
           // so a trail crossing the window edge keeps exactly the tint it
           // wears outside it — the rim cannot shade apart from the world
-          vec4 weRim = texture2D(uWorldTex, clamp((vGroundUv - uWorldRect.xy) / uWorldRect.zw, 0.0, 1.0));
-          float rimF = rimE(vLpos);
-          float churnE = mix(weRim.g, vChurn, rimF);
-          float spoilE = mix(weRim.b, vSpoil, rimF);
-          float ringE = vRing * rimF; // the suction ring is micro-only: fades with the rim
-          vec3 churnCol = mix(diffuseColor.rgb * 1.28 + 0.016, diffuseColor.rgb * 0.66, wet);
+          // churned ground is FRESHLY EXPOSED moist soil: the boot squeezed
+          // water up from the column, so it darkens with the moisture the
+          // ground can supply (surface wet + the mud fraction), not just the
+          // surface wetness — a fresh print still reads dark through a drying
+          // crust, while dry sand crumbs stay pale
+          float churnWet = clamp(wet + mud * 0.55, 0.0, 1.0);
+          vec3 churnCol = mix(diffuseColor.rgb * 1.28 + 0.016, diffuseColor.rgb * 0.8, churnWet);
           // the SAME blend factors the static mesh uses (0.85 / 0.75) — a
           // trail crossing the window edge keeps exactly the tint it wears
           // outside it; the rim cannot shade apart from the world
@@ -1416,11 +1432,13 @@ export class MicroTerrain {
     return vol;
   }
 
-  /** redistribute removed volume onto the rim ring so a print conserves bulk */
-  private rimRedistribute(cx: number, cz: number, removedVol: number, radius: number, frac: number) {
+  /** redistribute removed volume onto the rim ring so a print conserves bulk.
+   *  `outer` shrinks the ring for mud: displaced soil squeezes OUT around the
+   *  boot as a tight lip hugging the print instead of a thin film spread wide */
+  private rimRedistribute(cx: number, cz: number, removedVol: number, radius: number, frac: number, outer = 1.7) {
     if (removedVol <= 0 || frac <= 0) return;
     const target = removedVol * frac;
-    const [i0, i1, j0, j1] = this.cellRect(cx, cz, radius * 1.8);
+    const [i0, i1, j0, j1] = this.cellRect(cx, cz, radius * (outer + 0.1));
     const area = MICRO_CELL * MICRO_CELL;
     let ringVol = 0;
     for (let j = j0; j <= j1; j++) {
@@ -1428,7 +1446,7 @@ export class MicroTerrain {
         const wx = this.ox - MICRO_HALF + (i + 0.5) * MICRO_CELL;
         const wz = this.oz - MICRO_HALF + (j + 0.5) * MICRO_CELL;
         const r = Math.hypot(wx - cx, wz - cz);
-        if (r < radius || r > radius * 1.7) continue;
+        if (r < radius || r > radius * outer) continue;
         ringVol += area;
       }
     }
@@ -1439,7 +1457,7 @@ export class MicroTerrain {
         const wx = this.ox - MICRO_HALF + (i + 0.5) * MICRO_CELL;
         const wz = this.oz - MICRO_HALF + (j + 0.5) * MICRO_CELL;
         const r = Math.hypot(wx - cx, wz - cz);
-        if (r < radius || r > radius * 1.7) continue;
+        if (r < radius || r > radius * outer) continue;
         const v = j * NC + i;
         let after = this.delta[v] + per;
         if (after > DELTA_MAX) after = DELTA_MAX;
@@ -1454,15 +1472,107 @@ export class MicroTerrain {
   stampBoot(x: number, z: number, yaw: number, s: SoilTouch, power = 1) {
     // depth by state: dry barely shows → mud is a churned crater (×4/3 for
     // the parabola's ½ mean, so prints keep their phase-1 visual depth).
-    // Half-axes 0.11 × 0.19 (a wide boot print) so the print spans ≥2×3
-    // cells — small enough to read as a boot, large enough for the render
-    // blur to round it instead of stamping a cell square.
     // Remolded mud (low gel, freshly trafficked) takes the deeper print;
     // rested mud holds firmer — thixotropy you can read off the trail
     const depth = (0.022 + s.wetness * 0.067 + s.mud * 0.133 * (1.3 - 0.45 * s.gel)) * power;
-    const removed = -this.addProfile(x, z, yaw, 0.11, 0.19, depth, -1, false, false);
-    const rimFrac = s.mud > 0.5 ? 0.45 : s.wetness > 0.35 ? 0.35 : 0.22;
-    this.rimRedistribute(x, z, removed, 0.19, rimFrac);
+    let removed: number;
+    if (s.mud > 0.2 || s.wetness > 0.4) {
+      // a BOOT, not an oval: forefoot ball (wide, a touch shallower) and a
+      // narrow heel block that bites deeper on heel strike; the arch between
+      // them stays up. Facing is (sin yaw, cos yaw) in (x, z).
+      const sa = Math.sin(yaw), ca = Math.cos(yaw);
+      removed = -this.addProfile(x + sa * 0.075, z + ca * 0.075, yaw, 0.100, 0.115, depth * 0.95, -1, false, false);
+      removed -= this.addProfile(x - sa * 0.105, z - ca * 0.105, yaw, 0.078, 0.075, depth * 1.18, -1, false, false);
+    } else {
+      // dry/damp: the whole sole in one shallow oval (half-axes 0.11 × 0.19
+      // span ≥2×3 cells — enough for the render blur to round it)
+      removed = -this.addProfile(x, z, yaw, 0.11, 0.19, depth, -1, false, false);
+    }
+    // mud squeezes OUT around the boot: most of the displaced volume rises as
+    // a tight lip hugging the print, instead of a thin film spread wide
+    const mudy = s.mud > 0.5;
+    const rimFrac = mudy ? 0.65 : s.wetness > 0.35 ? 0.35 : 0.22;
+    this.rimRedistribute(x, z, removed, 0.19, rimFrac, mudy ? 1.45 : 1.7);
+  }
+
+  /** deposit a parabolic heap of the given volume [m³] (peak sized so the
+   *  geometric volume matches — mean of H(1−r²) over the ellipse is ½H) */
+  private heap(cx: number, cz: number, yaw: number, halfA: number, halfB: number, vol: number) {
+    if (vol <= 0) return;
+    const H = (2 * vol) / (Math.PI * halfA * halfB);
+    const got = this.addProfile(cx, cz, yaw, halfA, halfB, H, 1, false, false);
+    // 6 cm cells sample a 7 cm heap coarsely: top up / trim so exactly `vol` lands
+    if (got > 0 && Math.abs(got - vol) > vol * 0.02) {
+      const k = vol / got - 1;
+      this.addProfile(cx, cz, yaw, halfA, halfB, H * Math.abs(k), k > 0 ? 1 : -1, false, false);
+    }
+  }
+
+  /** flag a disc as a dark glossy suction/smear mark (bit 4) */
+  private flagMark(x: number, z: number, yaw: number, halfA: number, halfB: number) {
+    const [i0, i1, j0, j1] = this.cellRect(x, z, Math.max(halfA, halfB));
+    const ca = Math.cos(yaw), sa = Math.sin(yaw);
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const dx = this.ox - MICRO_HALF + (i + 0.5) * MICRO_CELL - x;
+        const dz = this.oz - MICRO_HALF + (j + 0.5) * MICRO_CELL - z;
+        const al = dx * sa + dz * ca, la = -dx * ca + dz * sa;
+        if ((al * al) / (halfB * halfB) + (la * la) / (halfA * halfA) < 1) this.flags[j * NC + i] |= 4;
+      }
+    }
+    this.texDirty = true;
+  }
+
+  /**
+   * A boot peeling out of its print (call for the foot that is LEAVING).
+   * Mud grips: suction scrapes the print floor, the toe flings most of it
+   * backwards as a lump, and a little stays on the sole. Returns the litres
+   * that stay on the boot. Dry / merely damp ground does nothing.
+   */
+  bootLift(x: number, z: number, yaw: number, s: SoilTouch, power = 1): number {
+    const sucking = s.sr > 0.92 && s.wetness > 0.75;
+    if (s.mud < 0.25 && !sucking) return 0;
+    const stick = 0.35 + 0.65 * Math.max(s.mud, sucking ? 0.5 : 0);
+    const sa = Math.sin(yaw), ca = Math.cos(yaw);
+    // grip: the cling scrapes up to ~3 cm off the print floor (a little
+    // exaggerated — sticky mud really does come up on the boot)
+    const scraped = -this.addProfile(x, z, yaw, 0.085, 0.16, 0.03 * stick * power, -1, false, false);
+    if (scraped <= 0) return 0;
+    // 70% is flung back behind the toe, 30% rides away on the boot
+    this.heap(x - sa * 0.21, z - ca * 0.21, yaw, 0.075, 0.08, scraped * 0.7);
+    this.flagMark(x, z, yaw, 0.15, 0.22); // wet suction ring around the print
+    return scraped * 0.3 * 1000;
+  }
+
+  /** muddy boots on firm ground: leave a wet smear in the shape of the sole */
+  trackMud(x: number, z: number, yaw: number, load: number) {
+    const k = 0.7 + 0.3 * Math.min(1, load);
+    const sa = Math.sin(yaw), ca = Math.cos(yaw);
+    this.flagMark(x + sa * 0.075, z + ca * 0.075, yaw, 0.095 * k, 0.115 * k);
+    this.flagMark(x - sa * 0.105, z - ca * 0.105, yaw, 0.075 * k, 0.07 * k);
+  }
+
+  /** smears dry out: sweep 1/16 of the window every 3 s, clearing dark marks
+   *  on ground that is no longer wet (digging suction rings in wet clay stay) */
+  private dryAccum = 0;
+  private drySlice = 0;
+  private dryMarks(dt: number) {
+    this.dryAccum += dt;
+    if (this.dryAccum < 3) return;
+    this.dryAccum = 0;
+    const rows = NC / 16;
+    const j0 = this.drySlice * rows;
+    this.drySlice = (this.drySlice + 1) % 16;
+    let changed = false;
+    for (let j = j0; j < j0 + rows; j++) {
+      for (let i = 0; i < NC; i++) {
+        const v = j * NC + i;
+        if (!(this.flags[v] & 4)) continue;
+        const t = this.touchAt(this.ox - MICRO_HALF + (i + 0.5) * MICRO_CELL, this.oz - MICRO_HALF + (j + 0.5) * MICRO_CELL);
+        if (t.wetness < 0.3) { this.flags[v] &= ~4; changed = true; }
+      }
+    }
+    if (changed) this.texDirty = true;
   }
 
   /** one spade stroke: penetration → cut → (adhesion) → extraction suction */
@@ -1629,7 +1739,10 @@ export class MicroTerrain {
         const churnA = (f[v] & 1) !== 0 || (f[v + 1] & 1) !== 0 || (f[v + n] & 1) !== 0;
         if (!churnA) continue;
         const s = sOf(i, j);
-        const { tanRepose, rate } = reposeOf(s);
+        let { tanRepose, rate } = reposeOf(s);
+        // remoulded (spoil) mud has lost its structure: it slumps toward a low
+        // heap while virgin mud walls stand — thixotropy, cheap version
+        if ((f[v] & 2) && s.mud > 0.3 && s.consistency < 2) { tanRepose = Math.min(tanRepose, 0.4); rate = Math.max(rate, 0.35); }
         const maxD = tanRepose * cell;
         // pair right
         {
@@ -1660,6 +1773,7 @@ export class MicroTerrain {
     // by a stroke, a relaxation pass, rain erosion…)
     const edited = this.texDirty;
     const scrolled = this.follow(px, pz);
+    this.dryMarks(dt);
     this.relaxAccum += dt;
     if (this.relaxAccum >= 0.5) {
       this.relaxAccum = 0;
@@ -2267,10 +2381,10 @@ export class MicroTerrain {
    * which is safe because the shader's edge fade kills the window rim
    * before it reaches the terrain seam.
    */
-  private blurPlane(plane: Float32Array) {
+  private blurPlane(plane: Float32Array, passes = 2) {
     const n = NC;
     const tmp = this.scratchW;
-    for (let pass = 0; pass < 2; pass++) {
+    for (let pass = 0; pass < passes; pass++) {
       // horizontal sweep: plane → tmp
       for (let j = 0; j < n; j++) {
         const row = j * n;
@@ -2295,11 +2409,12 @@ export class MicroTerrain {
   }
 
   /**
-   * Pack the ground overlay texture (R = delta, G/B/A = churn/spoil/ring),
-   * every channel through the render-side blur: a dug crater reads as a
-   * smooth bowl with a rounded lip and softly-graded disturbed soil around
-   * it — never a square of cell-sized voxels. The physics flags stay
-   * binary in this.flags; what lands in the texture is coverage.
+   * Pack the ground overlay texture (R = delta, G/B/A = churn/spoil/ring).
+   * EVERY channel takes ONE blur sweep — two halved a boot print's depth
+   * (30 cm dug → 11 cm drawn) AND blurred a whole trail's churn into one
+   * dark smear; one [1,2,1] H+V sweep still kills the cell-square look
+   * while prints keep their anatomy and their separation. The physics
+   * flags stay binary in this.flags; what lands in the texture is coverage.
    */
   private uploadTexture() {
     const n = NC;
@@ -2315,20 +2430,24 @@ export class MicroTerrain {
     }
     if (!anyContent && this.texWasClean) { this.texDirty = false; return; }
     const plane = this.scratch;
-    // R — quadratic delta encode (byte 128 = 0 m, ±127 = ±1.5 m), blurred
+    // R — quadratic delta encode (byte 128 = 0 m, ±127 = ±1.5 m), ONE sweep:
+    // the depth the physics stamped is the depth the mesh draws
     for (let v = 0; v < n * n; v++) {
       const dl = this.delta[v];
       const m = Math.min(Math.abs(dl), DELTA_ENCODE) / DELTA_ENCODE;
       plane[v] = 128 + (dl < 0 ? -1 : 1) * 127 * Math.sqrt(m);
     }
-    this.blurPlane(plane);
+    this.blurPlane(plane, 1);
     for (let v = 0; v < n * n; v++)
       t[v * 4] = Math.max(0, Math.min(255, Math.round(plane[v])));
-    // G / B / A — churn, spoil, wet-ring coverage, blurred the same way
+    // G / B / A — churn, spoil, wet-ring coverage: ONE sweep, same as R —
+    // two sweeps blurred a whole trail into one dark smear ("texture filter
+    // over footprints"); one [1,2,1] sweep still grades the binary flags
+    // into soft coverage AND keeps the churn reading the BOOT's shape
     for (let ch = 0; ch < 3; ch++) {
       const bit = 1 << ch;
       for (let v = 0; v < n * n; v++) plane[v] = (this.flags[v] & bit) ? 255 : 0;
-      this.blurPlane(plane);
+      this.blurPlane(plane, 1);
       for (let v = 0; v < n * n; v++)
         t[v * 4 + 1 + ch] = Math.max(0, Math.min(255, Math.round(plane[v])));
     }

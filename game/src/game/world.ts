@@ -349,11 +349,18 @@ float liftAt(in vec2 wuv){
           vec4 gcell = texture2D(uGroundTex, vGroundUv);
           vec4 g2 = texture2D(uGroundTex2, vGroundUv);
           float wet = gcell.r; float pond = gcell.g; float mud = gcell.b; float road = gcell.a;
+          // the far-field edit channels fetched FIRST: fresh churn SMASHES the
+          // desiccation crust (a boot print has no intact plates), so the
+          // material stack below must see the broken-through crust — same as
+          // the overlay, so a trail keeps its look crossing the window edge
+          vec4 we = texture2D(uWorldEditTex, clamp((vGroundUv - uEditRect.xy) / uEditRect.zw, 0.0, 1.0));
           // wet + mud: the shared surface look (identical to the overlay);
           // g2 carries the mud MATERIAL state (gel/crust/stick/soil) so the
           // palette, glisten and desiccation plates are physics-driven
+          vec4 g2c = g2;
+          g2c.g *= 1.0 - 0.85 * we.g;
           float surfRough = 0.96;
-          mudSurface(diffuseColor.rgb, surfRough, vGroundUv, wet, mud, ${WORLD_SIZE.toFixed(1)}, g2);
+          mudSurface(diffuseColor.rgb, surfRough, vGroundUv, wet, mud, ${WORLD_SIZE.toFixed(1)}, g2c);
           // dirt road: dusty brown track
           diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.42, 0.335, 0.24) * mix(1.0, 0.5, wet), road * 0.75);
           // water-tinted where ponded
@@ -362,11 +369,11 @@ float liftAt(in vec2 wuv){
           // submerged bed is matte (the film's own surface owns the specular),
           // so water stops reading as "glossy flat ground"
           surfRough = mix(surfRough, 0.62, clamp(pond * 1.3, 0.0, 0.8));
-          // the far-field edit channels: churned trails + spoil heaps keep
-          // their disturbed-earth tint outside the contact window (the SAME
-          // tints the overlay uses — the trail doesn't change colour at the rim)
-          vec4 we = texture2D(uWorldEditTex, clamp((vGroundUv - uEditRect.xy) / uEditRect.zw, 0.0, 1.0));
-          vec3 churnCol = mix(diffuseColor.rgb * 1.28 + 0.016, diffuseColor.rgb * 0.66, wet);
+          // churnWet: churned soil is freshly exposed moist ground (surface
+          // wet + mud fraction) — MATCHES the overlay's churn tint so a
+          // trail keeps exactly its colour crossing the window edge
+          float churnWet = clamp(wet + mud * 0.55, 0.0, 1.0);
+          vec3 churnCol = mix(diffuseColor.rgb * 1.28 + 0.016, diffuseColor.rgb * 0.8, churnWet);
           // churn/spoil blends (0.85 / 0.75): a dug trail must stay legible
           // from across the valley — MATCH the overlay's rim factors below
           // or the trail changes tint crossing the window edge

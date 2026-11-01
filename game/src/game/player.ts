@@ -30,6 +30,9 @@ export type TrampleFn = (x: number, z: number, r: number, mode: "trample" | "dig
 const JEANS_BASE = new THREE.Color(0x35404d);
 const BOOT_BASE = new THREE.Color(0x2a211c);
 const BOOT_MUD_COL = new THREE.Color(0x241a12);
+/** caked mud on the leather: milk-chocolate brown, LIGHTER than the boot —
+ *  reads as a clod riding the sole, not a dark tint */
+const BOOT_CAKED = new THREE.Color(0x5a4228);
 
 export class Player {
   group: THREE.Group; // character root
@@ -41,9 +44,6 @@ export class Player {
   sinkage = 0;
   mud = 0;
   pondM = 0;
-  footprints: THREE.InstancedMesh;
-  private fpIdx = 0;
-  private fpMax = 170;
   private lastFootSign = 1;
   private jumpVel = 0;
 
@@ -56,11 +56,15 @@ export class Player {
   camera: THREE.PerspectiveCamera;
   private camPitch = 0.18;
   private camZoom = 6.2;
-  /** mud caked on the boots 0..1 — picked up in plastic/liquid mud, dries
-   *  and flakes off on dry ground; weighs the walk down and glosses the legs */
+  /** mud caked on the boots 0..1 — loaded by PEELING out of prints (the
+   *  soil that leaves with the boot, measured in litres), shed on firm
+   *  ground (leaving smears) and washed off in standing water */
   bootMud = 0;
   /** dwell timer while standing still on soft mud (viscoplastic creep) */
   private dwellT = 0;
+  /** where each foot last planted, so the OTHER foot's print can be peeled
+   *  out of when this one lands (index 0 = +side, 1 = −side) */
+  private lastPlant: ({ x: number; z: number; yaw: number } | null)[] = [null, null];
   /** the skinned character (jeans/boot materials stain with boot mud) */
   skin!: Skin;
   /** miner's lantern — the only light underground */
@@ -91,22 +95,6 @@ export class Player {
     this.animator = new Animator(this.skeleton);
     this.group.add(this.skeleton.group);
     scene.add(this.group);
-
-    // ---- footprints (instanced dark ellipses) ------------------------------
-    const fpGeo = new THREE.PlaneGeometry(0.34, 0.62);
-    fpGeo.rotateX(-Math.PI / 2);
-    const fpMat = new THREE.MeshBasicMaterial({
-      color: 0x241a10, transparent: true, opacity: 0.55, depthWrite: false,
-    });
-    this.footprints = new THREE.InstancedMesh(fpGeo, fpMat, this.fpMax);
-    this.footprints.frustumCulled = false;
-    this.footprints.renderOrder = 3;
-    const m = new THREE.Matrix4();
-    for (let i = 0; i < this.fpMax; i++) {
-      m.makeTranslation(0, -999, 0);
-      this.footprints.setMatrixAt(i, m);
-    }
-    scene.add(this.footprints);
 
     // ---- camera -------------------------------------------------------------
     this.camera = new THREE.PerspectiveCamera(58, 1, 0.1, 2600);
@@ -160,16 +148,10 @@ export class Player {
       - sample.stick * 0.09 * (1 - this.mud * 0.45)
       - 0.11 * this.bootMud);
 
-    // ----- boot mud: pick it up in mud, dry it off on dry ground ----------
-    if (this.onGround) {
-      if (this.mud > 0.3 || this.pondM > 0.01) {
-        this.bootMud = Math.min(1, this.bootMud
-          + dt * (0.05 + 0.45 * this.mud + 0.2 * sample.stick));
-      } else if (filmDepth < 0.01) {
-        const dryHere = 1 - this.micro.touchAt(this.pos.x, this.pos.z).wetness;
-        this.bootMud = Math.max(0, this.bootMud - dt * (0.015 + 0.05 * dryHere));
-      }
-    }
+    // ----- boot mud: loaded by bootLift when a boot peels out of its print
+    // (event-driven and mass-conserving — see the footfall block below); no
+    // passive accrual while merely standing in mud
+
     const baseSpeed = input.sprint ? 7.2 : 4.1;
     const maxSpeed = baseSpeed * slow;
 
@@ -300,10 +282,10 @@ export class Player {
     this.group.position.set(this.pos.x, this.pos.y, this.pos.z);
     this.group.rotation.y = this.yaw;
 
-    // ----- muddy boots: jeans + boots darken + gloss as mud cakes on ------
+    // ----- muddy boots: jeans darken + boots cake brown and gloss -----------
     const stain = this.bootMud * 0.85;
     this.skin.jeansMat.color.copy(JEANS_BASE).lerp(BOOT_MUD_COL, stain);
-    this.skin.bootMat.color.copy(BOOT_BASE).lerp(BOOT_MUD_COL, stain);
+    this.skin.bootMat.color.copy(BOOT_BASE).lerp(BOOT_CAKED, Math.min(1, this.bootMud * 1.3));
     this.skin.jeansMat.roughness = 0.95 - this.bootMud * 0.55;
     this.skin.bootMat.roughness = 0.90 - this.bootMud * 0.60;
 
@@ -316,8 +298,26 @@ export class Player {
       const fx0 = this.pos.x + off.x;
       const fz0 = this.pos.z + off.z;
       if (spd > 0.6 && this.onGround) {
+        const fi = footSign > 0 ? 0 : 1;
+        // the OTHER foot is peeling out of its print as this one lands:
+        // suction, a toe-flung lump, and some mud stays on the sole
+        const leaving = this.lastPlant[1 - fi];
+        if (leaving) {
+          const sl = this.micro.touchAt(leaving.x, leaving.z);
+          this.bootMud = Math.min(1, this.bootMud
+            + this.micro.bootLift(leaving.x, leaving.z, leaving.yaw, sl, input.sprint ? 1.4 : 1) * 3);
+        }
         // geometry: state-shaped crater + conserving rim
         this.micro.stampBoot(fx0, fz0, this.yaw, s, input.sprint ? 1.55 : 1);
+        this.lastPlant[fi] = { x: fx0, z: fz0, yaw: this.yaw };
+        // caked boots on firm ground leave a wet smear and shed; water washes them
+        if (s.mud < 0.2 && this.bootMud > 0.1) {
+          this.micro.trackMud(fx0, fz0, this.yaw, this.bootMud);
+          this.bootMud *= 0.86;
+        } else if (s.mud < 0.2) {
+          this.bootMud = Math.max(0, this.bootMud - 0.02);
+        }
+        if (this.pondM > 0.015) this.bootMud *= 0.6;
         this.trample?.(fx0, fz0, 0.16, "trample");
         // fine-tier compaction memory (plastic-optimum weighting)
         this.ground.footPass(fx0, fz0, input.sprint);
@@ -340,8 +340,6 @@ export class Player {
         if (s.mud > 0.55 || (s.sr > 0.92 && s.wetness > 0.75)) {
           this.fx.playSuction(Math.max(s.mud, 0.5));
         }
-        // dark decal on top for far contrast (wet ground only)
-        if (s.wetness > 0.28) this.stampFootprint(footSign);
       }
     }
 
@@ -380,20 +378,5 @@ export class Player {
     const side = new THREE.Vector3(Math.cos(input.yaw), 0, -Math.sin(input.yaw)).multiplyScalar(0.5);
     look.add(side);
     this.camera.lookAt(look);
-  }
-
-  private stampFootprint(sign: number) {
-    const i = this.fpIdx = (this.fpIdx + 1) % this.fpMax;
-    const m = new THREE.Matrix4();
-    const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.yaw);
-    const off = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw)).multiplyScalar(0.13 * sign);
-    const p = new THREE.Vector3(this.pos.x + off.x, this.pos.y + 0.02, this.pos.z + off.z);
-    const s = new THREE.Vector3(0.9 + this.mud * 0.7, 1, 0.9 + this.mud * 0.7);
-    m.compose(p, q, s);
-    this.footprints.setMatrixAt(i, m);
-    this.footprints.instanceMatrix.needsUpdate = true;
-    // footprints slowly fade via opacity of shared material (global approx)
-    const mat = this.footprints.material as THREE.MeshBasicMaterial;
-    mat.opacity = 0.5;
   }
 }
