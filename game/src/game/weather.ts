@@ -48,6 +48,11 @@ export class WeatherPlayer {
   timescale: number;
   tMin = 0; // game minutes elapsed
   windDirBase: number; // radians
+  /** live weather multipliers (settings sliders): scale the timeline's rain
+   *  and wind after interpolation — the whole stack (physics, visuals, audio)
+   *  follows, since everyone reads now() */
+  rainScale = 1;
+  windScale = 1;
 
   // lightning state
   lightningTimer = 4;
@@ -89,11 +94,12 @@ export class WeatherPlayer {
     const gust = wind * (1 + 0.35 * Math.sin(t * 1.7) * Math.sin(t * 0.53 + 1.2));
     // wind direction slowly rotates
     const dir = this.windDirBase + 0.25 * Math.sin(t * 0.04 + 2.0);
+    const rainS = this.rainScale, windS = this.windScale;
     return {
       tMin: t,
-      rainMmH: rain,
-      windMs: Math.max(wind, 0.5),
-      gustMs: Math.max(gust, 0.5),
+      rainMmH: rain * rainS,
+      windMs: Math.max(wind * windS, 0.1),
+      gustMs: Math.max(gust * windS, 0.1),
       windDirRad: dir,
       tempC: temp,
       cloud,

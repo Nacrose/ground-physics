@@ -10,6 +10,9 @@ import { Ground } from "./ground";
 import { StormFX, StepKind } from "./fx";
 import { MicroTerrain, SoilTouch } from "./contact";
 import type { Tunnel } from "./tunnel";
+import { Skeleton } from "./skeleton";
+import { buildSkin, buildSpade, buildLantern, Skin } from "./skin";
+import { Animator } from "./animator";
 
 export interface InputState {
   forward: number; // -1..1
@@ -25,6 +28,7 @@ export interface InputState {
 export type TrampleFn = (x: number, z: number, r: number, mode: "trample" | "dig") => void;
 
 const JEANS_BASE = new THREE.Color(0x35404d);
+const BOOT_BASE = new THREE.Color(0x2a211c);
 const BOOT_MUD_COL = new THREE.Color(0x241a12);
 
 export class Player {
@@ -40,16 +44,14 @@ export class Player {
   footprints: THREE.InstancedMesh;
   private fpIdx = 0;
   private fpMax = 170;
-  private walkPhase = 0;
   private lastFootSign = 1;
   private jumpVel = 0;
 
-  // character parts for animation
-  private legL: THREE.Mesh;
-  private legR: THREE.Mesh;
-  private armL: THREE.Mesh;
-  private armR: THREE.Mesh;
-  private torso: THREE.Mesh;
+  // ---- skeletal rig ---------------------------------------------------------
+  /** fine bone hierarchy (32 pivots) — the single source of pose truth */
+  skeleton: Skeleton;
+  /** procedural animator driving every action with subtle variation */
+  animator: Animator;
 
   camera: THREE.PerspectiveCamera;
   private camPitch = 0.18;
@@ -59,66 +61,35 @@ export class Player {
   bootMud = 0;
   /** dwell timer while standing still on soft mud (viscoplastic creep) */
   private dwellT = 0;
-  private legMatL!: THREE.MeshStandardMaterial;
-  private legMatR!: THREE.MeshStandardMaterial;
+  /** the skinned character (jeans/boot materials stain with boot mud) */
+  skin!: Skin;
   /** miner's lantern — the only light underground */
   private lantern: THREE.PointLight | null = null;
+  private lanternBody: THREE.Mesh | null = null;
   /** spade swing animation phase 0..1, or null when idle */
   digPhase: number | null = null;
+  /** stamina / chill state fed to the animator for tired & shiver layers */
+  private tired = 0;
+  private cold = 0;
   /** tunnel the player can enter (wired by the engine after creation) */
   tunnel: Tunnel | null = null;
 
   constructor(scene: THREE.Scene, private terrain: TerrainData, private ground: Ground,
     private fx: StormFX, private micro: MicroTerrain, spawnX: number, spawnZ: number,
     private trample?: TrampleFn) {
-    // ---- character ---------------------------------------------------------
+    // ---- character: fine skeleton + human skin draped over it ---------------
+    // The old flat box-puppet is replaced by a 32-bone hierarchical rig
+    // (skeleton.ts) with capsule/box skin parts parented per bone (skin.ts).
+    // All motion comes from the procedural Animator — nothing here poses meshes.
     this.group = new THREE.Group();
-    const coat = new THREE.MeshStandardMaterial({ color: 0x4a3a30, roughness: 0.9 });
-    const jeans = new THREE.MeshStandardMaterial({ color: 0x35404d, roughness: 0.95 });
-    const skin = new THREE.MeshStandardMaterial({ color: 0xc9a184, roughness: 0.8 });
-    const hatMat = new THREE.MeshStandardMaterial({ color: 0x5d4630, roughness: 0.95 });
-
-    this.torso = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.62, 0.28), coat);
-    this.torso.position.y = 1.12;
-    this.torso.castShadow = true;
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.145, 12, 10), skin);
-    head.position.y = 1.62;
-    head.castShadow = true;
-    const hatTop = new THREE.Mesh(new THREE.CylinderGeometry(0.105, 0.125, 0.16, 10), hatMat);
-    hatTop.position.y = 1.76;
-    const hatBrim = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.27, 0.025, 14), hatMat);
-    hatBrim.position.y = 1.70;
-    hatBrim.castShadow = true;
-    // scarf hint
-    const scarf = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.11, 0.1, 8),
-      new THREE.MeshStandardMaterial({ color: 0x8c2f2f, roughness: 0.9 }));
-    scarf.position.y = 1.5;
-
-    const mkLimb = (mat: THREE.Material, w: number, h: number) => {
-      // limb pivots at the top: geometry translated down half height
-      const g = new THREE.BoxGeometry(w, h, w * 0.9);
-      g.translate(0, -h / 2, 0);
-      const mesh = new THREE.Mesh(g, mat);
-      mesh.castShadow = true;
-      return mesh;
-    };
-    this.legMatL = jeans.clone();
-    this.legMatR = jeans.clone();
-    this.legL = mkLimb(this.legMatL, 0.17, 0.82);
-    this.legL.position.set(0.115, 0.82, 0);
-    this.legR = mkLimb(this.legMatR, 0.17, 0.82);
-    this.legR.position.set(-0.115, 0.82, 0);
-    this.armL = mkLimb(coat, 0.13, 0.6);
-    this.armL.position.set(0.29, 1.38, 0);
-    this.armR = mkLimb(coat, 0.13, 0.6);
-    this.armR.position.set(-0.29, 1.38, 0);
-
-    this.group.add(this.torso, head, hatTop, hatBrim, scarf, this.legL, this.legR, this.armL, this.armR);
-    // lantern on the chest — warm, short-range, off in daylight
-    this.lantern = new THREE.PointLight(0xffb066, 0, 9, 1.8);
-    this.lantern.position.set(0, 1.35, 0.25);
-    this.lantern.visible = false;
-    this.group.add(this.lantern);
+    this.skeleton = new Skeleton(false);
+    this.skin = buildSkin(this.skeleton);
+    buildSpade(this.skeleton);
+    const lanternRig = buildLantern(this.skeleton);
+    this.lantern = lanternRig.light;
+    this.lanternBody = lanternRig.body;
+    this.animator = new Animator(this.skeleton);
+    this.group.add(this.skeleton.group);
     scene.add(this.group);
 
     // ---- footprints (instanced dark ellipses) ------------------------------
@@ -146,11 +117,15 @@ export class Player {
 
   addPitch(d: number) { this.camPitch = Math.max(-0.5, Math.min(0.9, this.camPitch + d)); }
   addZoom(d: number) { this.camZoom = Math.max(2.8, Math.min(14, this.camZoom + d)); }
+  /** settings slider: set the camera follow distance directly [m] */
+  setZoom(z: number) { this.camZoom = Math.max(2.8, Math.min(14, z)); }
 
   /** ground height incl. micro deformations (prints, craters, spoil) and the tunnel invert */
   groundHeightAt(x: number, z: number): number {
     const th = sampleHeight(this.terrain, x + 384, z + 384)
-      + this.ground.dynLiftAt(x, z); // fine-tier erosion / settling rides too
+      + this.ground.dynLiftBilerp(x, z); // fine-tier erosion / settling rides too
+      // (bilerp = the exact field both meshes render, so your feet match the
+      //  visible ground inside the window AND out in the world)
     if (this.tunnel) {
       // the height gate keeps surface walkers above a drive on the terrain
       // floor; inside the tube (or the portal cut) the tunnel owns the floor
@@ -270,6 +245,8 @@ export class Player {
           }
         }
         this.fx.playStep(this.stepKind(s), Math.min(1.8, impact * 0.6));
+        // skeletal landing crouch — depth scales with the fall speed
+        this.animator.triggerLand(fallSpd);
         // a hard landing in soft mud throws brown churn
         if (sample.mud > 0.2) {
           this.fx.spawnMudChurn(this.pos.x, groundH + 0.05, this.pos.z, Math.min(1.6, impact));
@@ -296,33 +273,42 @@ export class Player {
       this.pos.x = c.x; this.pos.z = c.z;
     }
 
-    // ----- walk cycle & footprints --------------------------------------------
+    // ----- skeletal animation feed -------------------------------------------
+    // Physics state drives the animator's layers; the animator poses every
+    // bone (gait + actions + secondary motion). We only read its gait phase
+    // for footfall timing so steps and strides stay in sync with the rig.
     const spd = this.speed;
-    this.walkPhase += dt * (2.2 + spd * 1.35);
-    const swing = Math.sin(this.walkPhase) * Math.min(spd / 4.5, 1);
-    this.legL.rotation.x = swing * 0.72;
-    this.legR.rotation.x = -swing * 0.72;
-    this.armL.rotation.x = -swing * 0.55;
-    this.armR.rotation.x = swing * 0.55;
-    this.torso.rotation.x = Math.min(spd / 16, 0.16) + (this.mud > 0.4 ? 0.12 : 0); // lean when hauling through mud
-    // spade swing overrides the arms while digging
-    if (this.digPhase != null) {
-      const dswing = Math.sin(this.digPhase * Math.PI);
-      this.armR.rotation.x = -2.3 * dswing;
-      this.armL.rotation.x = 0.55 * dswing;
-      this.torso.rotation.x += 0.16 * dswing;
-    }
-    const bob = Math.abs(Math.sin(this.walkPhase)) * 0.03 * Math.min(spd / 4, 1);
-    this.group.position.set(this.pos.x, this.pos.y + bob, this.pos.z);
+    const a = this.animator;
+    a.gaitSpeed = spd / 4.1;               // 1.0 == brisk walk, ~1.75 sprint
+    a.sprint = input.sprint;
+    a.mudAmount = this.mud;
+    a.wetAmount = Math.min(1, this.pondM * 2.5 + (this.micro.waterAt(this.pos.x, this.pos.z) > 0.01 ? 0.3 : 0));
+    a.velY = this.jumpVel;
+    a.onGround = this.onGround;
+    a.sinkage = this.sinkage;
+    a.digPhase = this.digPhase;
+    // stamina: sprinting drains, standing recovers — feeds tired breathing
+    this.tired = Math.max(0, Math.min(1,
+      this.tired + dt * (input.sprint && spd > 3 ? 0.16 : -0.09)));
+    a.tired = this.tired;
+    // chill: soaked + moving slowly in rain => shiver layer
+    this.cold = Math.max(0, Math.min(1, this.cold
+      + dt * (a.wetAmount > 0.4 && spd < 1.5 ? 0.1 : -0.12)));
+    a.cold = this.cold;
+    a.update(dt);
+
+    this.group.position.set(this.pos.x, this.pos.y, this.pos.z);
     this.group.rotation.y = this.yaw;
 
-    // ----- muddy boots: legs darken + gloss as mud cakes on -----------------
-    this.legMatL.color.copy(JEANS_BASE).lerp(BOOT_MUD_COL, this.bootMud * 0.85);
-    this.legMatR.color.copy(JEANS_BASE).lerp(BOOT_MUD_COL, this.bootMud * 0.85);
-    this.legMatL.roughness = this.legMatR.roughness = 0.95 - this.bootMud * 0.55;
+    // ----- muddy boots: jeans + boots darken + gloss as mud cakes on ------
+    const stain = this.bootMud * 0.85;
+    this.skin.jeansMat.color.copy(JEANS_BASE).lerp(BOOT_MUD_COL, stain);
+    this.skin.bootMat.color.copy(BOOT_BASE).lerp(BOOT_MUD_COL, stain);
+    this.skin.jeansMat.roughness = 0.95 - this.bootMud * 0.55;
+    this.skin.bootMat.roughness = 0.90 - this.bootMud * 0.60;
 
     // footprint every half stride — a real write into the deformable ground
-    const footSign = Math.sin(this.walkPhase) > 0 ? 1 : -1;
+    const footSign = Math.sin(a.gaitPhase) > 0 ? 1 : -1;
     if (footSign !== this.lastFootSign) {
       this.lastFootSign = footSign;
       const s = this.micro.touchAt(this.pos.x, this.pos.z);
@@ -379,17 +365,21 @@ export class Player {
       const camGround = this.groundHeightAt(cx, cz) + 0.55;
       this.camera.position.set(cx, Math.max(cyPos, camGround), cz);
     }
-    // miner's lantern: fades in underground, out in daylight
+    // miner's lantern: fades in underground, out in daylight — with a subtle
+    // flicker so the hanging lamp feels physically swaying on the hand bone
     if (this.lantern) {
       const target = inTunnel ? 9 : 0;
       this.lantern.intensity += (target - this.lantern.intensity) * Math.min(dt * 3, 1);
       this.lantern.visible = this.lantern.intensity > 0.05;
+      if (this.lanternBody) {
+        const em = (this.lanternBody.material as THREE.MeshStandardMaterial);
+        em.emissiveIntensity = this.lantern.intensity / 9 * (0.85 + 0.15 * Math.sin(elapsed * 21) * Math.sin(elapsed * 7.3));
+      }
     }
     const look = new THREE.Vector3(this.pos.x, this.pos.y + 1.35, this.pos.z);
     const side = new THREE.Vector3(Math.cos(input.yaw), 0, -Math.sin(input.yaw)).multiplyScalar(0.5);
     look.add(side);
     this.camera.lookAt(look);
-    void elapsed;
   }
 
   private stampFootprint(sign: number) {

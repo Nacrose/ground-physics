@@ -161,11 +161,35 @@ export class Ground {
     this.sedLedger.importedKg = 0;
   }
 
-  /** dynamic surface lift (erosion/deposition + hydrocompaction) [m] — the
-   *  contact tier bakes this into its window so gullies and fans appear */
+  /** dynamic surface lift (erosion/deposition − hydrocompaction settling) [m]
+   *  — the contact tier AND the static world mesh both render this field, so
+   *  gullies, fans and settled ground appear everywhere (not just in the
+   *  contact window). NOTE: settleM is a volume-LOSS ledger (≥ 0), so it
+   *  SUBTRACTS — consolidation lowers the ground, never raises it. */
   dynLiftAt(x: number, z: number): number {
     const k = cellIndex(x, z);
-    return this.eroM[k] + this.settleM[k];
+    return this.eroM[k] - this.settleM[k];
+  }
+
+  /** bilinear lift over the 4 m cell lattice — the CONTINUOUS version of
+   *  dynLiftAt. The static mesh samples this exact field through its lift
+   *  DataTexture (linear filter), and the contact overlay bakes it, so both
+   *  meshes show the SAME smooth field and the window edge stays seamless. */
+  dynLiftBilerp(x: number, z: number): number {
+    const cell = WORLD_SIZE / GRID;
+    // cell-centre lattice: value v(i,j) lives at ((i+0.5), (j+0.5)) * cell
+    const gx = (x + WORLD_SIZE / 2) / cell - 0.5;
+    const gz = (z + WORLD_SIZE / 2) / cell - 0.5;
+    const i0 = Math.max(0, Math.min(GRID - 1, Math.floor(gx)));
+    const j0 = Math.max(0, Math.min(GRID - 1, Math.floor(gz)));
+    const i1 = Math.min(GRID - 1, i0 + 1);
+    const j1 = Math.min(GRID - 1, j0 + 1);
+    const u = Math.max(0, Math.min(1, gx - i0));
+    const v = Math.max(0, Math.min(1, gz - j0));
+    const L = (i: number, j: number) => this.eroM[j * GRID + i] - this.settleM[j * GRID + i];
+    const a = L(i0, j0) * (1 - u) * (1 - v) + L(i1, j0) * u * (1 - v)
+            + L(i0, j1) * (1 - u) * v + L(i1, j1) * u * v;
+    return a;
   }
 
   /** node-grid terrain height (the D8 routing datum) for the micro tier */
@@ -474,7 +498,7 @@ export class Ground {
     for (let j = 0; j < GRID; j++) {
       for (let i = 0; i < GRID; i++) {
         const k = j * GRID + i;
-        const lift = this.eroM[k] + this.settleM[k];
+        const lift = this.eroM[k] - this.settleM[k];
         const hExcess = h[k] - depStore - this.rut[k] * 0.4;
         if (hExcess <= 2e-4) continue;
         // steepest descent among 8 neighbours (node heights + dynamic lift)
@@ -488,7 +512,7 @@ export class Ground {
             const nk = nj * GRID + ni;
             const dist = (di !== 0 && dj !== 0) ? CELL * 1.414 : CELL;
             const slope = (zc - (height[(nj + 1) * (GRID + 1) + ni + 1]
-              + this.eroM[nk] + this.settleM[nk] + h[nk])) / dist;
+              + this.eroM[nk] - this.settleM[nk] + h[nk])) / dist;
             if (slope > bestSlope) { bestSlope = slope; bestK = nk; }
           }
         }

@@ -9,14 +9,54 @@ import { Ground } from "./ground";
 import { World } from "./world";
 import { StormFX } from "./fx";
 import { Player, InputState } from "./player";
-import { HUD } from "./hud";
 import { WeatherPlayer } from "./weather";
 import { PRESETS, WeatherEntry } from "./params";
 import { MicroTerrain } from "./contact";
 import { Tunnel } from "./tunnel";
+import { HUD, SettingDef, SettingValue } from "./hud";
 
 const HALF = WORLD_SIZE / 2;
 const TS_STEPS = [1, 4, 8, 16, 32, 64];
+
+// ---------------------------------------------------------------- settings
+export interface SettingsValues {
+  volume: number; // 0..100 %
+  muted: boolean;
+  digSpeed: number; // × swing rate
+  digSize: number; // × blade footprint
+  editView: number; // m — view-only sharp ring of dug ground (0 / <32 = off)
+  timeScale: number; // game-min per real-min
+  rainScale: number; // × timeline rain
+  windScale: number; // × timeline wind
+  fov: number; // deg
+  camDist: number; // m
+  grass: number; // % of quality tier
+  rainDrops: number; // % of quality tier
+  autoQuality: boolean;
+}
+
+const SETTINGS_KEY = "stormcountry.settings";
+const SETTINGS_DEFAULTS: SettingsValues = {
+  volume: 80, muted: false, digSpeed: 1, digSize: 1, editView: 96, timeScale: 16,
+  rainScale: 1, windScale: 1, fov: 58, camDist: 6.2, grass: 100, rainDrops: 100,
+  autoQuality: true,
+};
+
+const SETTING_DEFS: SettingDef[] = [
+  { key: "volume", label: "VOLUME", section: "AUDIO", kind: "range", min: 0, max: 100, step: 1, unit: "%" },
+  { key: "muted", label: "MUTE", section: "AUDIO", kind: "check" },
+  { key: "digSpeed", label: "DIG SPEED", section: "DIGGING", kind: "range", min: 0.5, max: 3, step: 0.1, unit: "×" },
+  { key: "digSize", label: "SPADE SIZE", section: "DIGGING", kind: "range", min: 0.5, max: 2, step: 0.1, unit: "×" },
+  { key: "editView", label: "EDIT VIEW DISTANCE (0 = OFF)", section: "DIGGING", kind: "range", min: 0, max: 200, step: 8, unit: " m" },
+  { key: "timeScale", label: "TIME SPEED", section: "WEATHER & TIME", kind: "range", min: 1, max: 64, step: 1, unit: "×" },
+  { key: "rainScale", label: "RAIN INTENSITY", section: "WEATHER & TIME", kind: "range", min: 0, max: 2.5, step: 0.05, unit: "×", decimals: 2 },
+  { key: "windScale", label: "WIND", section: "WEATHER & TIME", kind: "range", min: 0.25, max: 2, step: 0.05, unit: "×", decimals: 2 },
+  { key: "fov", label: "FIELD OF VIEW", section: "CAMERA", kind: "range", min: 45, max: 75, step: 1, unit: "°" },
+  { key: "camDist", label: "CAMERA DISTANCE", section: "CAMERA", kind: "range", min: 2.8, max: 14, step: 0.1, unit: " m" },
+  { key: "grass", label: "GRASS DENSITY", section: "RENDER", kind: "range", min: 0, max: 100, step: 5, unit: "%" },
+  { key: "rainDrops", label: "RAIN PARTICLES", section: "RENDER", kind: "range", min: 0, max: 100, step: 5, unit: "%" },
+  { key: "autoQuality", label: "AUTO QUALITY", section: "RENDER", kind: "check" },
+];
 
 interface QualityLevel {
   name: string;
@@ -27,8 +67,8 @@ interface QualityLevel {
 }
 
 const QUALITY: QualityLevel[] = [
-  { name: "LOW", grass: 14000, rain: 1600, pixelRatio: 0.9, shadowRes: 1024 },
-  { name: "MEDIUM", grass: 26000, rain: 3000, pixelRatio: 1.1, shadowRes: 1536 },
+  { name: "LOW", grass: 14000, rain: 1600, pixelRatio: 1.0, shadowRes: 1024 },
+  { name: "MEDIUM", grass: 26000, rain: 3000, pixelRatio: 1.15, shadowRes: 1536 },
   { name: "HIGH", grass: 40000, rain: 4200, pixelRatio: 1.3, shadowRes: 2048 },
   { name: "ULTRA", grass: 52000, rain: 5600, pixelRatio: 1.5, shadowRes: 2048 },
 ];
@@ -59,7 +99,7 @@ export class Game {
   // spade stroke state machine
   private digging = false;
   private digTimer = 0;
-  private digDur = 0.5; // a full swing every half second — substantial digging
+  private digDur = 0.32; // a full swing every 0.32 s — dig throughput ×2–3 (spec §11)
   private digApplied = false;
   private digCooldown = 0;
 
@@ -73,6 +113,12 @@ export class Game {
   private autoQuality = true;
   private fpsEMA = 60;
   private qualityCheck = 0;
+  /** user fractions from settings, applied on top of the quality tier */
+  private grassFrac = 1;
+  private rainFrac = 1;
+
+  // settings (O key): values + persistence
+  settings: SettingsValues = { ...SETTINGS_DEFAULTS };
 
   // wagon story
   private wagonBaseY = 0;
@@ -133,6 +179,18 @@ export class Game {
     this.hud = new HUD(this.container, this.terrain);
     this.wagonBaseY = this.world.wagon.position.y;
 
+    // ---- settings panel: load persisted values, wire + apply them all -------
+    try {
+      const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") as Partial<SettingsValues>;
+      Object.assign(this.settings, saved);
+    } catch { /* fresh defaults */ }
+    this.hud.buildSettingsPanel(SETTING_DEFS, { ...this.settings },
+      (key, value) => this.applySetting(key, value),
+      () => this.resetSettings());
+    for (const [k, v] of Object.entries(this.settings)) {
+      this.applySetting(k, v as SettingValue, false);
+    }
+
     this.applyQuality(QUALITY[this.qualityIdx]);
 
     // ---- events ---------------------------------------------------------------
@@ -174,6 +232,10 @@ export class Game {
     if (this.disposed || !this.world) return;
     const def = PRESETS.find((p) => p.key === key)!;
     this.weather = new WeatherPlayer(def, tl);
+    // settings own the dials: user timescale/rain/wind survive a front change
+    this.weather.timescale = this.settings.timeScale;
+    this.weather.rainScale = this.settings.rainScale;
+    this.weather.windScale = this.settings.windScale;
     if (reset) {
       this.ground.reset(def.initSat);
       this.ground.patternTime = 0;
@@ -202,7 +264,7 @@ export class Game {
         this.hud.hideBoot();
         this.fx.initAudio();
       }
-      canvas.requestPointerLock?.();
+      if (!this.hud?.isSettingsOpen()) canvas.requestPointerLock?.();
     });
     document.addEventListener("mousemove", (e) => {
       if (document.pointerLockElement !== canvas) return;
@@ -250,16 +312,101 @@ export class Game {
     this.micro.relaxFor(gameMinutes * 60);
   }
 
+  /** apply one setting live (settings panel / persistence replay) */
+  private applySetting(key: string, value: SettingValue, save = true) {
+    (this.settings as unknown as Record<string, SettingValue>)[key] = value;
+    const n = value as number;
+    switch (key) {
+      case "volume":
+        this.fx?.setVolume(n / 100);
+        break;
+      case "muted":
+        this.fx?.setMuted(!!value);
+        this.hud?.setMuted(!!value);
+        break;
+      case "digSpeed":
+        this.digDur = Math.max(0.12, 0.32 / Math.max(n, 0.1));
+        break;
+      case "digSize":
+        this.micro.digScale = n;
+        break;
+      case "editView":
+        this.world?.setEditView(n);
+        break;
+      case "timeScale":
+        if (this.weather) this.weather.timescale = Math.max(1, n);
+        break;
+      case "rainScale":
+        if (this.weather) this.weather.rainScale = Math.max(0, n);
+        break;
+      case "windScale":
+        if (this.weather) this.weather.windScale = Math.max(0.1, n);
+        break;
+      case "fov":
+        if (this.player) {
+          this.player.camera.fov = n;
+          this.player.camera.updateProjectionMatrix();
+        }
+        break;
+      case "camDist":
+        this.player?.setZoom(n);
+        break;
+      case "grass":
+        this.grassFrac = Math.max(0, Math.min(1, n / 100));
+        this.world?.setGrassQuality(Math.round(QUALITY[this.qualityIdx].grass * this.grassFrac));
+        break;
+      case "rainDrops":
+        this.rainFrac = Math.max(0, Math.min(1, n / 100));
+        this.fx?.setRainQuality(Math.round(QUALITY[this.qualityIdx].rain * this.rainFrac));
+        break;
+      case "autoQuality":
+        this.autoQuality = !!value;
+        break;
+    }
+    if (save) {
+      try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(this.settings)); } catch { /* private mode */ }
+    }
+  }
+
+  private resetSettings() {
+    this.settings = { ...SETTINGS_DEFAULTS };
+    for (const [k, v] of Object.entries(this.settings)) {
+      this.applySetting(k, v as SettingValue, false);
+    }
+    this.hud.syncSettings({ ...this.settings });
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(this.settings)); } catch { /* private mode */ }
+    this.hud.toast("SETTINGS RESET TO DEFAULTS");
+  }
+
+  /** O: open/close the live settings panel */
+  private toggleSettings() {
+    if (!this.hud) return;
+    const open = this.hud.toggleSettings();
+    if (open) {
+      document.exitPointerLock?.();
+      this.keys.clear(); // no stale movement keys while the dials are out
+    }
+  }
+
   private onKeyDown = async (e: KeyboardEvent) => {
     const code = e.code;
     this.keys.add(code);
     if (code === "Space") e.preventDefault();
+    // settings panel is modal: only O / Escape close it
+    if (this.hud?.isSettingsOpen()) {
+      if (code === "KeyO" || code === "Escape") this.toggleSettings();
+      return;
+    }
     if (code === "KeyE") this.toggleInspector();
+    if (code === "KeyO") this.toggleSettings();
     if (code === "KeyT") {
       const w = this.weather;
       if (w) {
         const idx = TS_STEPS.indexOf(w.timescale);
         w.timescale = TS_STEPS[(idx + 1) % TS_STEPS.length] ?? 8;
+        this.settings.timeScale = w.timescale;
+        this.hud.syncSettings({ timeScale: w.timescale });
+        try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(this.settings)); } catch { /* ignore */ }
       }
     }
     if (code === "KeyC") {
@@ -268,13 +415,16 @@ export class Game {
     }
     if (code === "KeyM") {
       this.muted = !this.muted;
-      if (this.fx) this.fx.muted = this.muted;
+      this.settings.muted = this.muted;
+      this.fx.setMuted(this.muted);
       this.hud.setMuted(this.muted);
+      try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(this.settings)); } catch { /* ignore */ }
     }
     if (code === "KeyG") {
       this.autoQuality = false;
       this.qualityIdx = (this.qualityIdx + 1) % QUALITY.length;
       this.applyQuality(QUALITY[this.qualityIdx]);
+      this.hud.syncSettings({ autoQuality: false });
     }
     if (code === "KeyB") this.tryBeginAdit();
     if (code === "KeyR") this.tryPlaceTimber();
@@ -300,8 +450,8 @@ export class Game {
 
   private applyQuality(q: QualityLevel) {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, q.pixelRatio));
-    this.world.setGrassQuality(q.grass);
-    this.fx.setRainQuality(q.rain);
+    this.world.setGrassQuality(Math.round(q.grass * this.grassFrac));
+    this.fx.setRainQuality(Math.round(q.rain * this.rainFrac));
     this.world.sun.shadow.mapSize.set(q.shadowRes, q.shadowRes);
     // force shadow map realloc
     if (this.world.sun.shadow.map) {
@@ -587,12 +737,14 @@ export class Game {
     }
 
     // ---- gather input ---------------------------------------------------------
+    // the settings panel is modal: the actor stands still while the dials are out
     const k = this.keys;
-    this.input.forward = (k.has("KeyW") || k.has("ArrowUp") ? 1 : 0) - (k.has("KeyS") || k.has("ArrowDown") ? 1 : 0);
-    this.input.right = (k.has("KeyD") || k.has("ArrowRight") ? 1 : 0) - (k.has("KeyA") || k.has("ArrowLeft") ? 1 : 0);
-    this.input.sprint = k.has("ShiftLeft") || k.has("ShiftRight");
-    this.input.jump = k.has("Space");
-    this.input.dig = k.has("KeyF");
+    const dials = this.hud?.isSettingsOpen() ?? false;
+    this.input.forward = dials ? 0 : (k.has("KeyW") || k.has("ArrowUp") ? 1 : 0) - (k.has("KeyS") || k.has("ArrowDown") ? 1 : 0);
+    this.input.right = dials ? 0 : (k.has("KeyD") || k.has("ArrowRight") ? 1 : 0) - (k.has("KeyA") || k.has("ArrowLeft") ? 1 : 0);
+    this.input.sprint = !dials && (k.has("ShiftLeft") || k.has("ShiftRight"));
+    this.input.jump = !dials && k.has("Space");
+    this.input.dig = !dials && k.has("KeyF");
 
     // ---- weather playback -------------------------------------------------------
     const w = this.weather;
