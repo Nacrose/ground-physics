@@ -1,3 +1,17 @@
+# JS / build
 node_modules/
 dist/
 build/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db/
+.idea/
+.vscode/
