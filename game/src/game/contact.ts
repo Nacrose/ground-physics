@@ -170,6 +170,18 @@ export class MicroTerrain {
   private worldVertTexData = new Uint8Array(WVTEX * WVTEX * 4);
   private worldTexDirty = false;
   private worldTexTimer = 0;
+  /** the overlay's "world field" (what its rim blends into) is read through
+   *  these swappable uniforms: the coarse far-field cache by default, the
+   *  MID RING's sharp texture while that is active (see midring.ts), so the
+   *  window edge hands off to exactly the surface drawn outside it */
+  private uWorldTexU: { value: THREE.Texture | null } = { value: null };
+  private uWorldVU: { value: THREE.Texture | null } = { value: null };
+  private uWorldRectU = { value: new THREE.Vector4(0, 0, 1, 1) };
+  private uWorldTexelU = { value: WORLD_SIZE / WTEX };
+  /** fired at the end of every far-field splat (the mid ring refreshes its
+   *  window texels from here) */
+  onWorldSplat: (() => void) | null = null;
+  private midAcc: { n: number; dMin: Float32Array; dMax: Float32Array; ch: Uint16Array; sp: Uint16Array } | null = null;
   private worldTexHasEdits = false;
   private gtRef: THREE.DataTexture | null = null;
   /** shared terrain-normal field (built once by World — the SAME texture the
@@ -320,11 +332,13 @@ export class MicroTerrain {
       this.compiled = true;
       if (shader.vertexShader.includes("#include <begin_vertex>")) this.displacementInjected = true;
       shader.uniforms.uMicroTex = { value: this.tex };
-      shader.uniforms.uWorldTex = { value: this.worldTex };
+      shader.uniforms.uWorldTex = this.uWorldTexU;
+      shader.uniforms.uWorldRect = this.uWorldRectU;
+      shader.uniforms.uWorldTexelM = this.uWorldTexelU;
       // vertex-only twins — DEDICATED mirror textures (see the field comment:
       // the shared objects never bind in the vertex stage)
       shader.uniforms.uMicroV = { value: this.vertTex };
-      shader.uniforms.uWorldV = { value: this.worldVertTex };
+      shader.uniforms.uWorldV = this.uWorldVU;
       shader.uniforms.uGroundTex = { value: this.gtRef };
       shader.uniforms.uTerrainN = { value: this.tnRef };
       shader.uniforms.uMicroOrigin = { value: new THREE.Vector2(this.ox, this.oz) };
@@ -355,6 +369,7 @@ export class MicroTerrain {
           // are declared ONLY here, so they bind — geometry moves again.
           uniform sampler2D uMicroV;
           uniform sampler2D uWorldV;
+          uniform vec4 uWorldRect;
           uniform vec2 uMicroOrigin;
           uniform float uMicroEdge;
           uniform vec4 uPortal;
@@ -373,7 +388,7 @@ export class MicroTerrain {
           }
           // the far-field edit cache — same quadratic encode, world-anchored
           float worldD(in vec2 wuv){
-            float b = texture2D(uWorldV, clamp(wuv, 0.0, 1.0)).r;
+            float b = texture2D(uWorldV, clamp((wuv - uWorldRect.xy) / uWorldRect.zw, 0.0, 1.0)).r;
             return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
           }
           // rim factor: 1 in the window interior, 0 past RIM_OUT
@@ -417,6 +432,8 @@ export class MicroTerrain {
           uniform sampler2D uTerrainN;
           uniform sampler2D uMicroTex;
           uniform sampler2D uWorldTex;
+          uniform vec4 uWorldRect;
+          uniform float uWorldTexelM;
           uniform float uMicroEdge;
           uniform vec3 uSkySheen;
           uniform vec3 uSunDirSheen;
@@ -436,7 +453,7 @@ export class MicroTerrain {
             return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
           }
           float worldD(in vec2 wuv){
-            float b = texture2D(uWorldTex, clamp(wuv, 0.0, 1.0)).r;
+            float b = texture2D(uWorldTex, clamp((wuv - uWorldRect.xy) / uWorldRect.zw, 0.0, 1.0)).r;
             return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
           }
           float rimE(in vec2 lp){
@@ -468,7 +485,7 @@ export class MicroTerrain {
           // rim and the FACTORS are the static mesh's (churn 0.85, spoil 0.75),
           // so a trail crossing the window edge keeps exactly the tint it
           // wears outside it — the rim cannot shade apart from the world
-          vec4 weRim = texture2D(uWorldTex, vGroundUv);
+          vec4 weRim = texture2D(uWorldTex, clamp((vGroundUv - uWorldRect.xy) / uWorldRect.zw, 0.0, 1.0));
           float rimF = rimE(vLpos);
           float churnE = mix(weRim.g, vChurn, rimF);
           float spoilE = mix(weRim.b, vSpoil, rimF);
@@ -503,7 +520,7 @@ export class MicroTerrain {
           // identically at the seam (a ±6 cm step samples ONE world texel:
           // zero gradient — the rim used to shade flat where the static
           // mesh sloped, a lighting seam exactly on the window edge)
-          float he = mix(${WTEXEL.toFixed(3)}, ${MICRO_CELL.toFixed(5)}, rimE(vLpos));
+          float he = mix(uWorldTexelM, ${MICRO_CELL.toFixed(5)}, rimE(vLpos));
           float wsc = ${(1 / WORLD_SIZE).toFixed(8)};
           float hx1 = surfH(vLpos + vec2(he, 0.0), vGroundUv + vec2(wsc * he, 0.0));
           float hx0 = surfH(vLpos - vec2(he, 0.0), vGroundUv - vec2(wsc * he, 0.0));
@@ -646,12 +663,14 @@ export class MicroTerrain {
     this.worldTex.minFilter = THREE.LinearFilter;
     this.worldTex.magFilter = THREE.LinearFilter;
     this.worldTex.needsUpdate = true;
+    this.uWorldTexU.value = this.worldTex;
     // vertex-only mirror (same reason as vertTex): 2x2 box-downsampled
     this.refillWorldVertTex();
     this.worldVertTex = new THREE.DataTexture(this.worldVertTexData, WVTEX, WVTEX, THREE.RGBAFormat);
     this.worldVertTex.minFilter = THREE.LinearFilter;
     this.worldVertTex.magFilter = THREE.LinearFilter;
     this.worldVertTex.needsUpdate = true;
+    this.uWorldVU.value = this.worldVertTex;
   }
   /** downsample the far-field cache into the vertex mirror. The mirror
  * feeds the static mesh's vertex displacement, so the texel that wins each
@@ -806,6 +825,7 @@ export class MicroTerrain {
     this.worldVertTex.needsUpdate = true;
     this.worldTex.needsUpdate = true;
     this.worldTexHasEdits = true;
+    this.onWorldSplat?.();
   }
 
   /** QA: bytes of the far-field cache that carry a non-neutral edit */
@@ -1115,6 +1135,155 @@ export class MicroTerrain {
     const d00 = d[j * NC + i], d10 = d[j * NC + i + 1];
     const d01 = d[(j + 1) * NC + i], d11 = d[(j + 1) * NC + i + 1];
     return d00 * (1 - u) * (1 - v) + d10 * u * (1 - v) + d01 * (1 - u) * v + d11 * u * v;
+  }
+
+  // ------------------------------------------------------------ mid ring
+  /** point the overlay's rim blend at another field (the mid ring's sharp
+   *  texture), or back at the coarse cache with nulls */
+  useWorldField(tex: THREE.Texture | null, vtex: THREE.Texture | null, rect: THREE.Vector4 | null, texelM: number) {
+    this.uWorldTexU.value = tex ?? this.worldTex;
+    this.uWorldVU.value = vtex ?? this.worldVertTex;
+    if (rect) this.uWorldRectU.value.copy(rect); else this.uWorldRectU.value.set(0, 0, 1, 1);
+    this.uWorldTexelU.value = rect ? texelM : WTEXEL;
+  }
+
+  private static encD(d: number): number {
+    const c = Math.max(DELTA_MIN, Math.min(DELTA_MAX, d));
+    const m = Math.abs(c) / DELTA_ENCODE;
+    return Math.max(0, Math.min(255, Math.round(128 + (c < 0 ? -1 : 1) * 127 * Math.sqrt(m))));
+  }
+  private static decD(b: number): number {
+    const t = (b / 255 - 0.5) * 2;
+    return Math.sign(t) * DELTA_ENCODE * t * t;
+  }
+  /** pack one mid-ring texel. PEAK-dominant (a hole OR a heap keeps its
+   *  extreme, not the texel mean) so a 10 cm spoil heap survives */
+  private static midPack(out: Uint8Array, t: number, dMin: number, dMax: number, ch: number, sp: number, cells: number) {
+    const dl = (-dMin >= dMax ? dMin : dMax) * 0.85;
+    out[t * 4] = MicroTerrain.encD(dl);
+    out[t * 4 + 1] = Math.min(255, Math.round((255 * ch * 1.4) / cells));
+    out[t * 4 + 2] = Math.min(255, Math.round((255 * sp * 1.4) / cells));
+    out[t * 4 + 3] = 255;
+  }
+
+  /**
+   * Full rebuild of the mid ring's n×n texture covering [x0, x0+n·texel) ×
+   * [z0, z0+n·texel) from the SPARSE world store (6.25 cm truth) plus the live
+   * window. Cost scales with the number of edited cells, not with area.
+   * Texels near the ring edge are blended into the coarse cache so the ring
+   * meets the static mesh without a step.
+   */
+  midFill(out: Uint8Array, n: number, x0: number, z0: number, texel: number) {
+    const nn = n * n;
+    let a = this.midAcc;
+    if (!a || a.n !== n) {
+      a = this.midAcc = { n, dMin: new Float32Array(nn), dMax: new Float32Array(nn), ch: new Uint16Array(nn), sp: new Uint16Array(nn) };
+    }
+    a.dMin.fill(0); a.dMax.fill(0); a.ch.fill(0); a.sp.fill(0);
+    const x1 = x0 + n * texel, z1 = z0 + n * texel;
+    for (const [key, val] of this.worldEdits) {
+      const wci = Math.floor(key / 16384);
+      const wcj = key - wci * 16384;
+      const x = (wci - WOFF + 0.5) * MICRO_CELL;
+      if (x < x0 || x >= x1) continue;
+      const z = (wcj - WOFF + 0.5) * MICRO_CELL;
+      if (z < z0 || z >= z1) continue;
+      const t = Math.floor((z - z0) / texel) * n + Math.floor((x - x0) / texel);
+      const d = (Math.floor(val / 8) - 1600) / 1000;
+      if (d < a.dMin[t]) a.dMin[t] = d;
+      if (d > a.dMax[t]) a.dMax[t] = d;
+      if (val & 1) a.ch[t]++;
+      if (val & 2) a.sp[t]++;
+    }
+    const cells = (texel / MICRO_CELL) * (texel / MICRO_CELL);
+    for (let t = 0; t < nn; t++) MicroTerrain.midPack(out, t, a.dMin[t], a.dMax[t], a.ch[t], a.sp[t], cells);
+    // window texels: exact, from the live arrays (the store may hold stale
+    // entries for cells that are currently inside the window)
+    this.midRefreshWindow(out, n, x0, z0, texel);
+    this.midEdgeBlend(out, n, x0, z0, texel);
+  }
+
+  /** recompute only the texels the live window touches (+1 texel margin),
+   *  cell by cell: live arrays inside the window, the store outside it */
+  midRefreshWindow(out: Uint8Array, n: number, x0: number, z0: number, texel: number) {
+    const wi0 = Math.round(this.ox / MICRO_CELL) - 128 + WOFF; // global index of window cell 0
+    const wj0 = Math.round(this.oz / MICRO_CELL) - 128 + WOFF;
+    const wx0 = this.ox - MICRO_HALF, wz0 = this.oz - MICRO_HALF;
+    const ti0 = Math.max(0, Math.floor((wx0 - x0) / texel) - 1);
+    const ti1 = Math.min(n - 1, Math.floor((wx0 + MICRO_SIZE - x0) / texel) + 1);
+    const tj0 = Math.max(0, Math.floor((wz0 - z0) / texel) - 1);
+    const tj1 = Math.min(n - 1, Math.floor((wz0 + MICRO_SIZE - z0) / texel) + 1);
+    for (let tj = tj0; tj <= tj1; tj++) {
+      const tz0 = z0 + tj * texel;
+      const gj0 = Math.ceil(tz0 / MICRO_CELL - 0.5) + WOFF;
+      const gj1 = Math.ceil((tz0 + texel) / MICRO_CELL - 0.5) - 1 + WOFF;
+      for (let ti = ti0; ti <= ti1; ti++) {
+        const tx0 = x0 + ti * texel;
+        const gi0 = Math.ceil(tx0 / MICRO_CELL - 0.5) + WOFF;
+        const gi1 = Math.ceil((tx0 + texel) / MICRO_CELL - 0.5) - 1 + WOFF;
+        let dMin = 0, dMax = 0, ch = 0, sp = 0;
+        for (let gj = gj0; gj <= gj1; gj++) {
+          const lj = gj - wj0;
+          for (let gi = gi0; gi <= gi1; gi++) {
+            const li = gi - wi0;
+            let d: number, fl: number;
+            if (li >= 0 && li < NC && lj >= 0 && lj < NC) {
+              const v = lj * NC + li;
+              d = this.delta[v]; fl = this.flags[v] & 7;
+            } else {
+              if (gi < 0 || gi >= WCELLS || gj < 0 || gj >= WCELLS) continue;
+              const val = this.worldEdits.get(gi * 16384 + gj);
+              if (val === undefined) continue;
+              d = (Math.floor(val / 8) - 1600) / 1000; fl = val & 7;
+            }
+            if (d < dMin) dMin = d;
+            if (d > dMax) dMax = d;
+            if (fl & 1) ch++;
+            if (fl & 2) sp++;
+          }
+        }
+        const cells = Math.max(1, (gi1 - gi0 + 1) * (gj1 - gj0 + 1));
+        MicroTerrain.midPack(out, tj * n + ti, dMin, dMax, ch, sp, cells);
+      }
+    }
+  }
+
+  /** fade the ring's outer band into the coarse cache (same field the static
+   *  mesh displaces by), so the two surfaces agree where they meet */
+  private midEdgeBlend(out: Uint8Array, n: number, x0: number, z0: number, texel: number) {
+    const R = (n * texel) / 2;
+    const band = Math.min(16, 0.25 * R);
+    const bandT = Math.max(1, Math.ceil(band / texel));
+    const wt = this.worldTexData, wv = this.worldVertTexData;
+    const vmax = WVTEX - 1;
+    const vt = WORLD_SIZE / WVTEX; // 1.5 m
+    for (let tj = 0; tj < n; tj++) {
+      const rowEdge = Math.min(tj, n - 1 - tj);
+      for (let ti = 0; ti < n; ti++) {
+        // rows deeper than the band only have edge columns to blend: jump the interior
+        if (rowEdge >= bandT && ti === bandT) ti = n - bandT;
+        const e = Math.min(ti, tj, n - 1 - ti, n - 1 - tj);
+        if (e >= bandT) continue;
+        const s = e / bandT;
+        const w = s * s * (3 - 2 * s); // weight of the sharp field
+        const x = x0 + (ti + 0.5) * texel, z = z0 + (tj + 0.5) * texel;
+        // coarse R: bilinear over the 1.5 m vertex mirror, in byte space like the GPU
+        const fu = (x + WORLD_SIZE / 2) / vt - 0.5, fv = (z + WORLD_SIZE / 2) / vt - 0.5;
+        const ci = Math.max(0, Math.min(vmax - 1, Math.floor(fu))), cj = Math.max(0, Math.min(vmax - 1, Math.floor(fv)));
+        const u = Math.max(0, Math.min(1, fu - ci)), v = Math.max(0, Math.min(1, fv - cj));
+        const r00 = wv[(cj * WVTEX + ci) * 4], r10 = wv[(cj * WVTEX + ci + 1) * 4];
+        const r01 = wv[((cj + 1) * WVTEX + ci) * 4], r11 = wv[((cj + 1) * WVTEX + ci + 1) * 4];
+        const rc = r00 * (1 - u) * (1 - v) + r10 * u * (1 - v) + r01 * (1 - u) * v + r11 * u * v;
+        // coarse G/B: nearest texel of the full cache
+        const wi = Math.max(0, Math.min(WTEX - 1, Math.floor((x + WORLD_SIZE / 2) / WTEXEL)));
+        const wj = Math.max(0, Math.min(WTEX - 1, Math.floor((z + WORLD_SIZE / 2) / WTEXEL)));
+        const k = (tj * n + ti) * 4, kw = (wj * WTEX + wi) * 4;
+        const dm = MicroTerrain.decD(out[k]), dc = MicroTerrain.decD(rc);
+        out[k] = MicroTerrain.encD(dc + (dm - dc) * w);
+        out[k + 1] = Math.round(wt[kw + 1] + (out[k + 1] - wt[kw + 1]) * w);
+        out[k + 2] = Math.round(wt[kw + 2] + (out[k + 2] - wt[kw + 2]) * w);
+      }
+    }
   }
 
   /** bilinear delta sample from the far-field cache — valid ANYWHERE in the
@@ -1461,7 +1630,14 @@ export class MicroTerrain {
           this.oz - MICRO_HALF + (j + 0.5) * MICRO_CELL));
       }
     }
-    if (this.texDirty) this.uploadTexture();
+    // latch the far-field dirty state: uploadTexture() clears texDirty within
+    // THIS same call, so the one-shot `edited` capture above silently dies
+    // whenever the cadence timer isn't ripe yet (a stroke lands right after a
+    // splat) — the crater you just dug never bakes into the far-field cache
+    // AND never fires onWorldSplat, so neither the coarse mesh nor the mid
+    // ring's window texels refresh. Whatever touched texDirty must reach the
+    // cache on the next ripe update.
+    if (this.texDirty) { this.uploadTexture(); this.worldTexDirty = true; }
     // far-field cache: bounded cadence, only when the window actually
     // changed (walking around a pristine field costs nothing)
     this.worldTexTimer += dt;

@@ -24,6 +24,7 @@ export interface SettingsValues {
   muted: boolean;
   digSpeed: number; // × swing rate
   digSize: number; // × blade footprint
+  editView: number; // m — view-only sharp ring of dug ground (0 / <32 = off)
   timeScale: number; // game-min per real-min
   rainScale: number; // × timeline rain
   windScale: number; // × timeline wind
@@ -36,7 +37,7 @@ export interface SettingsValues {
 
 const SETTINGS_KEY = "stormcountry.settings";
 const SETTINGS_DEFAULTS: SettingsValues = {
-  volume: 80, muted: false, digSpeed: 1, digSize: 1, timeScale: 16,
+  volume: 80, muted: false, digSpeed: 1, digSize: 1, editView: 96, timeScale: 16,
   rainScale: 1, windScale: 1, fov: 58, camDist: 6.2, grass: 100, rainDrops: 100,
   autoQuality: true,
 };
@@ -46,6 +47,7 @@ const SETTING_DEFS: SettingDef[] = [
   { key: "muted", label: "MUTE", section: "AUDIO", kind: "check" },
   { key: "digSpeed", label: "DIG SPEED", section: "DIGGING", kind: "range", min: 0.5, max: 3, step: 0.1, unit: "×" },
   { key: "digSize", label: "SPADE SIZE", section: "DIGGING", kind: "range", min: 0.5, max: 2, step: 0.1, unit: "×" },
+  { key: "editView", label: "EDIT VIEW DISTANCE (0 = OFF)", section: "DIGGING", kind: "range", min: 0, max: 200, step: 8, unit: " m" },
   { key: "timeScale", label: "TIME SPEED", section: "WEATHER & TIME", kind: "range", min: 1, max: 64, step: 1, unit: "×" },
   { key: "rainScale", label: "RAIN INTENSITY", section: "WEATHER & TIME", kind: "range", min: 0, max: 2.5, step: 0.05, unit: "×", decimals: 2 },
   { key: "windScale", label: "WIND", section: "WEATHER & TIME", kind: "range", min: 0.25, max: 2, step: 0.05, unit: "×", decimals: 2 },
@@ -325,6 +327,9 @@ export class Game {
         break;
       case "digSize":
         this.micro.digScale = n;
+        break;
+      case "editView":
+        this.world?.setEditView(n);
         break;
       case "timeScale":
         if (this.weather) this.weather.timescale = Math.max(1, n);

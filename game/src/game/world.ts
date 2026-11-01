@@ -8,6 +8,7 @@ import * as THREE from "three";
 import { GRID, MESH_SEG, WORLD_SIZE, TerrainData, sampleHeight, terrainNormal } from "./terrain";
 import { Ground } from "./ground";
 import { MicroTerrain, MICRO_SIZE, MICRO_HALF, DELTA_ENCODE, WTEXEL } from "./contact";
+import { MidRing } from "./midring";
 import { NOISE_GLSL, MUD_SURFACE_GLSL, MUD_NORMAL_GLSL, MUD_SHEEN_GLSL } from "./shaderlib";
 
 const HALF = WORLD_SIZE / 2;
@@ -66,6 +67,16 @@ export class World {
   private grassCount: number;
   private baseGrassCount: number;
   private micro: MicroTerrain | null;
+  /** view-only sharp copy of dug ground out to the EDIT VIEW DISTANCE setting */
+  mid: MidRing | null = null;
+  /** uniform objects shared by the static mesh and the mid ring */
+  private tUni = {
+    uDigBox: { value: new THREE.Vector4(0, 0, 0, 0) },
+    uMidBox: { value: new THREE.Vector4(0, 0, 0, 0) },
+    uPortal: { value: new THREE.Vector4(0, 0, 0, 0) },
+    uPortalDir: { value: new THREE.Vector2(0, 1) },
+    uPortalPush: { value: 0 },
+  };
   private terrainShader: { uniforms: { [k: string]: { value: unknown } } } | null = null;
   private grassShader: { uniforms: { [k: string]: { value: unknown } } } | null = null;
   private grassX!: Float32Array;
@@ -137,6 +148,7 @@ export class World {
     this.liftTex.magFilter = THREE.LinearFilter;
     this.liftTex.needsUpdate = true;
 
+    this.mid = this.micro ? new MidRing(terrain, this.micro) : null;
     this.buildTerrainMesh();
     this.buildSky();
     this.buildLights();
@@ -180,11 +192,34 @@ export class World {
     geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
     nrm.needsUpdate = true;
 
+    const mat = this.makeTerrainMaterial(false);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.receiveShadow = true;
+    this.terrainMesh = mesh;
+    this.scene.add(mesh);
+    if (this.mid) {
+      this.mid.mesh.material = this.makeTerrainMaterial(true);
+      this.scene.add(this.mid.mesh);
+    }
+  }
+
+  /** terrain material. One shader serves two meshes: the static 1.5 m world
+   *  mesh (isMid = false, edit field = coarse far-field cache) and the mid
+   *  ring (isMid = true, edit field = the ring's sharp texture). They differ
+   *  only in uniforms. */
+  private makeTerrainMaterial(isMid: boolean): THREE.MeshStandardMaterial {
+    // per-mesh edit field: which texture, where it sits, how big a texel is
+    const edit: Record<string, { value: unknown }> = isMid && this.mid ? this.mid.uniforms : {
+      uWorldEditTex: { value: this.micro ? this.micro.worldTex : new THREE.DataTexture(new Uint8Array([128, 0, 0, 0]), 1, 1, THREE.RGBAFormat) },
+      uWorldEditV: { value: this.micro ? this.micro.worldVertTex : new THREE.DataTexture(new Uint8Array([128, 0, 0, 0]), 1, 1, THREE.RGBAFormat) },
+      uEditRect: { value: new THREE.Vector4(0, 0, 1, 1) },
+      uEditTexelUv: { value: WTEXEL / WORLD_SIZE },
+      uEditTexelM: { value: WTEXEL },
+      uIsMid: { value: 0 },
+    };
     const mat = new THREE.MeshStandardMaterial({
       vertexColors: true, roughness: 0.96, metalness: 0.0, dithering: true,
     });
-    // neutral stand-in when no contact tier is wired (tests): flat, no edits
-    const neutralEdit = new THREE.DataTexture(new Uint8Array([128, 0, 0, 0]), 1, 1, THREE.RGBAFormat);
     const u = this.uniforms;
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uGroundTex = { value: this.groundTex };
@@ -192,24 +227,24 @@ export class World {
       // the far-field edit cache: every hole, pile and trail you ever made,
       // visible from anywhere in the world (same field the overlay's rim
       // blends into — one continuous surface across the window edge)
-      shader.uniforms.uWorldEditTex = { value: this.micro ? this.micro.worldTex : neutralEdit };
+      Object.assign(shader.uniforms, edit); // per-mesh edit field (coarse cache or mid ring)
       // vertex-only twin of the far-field cache — the DEDICATED mirror
       // texture (the shared object never binds in the vertex stage; the
       // mirror is refilled in lockstep with every splat)
-      shader.uniforms.uWorldEditV = { value: this.micro ? this.micro.worldVertTex : neutralEdit };
       // the shared shading-normal + fine-lift fields (see constructor)
       shader.uniforms.uTerrainN = { value: this.terrainNormalTex };
       shader.uniforms.uLiftTex = { value: this.liftTex };
-      shader.uniforms.uDigBox = { value: new THREE.Vector4(0, 0, 0, 0) }; // xy centre, z half, w sink
+      shader.uniforms.uDigBox = this.tUni.uDigBox; // xy centre, z half, w sink (shared by both meshes)
+      shader.uniforms.uMidBox = this.mid ? this.mid.boxUniform : this.tUni.uMidBox;
       // tunnel portal cut: vec4(x, z, halfAlong, halfAcross), separate push
-      shader.uniforms.uPortal = { value: new THREE.Vector4(0, 0, 0, 0) };
-      shader.uniforms.uPortalDir = { value: new THREE.Vector2(0, 1) };
-      shader.uniforms.uPortalPush = { value: 0 };
+      shader.uniforms.uPortal = this.tUni.uPortal;
+      shader.uniforms.uPortalDir = this.tUni.uPortalDir;
+      shader.uniforms.uPortalPush = this.tUni.uPortalPush;
       // sheen environment (shared instances — always current)
       shader.uniforms.uSkySheen = u.skySheen;
       shader.uniforms.uSunDirSheen = u.sunDir;
       shader.uniforms.uSunColSheen = u.sheenSun;
-      this.terrainShader = shader;
+      if (!isMid) this.terrainShader = shader;
       shader.vertexShader = shader.vertexShader
         .replace("#include <common>", `#include <common>
 varying vec2 vGroundUv;
@@ -219,6 +254,7 @@ uniform vec4 uPortal;
 uniform vec2 uPortalDir;
 uniform float uPortalPush;
 uniform sampler2D uWorldEditV; // VERTEX-ONLY twin of uWorldEditTex (see note below)
+uniform vec4 uEditRect; // world-uv rect of the edit texture (xy origin, zw size)
 uniform sampler2D uLiftTex;
 // quadratic decode of the far-field edit cache — identical to the contact
 // overlay's worldD(), so both meshes read the exact same height field.
@@ -226,7 +262,7 @@ uniform sampler2D uLiftTex;
 // gets its texture bound for the vertex stage in this three build, and the
 // displacement silently read neutral — ditches rendered as flat tints
 float worldD(in vec2 wuv){
-  float b = texture2D(uWorldEditV, clamp(wuv, 0.0, 1.0)).r;
+  float b = texture2D(uWorldEditV, clamp((wuv - uEditRect.xy) / uEditRect.zw, 0.0, 1.0)).r;
   return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
 }
 // fine-tier lift (erosion / deposition / consolidation), bilinear over the
@@ -262,6 +298,11 @@ float liftAt(in vec2 wuv){
           uniform sampler2D uWorldEditTex;
           uniform sampler2D uTerrainN;
           uniform vec4 uDigBox;
+          uniform vec4 uMidBox;      // static mesh: steps aside under the mid ring
+          uniform vec4 uEditRect;
+          uniform float uEditTexelUv; // edit-texture texel, in world-uv units
+          uniform float uEditTexelM;  // ...and in metres
+          uniform float uIsMid;
           uniform vec3 uSkySheen;
           uniform vec3 uSunDirSheen;
           uniform vec3 uSunColSheen;
@@ -271,7 +312,7 @@ float liftAt(in vec2 wuv){
           // quadratic decode of the far-field edit cache (fragment twin of the
           // vertex function — the normal reconstruction needs it per fragment)
           float worldD(in vec2 wuv){
-            float b = texture2D(uWorldEditTex, clamp(wuv, 0.0, 1.0)).r;
+            float b = texture2D(uWorldEditTex, clamp((wuv - uEditRect.xy) / uEditRect.zw, 0.0, 1.0)).r;
             return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
           }
           ${NOISE_GLSL}
@@ -288,6 +329,9 @@ float liftAt(in vec2 wuv){
           // "square moat" that used to follow the player
           vec2 dwb2 = (vGroundUv - 0.5) * ${WORLD_SIZE.toFixed(1)} - uDigBox.xy;
           if (max(abs(dwb2.x), abs(dwb2.y)) < uDigBox.z - 0.1) discard;
+          // the mid ring owns this ground (same trick, bigger box); the ring's own mesh skips this test
+          vec2 dmb = (vGroundUv - 0.5) * ${WORLD_SIZE.toFixed(1)} - uMidBox.xy;
+          if (uIsMid < 0.5 && max(abs(dmb.x), abs(dmb.y)) < uMidBox.z - 0.15) discard;
           vec4 gcell = texture2D(uGroundTex, vGroundUv);
           float wet = gcell.r; float pond = gcell.g; float mud = gcell.b; float road = gcell.a;
           // wet + mud: the shared surface look (identical to the overlay)
@@ -304,7 +348,7 @@ float liftAt(in vec2 wuv){
           // the far-field edit channels: churned trails + spoil heaps keep
           // their disturbed-earth tint outside the contact window (the SAME
           // tints the overlay uses — the trail doesn't change colour at the rim)
-          vec4 we = texture2D(uWorldEditTex, vGroundUv);
+          vec4 we = texture2D(uWorldEditTex, clamp((vGroundUv - uEditRect.xy) / uEditRect.zw, 0.0, 1.0));
           vec3 churnCol = mix(diffuseColor.rgb * 1.28 + 0.016, diffuseColor.rgb * 0.66, wet);
           // churn/spoil blends (0.85 / 0.75): a dug trail must stay legible
           // from across the valley — MATCH the overlay's rim factors below
@@ -321,9 +365,9 @@ float liftAt(in vec2 wuv){
           // lighting is mesh-density-independent, so the 16 m window edge
           // cannot shade apart from the world around it (the moving square)
           vec3 wN = texture2D(uTerrainN, vGroundUv).xyz * 2.0 - 1.0;
-          float wte = ${(WTEXEL / WORLD_SIZE).toFixed(8)};
-          float wdX = (worldD(vGroundUv + vec2(wte, 0.0)) - worldD(vGroundUv - vec2(wte, 0.0))) / ${(2 * WTEXEL).toFixed(3)};
-          float wdZ = (worldD(vGroundUv + vec2(0.0, wte)) - worldD(vGroundUv - vec2(0.0, wte))) / ${(2 * WTEXEL).toFixed(3)};
+          float wte = uEditTexelUv;
+          float wdX = (worldD(vGroundUv + vec2(wte, 0.0)) - worldD(vGroundUv - vec2(wte, 0.0))) / (2.0 * uEditTexelM);
+          float wdZ = (worldD(vGroundUv + vec2(0.0, wte)) - worldD(vGroundUv - vec2(0.0, wte))) / (2.0 * uEditTexelM);
           wN = normalize(wN + vec3(-wdX, 0.0, -wdZ));
           // micro-relief glisten: mud creep + rain-pocked sheen (same
           // function, same inputs as the contact overlay). The perturbation
@@ -340,10 +384,7 @@ float liftAt(in vec2 wuv){
           mudSheen(totalEmissiveRadiance, wN, vWpos, gcell.r, gcell.b,
                    uSkySheen, uSunDirSheen, uSunColSheen);`);
     };
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.receiveShadow = true;
-    this.terrainMesh = mesh;
-    this.scene.add(mesh);
+    return mat;
   }
 
   // ---------------------------------------------------------------------- sky
@@ -500,6 +541,9 @@ float liftAt(in vec2 wuv){
         uWorldSize: { value: WORLD_SIZE },
         uMicroTex: { value: this.micro ? this.micro.tex : new THREE.DataTexture(new Uint8Array([128, 128, 128, 128]), 1, 1, THREE.RGBAFormat) },
         uWorldEditTex: { value: this.micro ? this.micro.worldTex : new THREE.DataTexture(new Uint8Array([128, 0, 0, 255]), 1, 1, THREE.RGBAFormat) },
+        uMidEditTex: { value: this.mid ? this.mid.texV : new THREE.DataTexture(new Uint8Array([128, 0, 0, 255]), 1, 1, THREE.RGBAFormat) },
+        uMidRect: { value: new THREE.Vector4(0, 0, 1, 1) },
+        uMidOn: { value: 0 },
         uLiftTex: { value: this.liftTex },
         uMicroOrigin: { value: new THREE.Vector2(0, 0) },
         uFogColor: { value: new THREE.Color(0xe6d2ac) },
@@ -511,7 +555,9 @@ float liftAt(in vec2 wuv){
         uniform float uTime, uWind, uWorldSize, uFadeR;
         uniform vec2 uWindDir, uMicroOrigin;
         uniform vec3 uCamPos;
-        uniform sampler2D uGroundTex, uMicroTex, uWorldEditTex, uLiftTex;
+        uniform sampler2D uGroundTex, uMicroTex, uWorldEditTex, uLiftTex, uMidEditTex;
+        uniform vec4 uMidRect;
+        uniform float uMidOn;
         varying vec2 vUv;
         varying float vRand;
         varying float vWet;
@@ -530,7 +576,14 @@ float liftAt(in vec2 wuv){
           float mdlt = sign(mb - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(mb - 0.5) * 2.0, 2.0);
           // ...and with the far-field cache everywhere else — blades ride in
           // ditches you dug on the other side of the world too
-          float wb = texture2D(uWorldEditTex, guv).r;
+          // inside the mid ring, read ITS sharper field (the same one the ground
+          // mesh is drawn from), so blades sit on the ditch they can see
+          vec2 mu = (guv - uMidRect.xy) / max(uMidRect.zw, vec2(1e-6));
+          float inMid = uMidOn * step(0.0, mu.x) * step(mu.x, 1.0) * step(0.0, mu.y) * step(mu.y, 1.0);
+          vec4 weC = texture2D(uWorldEditTex, guv);
+          vec4 weM = texture2D(uMidEditTex, clamp(mu, 0.0, 1.0));
+          vec4 weF = mix(weC, weM, inMid);
+          float wb = weF.r;
           float wdlt = sign(wb - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(wb - 0.5) * 2.0, 2.0);
           vec2 lpos = ipos.xz - uMicroOrigin;
           // the SAME 4.8-7.3 m band the overlay's rim blend uses — grass
@@ -543,7 +596,7 @@ float liftAt(in vec2 wuv){
           // on churned texels shrink and desaturate toward trampled straw
           // (the far-field twin of crushGrass — footpaths stay visible from
           // across the valley)
-          vTrample = clamp(texture2D(uWorldEditTex, guv).g * 1.7, 0.0, 1.0);
+          vTrample = clamp(weF.g * 1.7, 0.0, 1.0);
           // wind sway grows with height above blade base
           float ph = uTime * (1.1 + aRand * 0.7) + ipos.x * 0.13 + ipos.z * 0.11;
           float sway = (sin(ph) + 0.5 * sin(ph * 2.3 + aRand * 6.0)) * 0.5;
@@ -689,6 +742,22 @@ float liftAt(in vec2 wuv){
     }
     const gm = this.grass.material as THREE.ShaderMaterial;
     (gm.uniforms.uMicroOrigin.value as THREE.Vector2).set(micro.ox, micro.oz);
+    // mid ring: recentre if needed, then point every reader at it (or back
+    // at the coarse cache when it is off) in the same frame
+    const mid = this.mid;
+    if (mid) {
+      mid.update(micro.ox, micro.oz);
+      const on = mid.active;
+      micro.useWorldField(on ? mid.texF : null, on ? mid.texV : null, on ? mid.rect : null, mid.texel);
+      (gm.uniforms.uMidRect.value as THREE.Vector4).copy(mid.rect);
+      gm.uniforms.uMidOn.value = on ? 1 : 0;
+      gm.uniforms.uMidEditTex.value = mid.texV;
+    }
+  }
+
+  /** EDIT VIEW DISTANCE setting: radius in metres of the sharp ring (0 = off) */
+  setEditView(metres: number) {
+    this.mid?.setRadius(metres);
   }
 
   /** tunnel portal cut: push the static terrain down inside the adit box */
