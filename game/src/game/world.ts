@@ -33,6 +33,9 @@ export interface WorldUniforms {
   skySheen: { value: THREE.Color };
   /** sun colour for the mud glint (dimmed floor — a glint survives haze) */
   sheenSun: { value: THREE.Color };
+  /** EDIT VISIBILITY slider (settings): scales far-field dish depth, churn/
+   *  spoil tints and grass trample — engine.applySetting writes it live */
+  editVis: { value: number };
 }
 
 export class World {
@@ -92,6 +95,12 @@ export class World {
       cloudiness: { value: 0.1 },
       skySheen: { value: new THREE.Color(0x8fa3b5) },
       sheenSun: { value: new THREE.Color(0xffd9a8) },
+      // EDIT VISIBILITY (settings slider): scales how loud the far-field
+      // edit cache renders — dish depth on the static mesh + grass, churn/
+      // spoil tints, trample. ONE shared instance: the terrain material, the
+      // grass material and (via micro.editVisUniform) the overlay's rim all
+      // read the same value, so nothing can shade apart when it moves
+      editVis: { value: 1 },
     };
 
     // ---- ground data texture (R wetness, G pond, B mud, A road) ----------
@@ -209,6 +218,8 @@ export class World {
       shader.uniforms.uSkySheen = u.skySheen;
       shader.uniforms.uSunDirSheen = u.sunDir;
       shader.uniforms.uSunColSheen = u.sheenSun;
+      // EDIT VISIBILITY slider — shared instance (see uniforms.editVis)
+      shader.uniforms.uEditVis = u.editVis;
       this.terrainShader = shader;
       shader.vertexShader = shader.vertexShader
         .replace("#include <common>", `#include <common>
@@ -220,6 +231,7 @@ uniform vec2 uPortalDir;
 uniform float uPortalPush;
 uniform sampler2D uWorldEditV; // VERTEX-ONLY twin of uWorldEditTex (see note below)
 uniform sampler2D uLiftTex;
+uniform float uEditVis; // EDIT VISIBILITY slider: exaggerates the world-visible dish
 // quadratic decode of the far-field edit cache — identical to the contact
 // overlay's worldD(), so both meshes read the exact same height field.
 // Samples the VERTEX-ONLY sampler: a uniform shared by both stages never
@@ -243,8 +255,10 @@ float liftAt(in vec2 wuv){
         .replace("#include <begin_vertex>",
           `#include <begin_vertex>
            // world-visible edits: the blurred micro field displaces the whole
-           // world mesh — dig a ditch, walk 100 m away, look back: it's there
-           float wdel = worldD(vGroundUv);
+           // world mesh — dig a ditch, walk 100 m away, look back: it's there.
+           // uEditVis (settings slider) exaggerates the dish so a spade crater
+           // stays legible from across the valley at low slider cost
+           float wdel = worldD(vGroundUv) * uEditVis;
            // ...and the fine tier's evolving topography rides everywhere too
            float wlift = liftAt(vGroundUv);
            transformed.y += wdel + wlift;
@@ -265,6 +279,7 @@ float liftAt(in vec2 wuv){
           uniform vec3 uSkySheen;
           uniform vec3 uSunDirSheen;
           uniform vec3 uSunColSheen;
+          uniform float uEditVis; // EDIT VISIBILITY slider (scales tints + normal tilt)
           varying vec2 vGroundUv;
           varying vec3 vWpos;
           vec3 lerp3(vec3 a, vec3 b, float t){ return a + (b-a)*t; }
@@ -305,14 +320,23 @@ float liftAt(in vec2 wuv){
           // their disturbed-earth tint outside the contact window (the SAME
           // tints the overlay uses — the trail doesn't change colour at the rim)
           vec4 we = texture2D(uWorldEditTex, vGroundUv);
-          vec3 churnCol = mix(diffuseColor.rgb * 1.28 + 0.016, diffuseColor.rgb * 0.66, wet);
-          // churn/spoil blends (0.85 / 0.75): a dug trail must stay legible
-          // from across the valley — MATCH the overlay's rim factors below
-          // or the trail changes tint crossing the window edge
-          diffuseColor.rgb = lerp3(diffuseColor.rgb, churnCol, we.g * 0.85);
-          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.32, 0.25, 0.18) * mix(1.0, 0.55, wet), we.b * 0.75);
-          surfRough = mix(surfRough, 0.97, we.g * (1.0 - wet) * 0.7);
-          surfRough = mix(surfRough, 0.98, we.b * 0.8);`)
+          // bare-earth BROWN, not a pale wash: dry churn used to read as a
+          // 1.28×-brightened tint that vanished against dry golden grass
+          // (the "can't see my edits past ~6 m" report). A fixed brown with
+          // a whisper of the terrain colour reads as disturbed soil on dry
+          // uplands AND green lows; wet churn still darkens toward mud
+          vec3 churnCol = mix(vec3(0.37, 0.29, 0.21) + diffuseColor.rgb * 0.12, diffuseColor.rgb * 0.52, wet);
+          // churn/spoil blends (0.85 / 0.75) with the EDIT VISIBILITY slider
+          // scaling the channels first (clamped to full coverage): a dug
+          // trail must stay legible from across the valley — MATCH the
+          // overlay's rim factors below or the trail changes tint crossing
+          // the window edge
+          float churnE = min(we.g * uEditVis, 1.0);
+          float spoilE = min(we.b * uEditVis, 1.0);
+          diffuseColor.rgb = lerp3(diffuseColor.rgb, churnCol, churnE * 0.85);
+          diffuseColor.rgb = lerp3(diffuseColor.rgb, vec3(0.32, 0.25, 0.18) * mix(1.0, 0.55, wet), spoilE * 0.75);
+          surfRough = mix(surfRough, 0.97, churnE * (1.0 - wet) * 0.7);
+          surfRough = mix(surfRough, 0.98, spoilE * 0.8);`)
         .replace("#include <roughnessmap_fragment>", `#include <roughnessmap_fragment>
           roughnessFactor = surfRough;`)
         .replace("#include <normal_fragment_begin>", `#include <normal_fragment_begin>
@@ -322,8 +346,8 @@ float liftAt(in vec2 wuv){
           // cannot shade apart from the world around it (the moving square)
           vec3 wN = texture2D(uTerrainN, vGroundUv).xyz * 2.0 - 1.0;
           float wte = ${(WTEXEL / WORLD_SIZE).toFixed(8)};
-          float wdX = (worldD(vGroundUv + vec2(wte, 0.0)) - worldD(vGroundUv - vec2(wte, 0.0))) / ${(2 * WTEXEL).toFixed(3)};
-          float wdZ = (worldD(vGroundUv + vec2(0.0, wte)) - worldD(vGroundUv - vec2(0.0, wte))) / ${(2 * WTEXEL).toFixed(3)};
+          float wdX = (worldD(vGroundUv + vec2(wte, 0.0)) - worldD(vGroundUv - vec2(wte, 0.0))) * uEditVis / ${(2 * WTEXEL).toFixed(3)};
+          float wdZ = (worldD(vGroundUv + vec2(0.0, wte)) - worldD(vGroundUv - vec2(0.0, wte))) * uEditVis / ${(2 * WTEXEL).toFixed(3)};
           wN = normalize(wN + vec3(-wdX, 0.0, -wdZ));
           // micro-relief glisten: mud creep + rain-pocked sheen (same
           // function, same inputs as the contact overlay). The perturbation
@@ -505,10 +529,11 @@ float liftAt(in vec2 wuv){
         uFogColor: { value: new THREE.Color(0xe6d2ac) },
         uFogDensity: { value: 0.0026 },
         uFadeR: { value: 118.0 },
+        uEditVis: this.uniforms.editVis, // slider: blades sink + trample with the exaggerated dish
       },
       vertexShader: `
         attribute float aRand;
-        uniform float uTime, uWind, uWorldSize, uFadeR;
+        uniform float uTime, uWind, uWorldSize, uFadeR, uEditVis;
         uniform vec2 uWindDir, uMicroOrigin;
         uniform vec3 uCamPos;
         uniform sampler2D uGroundTex, uMicroTex, uWorldEditTex, uLiftTex;
@@ -529,9 +554,11 @@ float liftAt(in vec2 wuv){
           float mb = texture2D(uMicroTex, clamp(muv, 0.0, 1.0)).r;
           float mdlt = sign(mb - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(mb - 0.5) * 2.0, 2.0);
           // ...and with the far-field cache everywhere else — blades ride in
-          // ditches you dug on the other side of the world too
+          // ditches you dug on the other side of the world too. uEditVis keeps
+          // grass riding the SAME exaggerated dish the static mesh renders
+          // (an unscaled blade field would hover over a cranked-up dish)
           float wb = texture2D(uWorldEditTex, guv).r;
-          float wdlt = sign(wb - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(wb - 0.5) * 2.0, 2.0);
+          float wdlt = sign(wb - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(wb - 0.5) * 2.0, 2.0) * uEditVis;
           vec2 lpos = ipos.xz - uMicroOrigin;
           // the SAME 4.8-7.3 m band the overlay's rim blend uses — grass
           // sinks into the micro field and hands off to the world cache
@@ -543,7 +570,7 @@ float liftAt(in vec2 wuv){
           // on churned texels shrink and desaturate toward trampled straw
           // (the far-field twin of crushGrass — footpaths stay visible from
           // across the valley)
-          vTrample = clamp(texture2D(uWorldEditTex, guv).g * 1.7, 0.0, 1.0);
+          vTrample = clamp(texture2D(uWorldEditTex, guv).g * 1.7 * uEditVis, 0.0, 1.0);
           // wind sway grows with height above blade base
           float ph = uTime * (1.1 + aRand * 0.7) + ipos.x * 0.13 + ipos.z * 0.11;
           float sway = (sin(ph) + 0.5 * sin(ph * 2.3 + aRand * 6.0)) * 0.5;
@@ -551,9 +578,13 @@ float liftAt(in vec2 wuv){
           vec4 wp = instanceMatrix * vec4(position, 1.0);
           float bend = pow(uv.y, 1.6) * (0.06 + 0.30 * uWind) * sway;
           wp.x += uWindDir.x * bend; wp.z += uWindDir.y * bend;
-          // rain flattens grass; trample shrinks it further
-          float flatF = 1.0 - vWet * 0.30 - vTrample * 0.35;
-          flatF = max(flatF, 0.3);
+          // rain flattens grass; trampled churn nearly clears it — a dug
+          // trail must read THROUGH the carpet (dense blades at 35% shrink
+          // were hiding every edit past the contact window: "can't see my
+          // digs past ~6 m"). With uEditVis in vTrample, the EDIT VISIBILITY
+          // slider now opens the carpet too
+          float flatF = 1.0 - vWet * 0.30 - vTrample * 0.85;
+          flatF = max(flatF, 0.12);
           wp.y = ipos.y + (wp.y - ipos.y) * flatF;
           wp.y += min(sinkD + 0.03, 0.0);
           // blades ride the fine tier's evolving topography too (erosion /

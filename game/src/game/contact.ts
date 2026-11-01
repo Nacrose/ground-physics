@@ -148,6 +148,11 @@ export class MicroTerrain {
   private sheenSky = new THREE.Color(0x8fa3b5);
   private sheenSun = new THREE.Color(0xffd9a8);
   private sheenSunDir = new THREE.Vector3(0.55, 0.35, -0.75);
+  /** EDIT VISIBILITY slider's shared uniform — engine.applySetting writes it;
+   *  the overlay's worldD twins + rim churn/spoil sources read it, scaled the
+   *  SAME way world.ts scales the static mesh, so the rim cannot shade apart
+   *  from the world when the slider moves */
+  readonly editVisUniform = { value: 1 };
   /** far-field cache of every ground edit, world-anchored (never scrolls):
    *  the static terrain mesh + grass sample it, so a ditch you dug stays
    *  visible from anywhere, and the overlay's rim blends into it. */
@@ -343,6 +348,9 @@ export class MicroTerrain {
       shader.uniforms.uSkySheen = { value: this.sheenSky };
       shader.uniforms.uSunDirSheen = { value: this.sheenSunDir };
       shader.uniforms.uSunColSheen = { value: this.sheenSun };
+      // EDIT VISIBILITY slider — shared instance (engine.applySetting writes
+      // it live; scales the rim's world-cache reads to match the static mesh)
+      shader.uniforms.uEditVis = this.editVisUniform;
       shader.vertexShader = shader.vertexShader
         .replace("#include <common>", `#include <common>
           attribute float aBaseH;
@@ -360,6 +368,7 @@ export class MicroTerrain {
           uniform vec4 uPortal;
           uniform vec2 uPortalDir;
           uniform float uPortalPush;
+          uniform float uEditVis; // EDIT VISIBILITY slider (worldD twins scale with it)
           varying vec2 vGroundUv;
           varying vec2 vLpos;
           varying vec3 vWpos;
@@ -371,10 +380,12 @@ export class MicroTerrain {
             float b = texture2D(uMicroV, clamp(u, 0.0, 1.0)).r;
             return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
           }
-          // the far-field edit cache — same quadratic encode, world-anchored
+          // the far-field edit cache — same quadratic encode, world-anchored.
+          // uEditVis (settings slider) scales it so the rim's blend matches
+          // the static mesh's exaggerated dish — no step at the window edge
           float worldD(in vec2 wuv){
             float b = texture2D(uWorldV, clamp(wuv, 0.0, 1.0)).r;
-            return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
+            return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0) * uEditVis;
           }
           // rim factor: 1 in the window interior, 0 past RIM_OUT
           float rimE(in vec2 lp){
@@ -418,6 +429,7 @@ export class MicroTerrain {
           uniform sampler2D uMicroTex;
           uniform sampler2D uWorldTex;
           uniform float uMicroEdge;
+          uniform float uEditVis; // EDIT VISIBILITY slider (rim tints + worldD twin)
           uniform vec3 uSkySheen;
           uniform vec3 uSunDirSheen;
           uniform vec3 uSunColSheen;
@@ -437,7 +449,7 @@ export class MicroTerrain {
           }
           float worldD(in vec2 wuv){
             float b = texture2D(uWorldTex, clamp(wuv, 0.0, 1.0)).r;
-            return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0);
+            return sign(b - 0.5) * ${DELTA_ENCODE.toFixed(1)} * pow(abs(b - 0.5) * 2.0, 2.0) * uEditVis;
           }
           float rimE(in vec2 lp){
             return 1.0 - smoothstep(uMicroEdge, uMicroEdge + ${(RIM_OUT - RIM_IN).toFixed(2)}, max(abs(lp.x), abs(lp.y)));
@@ -470,10 +482,15 @@ export class MicroTerrain {
           // wears outside it — the rim cannot shade apart from the world
           vec4 weRim = texture2D(uWorldTex, vGroundUv);
           float rimF = rimE(vLpos);
-          float churnE = mix(weRim.g, vChurn, rimF);
-          float spoilE = mix(weRim.b, vSpoil, rimF);
+          // EDIT VISIBILITY slider scales the coverage BEFORE the rim blend:
+          // the world source AND the crisp interior channel both get louder
+          // together, so the trail keeps one tint crossing the window edge
+          float churnE = min(mix(weRim.g, vChurn, rimF) * uEditVis, 1.0);
+          float spoilE = min(mix(weRim.b, vSpoil, rimF) * uEditVis, 1.0);
           float ringE = vRing * rimF; // the suction ring is micro-only: fades with the rim
-          vec3 churnCol = mix(diffuseColor.rgb * 1.28 + 0.016, diffuseColor.rgb * 0.66, wet);
+          // bare-earth BROWN (matches the static mesh's churnCol exactly —
+          // see world.ts: the old 1.28× pale wash vanished on dry grass)
+          vec3 churnCol = mix(vec3(0.37, 0.29, 0.21) + diffuseColor.rgb * 0.12, diffuseColor.rgb * 0.52, wet);
           // the SAME blend factors the static mesh uses (0.85 / 0.75) — a
           // trail crossing the window edge keeps exactly the tint it wears
           // outside it; the rim cannot shade apart from the world
@@ -1461,7 +1478,14 @@ export class MicroTerrain {
           this.oz - MICRO_HALF + (j + 0.5) * MICRO_CELL));
       }
     }
-    if (this.texDirty) this.uploadTexture();
+    // latch the far-field dirty state: uploadTexture() clears texDirty within
+    // THIS SAME call, so the one-shot `edited` capture silently dies whenever
+    // the cadence timer isn't ripe yet (stroke lands right after a splat) —
+    // the crater you just dug never bakes into the world cache and vanishes
+    // the moment it leaves the window (the "can't see my edits past ~6 m"
+    // report). Whatever touched texDirty — stroke, relaxation, rain — must
+    // reach the far-field cache on the next ripe update.
+    if (this.texDirty) { this.uploadTexture(); this.worldTexDirty = true; }
     // far-field cache: bounded cadence, only when the window actually
     // changed (walking around a pristine field costs nothing)
     this.worldTexTimer += dt;

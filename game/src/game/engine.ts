@@ -24,6 +24,7 @@ export interface SettingsValues {
   muted: boolean;
   digSpeed: number; // × swing rate
   digSize: number; // × blade footprint
+  editVis: number; // × far-field edit visibility (dish depth + churn/spoil tints)
   timeScale: number; // game-min per real-min
   rainScale: number; // × timeline rain
   windScale: number; // × timeline wind
@@ -36,7 +37,7 @@ export interface SettingsValues {
 
 const SETTINGS_KEY = "stormcountry.settings";
 const SETTINGS_DEFAULTS: SettingsValues = {
-  volume: 80, muted: false, digSpeed: 1, digSize: 1, timeScale: 16,
+  volume: 80, muted: false, digSpeed: 1, digSize: 1, editVis: 2.5, timeScale: 16,
   rainScale: 1, windScale: 1, fov: 58, camDist: 6.2, grass: 100, rainDrops: 100,
   autoQuality: true,
 };
@@ -46,6 +47,7 @@ const SETTING_DEFS: SettingDef[] = [
   { key: "muted", label: "MUTE", section: "AUDIO", kind: "check" },
   { key: "digSpeed", label: "DIG SPEED", section: "DIGGING", kind: "range", min: 0.5, max: 3, step: 0.1, unit: "×" },
   { key: "digSize", label: "SPADE SIZE", section: "DIGGING", kind: "range", min: 0.5, max: 2, step: 0.1, unit: "×" },
+  { key: "editVis", label: "EDIT VISIBILITY", section: "DIGGING", kind: "range", min: 0.5, max: 4, step: 0.25, unit: "×", decimals: 2 },
   { key: "timeScale", label: "TIME SPEED", section: "WEATHER & TIME", kind: "range", min: 1, max: 64, step: 1, unit: "×" },
   { key: "rainScale", label: "RAIN INTENSITY", section: "WEATHER & TIME", kind: "range", min: 0, max: 2.5, step: 0.05, unit: "×", decimals: 2 },
   { key: "windScale", label: "WIND", section: "WEATHER & TIME", kind: "range", min: 0.25, max: 2, step: 0.05, unit: "×", decimals: 2 },
@@ -326,6 +328,16 @@ export class Game {
       case "digSize":
         this.micro.digScale = n;
         break;
+      case "editVis": {
+        // one slider, every surface: the static mesh's dish + tints, the
+        // grass's sink + trample, and the overlay's rim all read the SAME
+        // shared uniform instances — cranking it makes every hole, spoil
+        // heap and trail you ever shaped read from across the valley
+        const v = Math.max(0.25, Math.min(6, n));
+        this.world.uniforms.editVis.value = v;
+        this.micro.editVisUniform.value = v;
+        break;
+      }
       case "timeScale":
         if (this.weather) this.weather.timescale = Math.max(1, n);
         break;
@@ -630,9 +642,13 @@ export class Game {
     }
 
     const res = this.micro.digStroke(aimX, aimZ, dirX, dirZ);
-    // grass dies where the crater and the spoil land
-    this.world.crushGrass(aimX, aimZ, 0.32, "dig");
-    this.world.crushGrass(res.spoil.x, res.spoil.z, 0.4, "dig");
+    // grass dies where the crater AND its visible footprint land — the
+    // far-field trail dilates to ~2-3 m, so a 0.32 m crush left a green
+    // carpet over the dig that hid it past the contact window ("can't see
+    // my edits past ~6 m"); crush the full worked footprint instead
+    const ds = Math.max(0.5, Math.min(2, this.micro.digScale));
+    this.world.crushGrass(aimX, aimZ, 0.85 * ds, "dig");
+    this.world.crushGrass(res.spoil.x, res.spoil.z, 0.95 * ds, "dig");
     // the four resistances, audible
     this.fx.playDigHit(res.hard ? "hard" : res.suction ? "suck" : "cut");
     // spoil landing: soft thud + dust if dry
