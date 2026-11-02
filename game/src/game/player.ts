@@ -13,6 +13,7 @@ import type { Tunnel } from "./tunnel";
 import { Skeleton } from "./skeleton";
 import { buildSkin, buildSpade, buildLantern, Skin } from "./skin";
 import { Animator } from "./animator";
+import { SteampunkFleet } from "./steampunk";
 
 export interface InputState {
   forward: number; // -1..1
@@ -52,6 +53,8 @@ export class Player {
   skeleton: Skeleton;
   /** procedural animator driving every action with subtle variation */
   animator: Animator;
+  /** steampunk bike/drone/bot fleet */
+  steampunk: SteampunkFleet | null = null;
 
   camera: THREE.PerspectiveCamera;
   private camPitch = 0.18;
@@ -95,6 +98,15 @@ export class Player {
     this.animator = new Animator(this.skeleton);
     this.group.add(this.skeleton.group);
     scene.add(this.group);
+
+    // ---- steampunk fleet ---------------------------------------------------
+    this.steampunk = new SteampunkFleet(
+      scene,
+      (x, z) => this.groundHeightAt(x, z),
+      this.pos.clone().add(new THREE.Vector3(1.4, 0, 1.6)),
+      this.fx,
+      this.trample
+    );
 
     // ---- camera -------------------------------------------------------------
     this.camera = new THREE.PerspectiveCamera(58, 1, 0.1, 2600);
@@ -313,6 +325,28 @@ export class Player {
     a.rightFootTerrainY = this.groundHeightAt(rFootPos.x, rFootPos.z) - this.pos.y;
 
     a.update(dt);
+
+    if (this.steampunk) {
+      this.steampunk.update(
+        dt,
+        elapsed,
+        this.pos,
+        this.yaw,
+        input,
+        this.speed,
+        this.onGround
+      );
+
+      if (this.steampunk.mounted) {
+        const bike = this.steampunk.bike;
+        this.pos.copy(bike.riderPos);
+        this.yaw = bike.yaw;
+        this.speed = bike.speed;
+        this.jumpVel = 0;
+        this.onGround = true;
+        this.sinkage = 0;
+      }
+    }
 
     this.group.position.set(this.pos.x, this.pos.y, this.pos.z);
     this.group.rotation.y = this.yaw;
