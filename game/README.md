@@ -1,12 +1,26 @@
 # Stormcountry — the playable 3D layer
 
 A third-person, RDR2-flavoured weather sandbox built on the **same physics as the
-Python `rwengine`** in this repository. You run around a 768 m synthetic
-catchment while a real storm passes over you: rain hammers down with a
-Marshall-Palmer drop spectrum, the ground infiltrates it with Green-Ampt,
-puddles pond in the lows, the dirt road liquefies — and the wagon parked on it
-sinks to its axles. Your own boots feel it too: wet clay slows you, liquid mud
-swallows you half a metre and you leave ruts behind.
+Python `rwengine`** in this repository. You run around a 768 m biome world
+while a real storm passes over you: rain hammers down with a Marshall-Palmer
+drop spectrum, the ground infiltrates it with Green-Ampt, puddles pond in the
+lows, the dirt road liquefies — and the wagon parked on it sinks to its axles.
+Your own boots feel it too: wet clay slows you, liquid mud swallows you half a
+metre and you leave ruts behind.
+
+The world itself is a biome map: a ridged **mountain massif** with **ice
+caps** in the NW falls into foothills and a central valley; the prevailing SW
+wind wets its flank (a **rainforest** belt below the crags) and leaves the
+east basin in the lee — a **desert** of longitudinal dunes and saguaro cacti.
+A **river** is born at a tarn high on the massif (the water source: a spring
+that never stops), cuts a gorge down the flank, meanders across the valley
+past the **swamp** lowlands and exits the south map edge. Between them:
+**grassland**, dry **hills**, **forest** and **rocky** scree — each with its
+own soil (the swamp's muck is the deepest mud in the world; the desert's dune
+sand never really muds at all), and the dirt road still fords the river where
+it crosses. The storm makes every one of them differently wet — and the
+minimap, the soil inspector (now with a BIOME row) and the mud itself all
+know where you are.
 
 ![golden hour](docs/screenshot-golden-hour.jpg)
 *Clear Sky preset — golden hour over the valley road.*
@@ -92,13 +106,17 @@ src/
   components/          GameCanvas.tsx — mounts the engine into the DOM
   game/
     engine.ts          orchestrator: fixed-step loop, presets, quality, QA hook
-    terrain.ts         same Gaussian catchment recipe as rwengine state.py
+    terrain.ts         biome world: ridged massif + river + climate → 10 biomes,
+                       5 soils (incl. dune sand & swamp muck), per-cell pond caps
+    biomeTint.ts       the ONE vertex-tint formula shared by all three ground
+                       meshes (world / contact window / edit ring)
     params.ts          soil texture tables + presets (ported from config.py)
     ground.ts          Green-Ampt, routing, full geotech chain (the physics)
     contact.ts         16 m micro-terrain: boot prints, ruts, spade work, spoil
                        relaxation — volume-conserving soil deformation
     weather.ts         timeline playback + lightning scheduling
-    world.ts           terrain mesh, sky, clouds, grass, trees, rocks, wagon
+    world.ts           terrain mesh, sky, clouds, biome grass / trees (broadleaf,
+                       conifer, cactus), rocks, wagon
     fx.ts              rain streaks, splashes, puddles, procedural audio
     player.ts          third-person rider, mud mechanics, boot-mud pickup/shed, camera
     hud.ts             minimap, weather panel, inspector, cinematic overlays
