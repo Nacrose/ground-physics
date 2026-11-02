@@ -14,13 +14,21 @@ wind wets its flank (a **rainforest** belt below the crags) and leaves the
 east basin in the lee — a **desert** of longitudinal dunes and saguaro cacti.
 A **river** is born at a tarn high on the massif (the water source: a spring
 that never stops — 2 m³/s, enough to sustain the channel's running depth
-forever), cuts a **gravel-bedded gorge** down the flank, meanders across the
-valley past the **swamp** lowlands and exits the south map edge. The water
-itself **visibly travels**: a slope-fed flow field drives wave crests, streaks
-and rapids foam DOWNSTREAM (the gorge rages white, the lowland glides, the
-tarn sits still), and the bed **fines downstream** like a real river — gravel
-bars in the gorge paling into sandy alluvium on the lowland bed, visible
-through the clear running water.
+forever), cuts a **rocky gorge** down the flank, meanders across the
+valley past the **swamp** lowlands and exits the south map edge. The river
+is a true **3-D water body** (the Timberborn read): a ribbon mesh whose
+surface rides the water table down the channel — near-flat across, gently
+sloped along, never draped over the bed bumps — with real travelling waves
+in the vertex stage. A slope-fed flow field drives wave crests, streaks and
+rapids foam DOWNSTREAM (the gorge rages white, the lowland glides, the tarn
+sits still), and the surface calms to wind ripple at your boots so the
+close-up never reads as brushed metal. The bed **fines along the channel**
+like a real river — bedrock shoals and gravel bars in the upper reach
+fading into sandy alluvium on the lowland bed, visible through the clear
+running water. Ponds and the tarn sit at a **smoothed water table** (a
+flat-ish lake that found its level), thin rain films stay translucent wet
+ground, and the sun keeps ONE capped warm streak on the crests — no white
+specular blowouts following the player.
 Between them: **grassland**, dry **hills**, **forest** and **rocky** scree —
 and the ground itself is six materials now: the swamp's muck is the deepest
 mud in the world, the desert's dune sand never really muds, the gorge's

@@ -13,9 +13,16 @@ import { GRID, WORLD_SIZE, TerrainData, sampleHeight, cellIndex } from "./terrai
 import { Ground } from "./ground";
 import { dropFallSpeed, medianDropMm } from "./params";
 import { MicroTerrain, MICRO_HALF } from "./contact";
-import { WATER_SURFACE_GLSL } from "./shaderlib";
+import { WATER_SURFACE_GLSL, WATER_WAVE_GLSL } from "./shaderlib";
 
 const HALF = WORLD_SIZE / 2;
+/** scratch buffers for the puddle water-table pass (see rebuildPuddles) —
+ *  module-level so a per-tick rebuild allocates nothing */
+const PUD_WET = new Float32Array(GRID * GRID);
+const PUD_SURF = new Float32Array(GRID * GRID);
+const PUD_SURFB = new Float32Array(GRID * GRID);
+const COR_TABLE = new Float32Array((GRID + 1) * (GRID + 1));
+const COR_GROUND = new Float32Array((GRID + 1) * (GRID + 1));
 
 export type StepKind = "dry" | "moist" | "wet" | "mud";
 
@@ -29,6 +36,9 @@ export class StormFX {
   splash: THREE.InstancedMesh;
   dust: THREE.InstancedMesh;
   puddleMesh: THREE.Mesh;
+  /** the river as a true 3-D water volume — a ribbon mesh whose surface
+   *  rides the water table down the channel (see buildRiver) */
+  riverMesh: THREE.Mesh;
   /** the river's flow field as a world texture (RG = dir·speed, B = vigour)
    *  — ONE texture shared by this sheet and the contact film sheet so the
    *  current reads identically across the window edge */
@@ -90,6 +100,7 @@ export class StormFX {
     this.buildDust();
     this.buildMudDrops();
     this.buildPuddles();
+    this.buildRiver();
     // the contact-tier film sheet rides the SAME flow field (set once — the
     // river doesn't move, it just travels along itself)
     if (this.micro) this.micro.setFlowTexture(this.flowTex);
@@ -386,7 +397,17 @@ export class StormFX {
           vec3 col;
           float alpha;
           waterLook(vWorld, vDepth, col, alpha);
-          alpha *= vWin;
+          // window handoff, depth-aware: shallow films hand to the contact
+          // sheet inside the window as before, but DEEP water (tarn, ponds,
+          // drowned digs) keeps THIS sheet everywhere — it owns the volume,
+          // and the film sheet fades out over the SAME 0.22..0.30 m band so
+          // the two weights sum to one
+          float deepF = smoothstep(0.22, 0.30, vDepth);
+          alpha *= mix(vWin, 1.0, deepF);
+          // wide shoreline feather: this sheet's waterline walks a 4 m
+          // lattice, so the veil must open over a deep-ish ramp or the
+          // polygonal cell edge shows as a hard shard line on the bank
+          alpha *= smoothstep(0.002, 0.10, vDepth);
           if (alpha < 0.004) discard;
           float fogF = 1.0 - exp(-uFogDensity * uFogDensity * dot(uCamPos - vWorld, uCamPos - vWorld));
           col = mix(col, uFogColor, clamp(fogF, 0.0, 1.0));
@@ -403,70 +424,113 @@ export class StormFX {
   }
 
   /** rebuild puddle quads from the ponding field (every physics tick).
-   *  The sheet DRAPES the ground: every quad corner sits at that corner's own
-   *  ground height + its corner-interpolated water depth, so adjacent quads
-   * share corner heights — a continuous sloping film instead of flat square
-   * plates hovering at one cell-centre height (the "voxel water" look). */
+   *  The sheet now sits at the SMOOTHED WATER TABLE: cell surfaces (ground +
+   *  depth) are blurred horizontally, wet-weighted, before emission — so a
+   *  pond or the tarn reads as a flat-ish body of water that found its level,
+   *  not a film draped over every bed bump (the drape read the tarn and every
+   *  wheel-rut puddle as a shiny groove in the ground). River cells are
+   *  excluded from the sheet entirely: the 3-D ribbon owns the channel, so
+   *  the two never double-layer. */
   rebuildPuddles() {
     const hPond = this.ground.hPond;
     const ruts = this.ground.rut;
     const cell = WORLD_SIZE / GRID;
+    const N = GRID * GRID;
     const verts: number[] = [];
     const depths: number[] = [];
-    // water depth at a grid CORNER = mean over the (up to four) cells meeting
-    // there — shared corner values interpolate smoothly across cell edges,
-    // which is what feathers the waterline in the shader
-    const cornerDepth = (i: number, j: number): number => {
-      let s = 0, c = 0;
-      for (let dj = -1; dj <= 0; dj++) {
-        for (let di = -1; di <= 0; di++) {
-          const ii = i + di, jj = j + dj;
-          if (ii < 0 || ii >= GRID || jj < 0 || jj >= GRID) continue;
-          const k = jj * GRID + ii;
-          s += hPond[k] + ruts[k] * 0.35;
-          c++;
+    // ---- pass 1: the water table — surface elevation per wet cell.
+    // River-channel cells (riverMask > 0.15) stay out entirely: the 3-D
+    // ribbon owns the channel, and their bed-following surfaces would both
+    // double-layer under it and print phantom water up the banks
+    const wet = PUD_WET, surf = PUD_SURF, surfB = PUD_SURFB;
+    const riverMask = this.terrain.river;
+    for (let k = 0; k < N; k++) {
+      const depth = hPond[k] + ruts[k] * 0.35;
+      const j = Math.floor(k / GRID), i = k - j * GRID;
+      const cx = (i + 0.5) * cell, cz = (j + 0.5) * cell;
+      surf[k] = sampleHeight(this.terrain, cx, cz)
+        + this.ground.dynLiftBilerp(cx - HALF, cz - HALF) + depth;
+      wet[k] = depth >= 0.0009 && riverMask[k] <= 0.15 ? Math.min(depth / 0.05, 1) : 0;
+    }
+    // ---- pass 2: four wet-weighted 3×3 blur passes (effective ~5 m) —
+    // flattens the table ACROSS a water body (the tarn's bowl-following
+    // dome relaxes to one level; bed bumps stop printing through the
+    // surface geometry) while a big pond's along-slope survives. A solo
+    // wet cell has no wet neighbours and keeps its own surface — thin
+    // rain puddles are untouched
+    for (let pass = 0; pass < 4; pass++) {
+      for (let j = 0; j < GRID; j++) {
+        for (let i = 0; i < GRID; i++) {
+          let sw = 0, s = 0;
+          for (let dj = -1; dj <= 1; dj++) {
+            const jj = j + dj;
+            if (jj < 0 || jj >= GRID) continue;
+            for (let di = -1; di <= 1; di++) {
+              const ii = i + di;
+              if (ii < 0 || ii >= GRID) continue;
+              const kk = jj * GRID + ii;
+              sw += wet[kk];
+              s += wet[kk] * surf[kk];
+            }
+          }
+          surfB[j * GRID + i] = sw > 1e-4 ? s / sw : surf[j * GRID + i];
         }
       }
-      return c > 0 ? s / c : 0;
-    };
-    // ground height (terrain + fine dynamic lift + micro relief) at a corner —
-    // the same stack the contact overlay renders, so film and ground agree.
-    // Outside the micro window the relief comes from the far-field edit
-    // cache, so pond sheets drape into ditches you dug far away too.
+      surf.set(surfB);
+    }
+    // ---- pass 3: corner values — table level (wet cells at full weight,
+    // dry neighbours at 0.15 so the waterline tapers out) and ground height
+    // (terrain + fine lift + micro relief: the same stack the contact
+    // overlay renders, so film and ground agree; ground is only evaluated
+    // where a wet cell touches the corner — everywhere else no quad emits)
     const micro = this.micro;
-    const cornerGround = (i: number, j: number): number => {
-      const x = i * cell - HALF, z = j * cell - HALF;
-      const microD = micro ? micro.sampleDelta(x, z) : 0;
-      const worldD = micro && microD === 0 ? micro.sampleWorldDelta(x, z) : 0;
-      return sampleHeight(this.terrain, i * cell, j * cell)
-        + this.ground.dynLiftBilerp(x, z)
-        + microD + worldD;
-    };
+    const cT = COR_TABLE, cG = COR_GROUND;
+    for (let j = 0; j <= GRID; j++) {
+      for (let i = 0; i <= GRID; i++) {
+        let s = 0, sw = 0, sWet = 0, anyWet = false;
+        for (let dj = -1; dj <= 0; dj++) {
+          const jj = j + dj;
+          if (jj < 0 || jj >= GRID) continue;
+          for (let di = -1; di <= 0; di++) {
+            const ii = i + di;
+            if (ii < 0 || ii >= GRID) continue;
+            const kk = jj * GRID + ii;
+            const w = wet[kk] > 0 ? wet[kk] : 0.15;
+            s += w * surf[kk];
+            sw += w;
+            if (wet[kk] > 0) { anyWet = true; sWet += wet[kk]; }
+          }
+        }
+        const c = j * (GRID + 1) + i;
+        // ONLY a corner touched by genuinely wet cells carries a level —
+        // dry corners must read depth 0, or the cell-centre-vs-corner
+        // curvature mismatch alone emits phantom water over the whole map
+        cT[c] = sWet > 0.02 ? s / sw : 0;
+        cG[c] = 0;
+        if (anyWet) {
+          const x = i * cell - HALF, z = j * cell - HALF;
+          const microD = micro ? micro.sampleDelta(x, z) : 0;
+          const worldD = micro && microD === 0 ? micro.sampleWorldDelta(x, z) : 0;
+          cG[c] = sampleHeight(this.terrain, i * cell, j * cell)
+            + this.ground.dynLiftBilerp(x, z) + microD + worldD;
+        }
+      }
+    }
+    // ---- pass 4: emit — one quad per cell whose corners carry water; the
+    // corner DEPTH is table − ground (a bump poking through the table just
+    // shoals, the way real bedrock does)
     for (let j = 0; j < GRID; j++) {
       for (let i = 0; i < GRID; i++) {
-        const k = j * GRID + i;
-        const depth = hPond[k] + ruts[k] * 0.35;
-        // ~0.9 mm minimum film (matches the contact sheet) — PLUS a one-cell
-        // dilation: a dry cell BORDERING a wet one still emits, because its
-        // shared corners carry partial depth — the waterline then tapers out
-        // through the shader's veil ramp instead of ending on a hard 4 m
-        // quad edge (the "cookie-cutter" shoreline)
-        let emit = depth >= 0.0009;
-        if (!emit) {
-          const wet = (kk: number) => hPond[kk] + ruts[kk] * 0.35 >= 0.0009;
-          if ((i > 0 && wet(k - 1)) || (i < GRID - 1 && wet(k + 1))
-            || (j > 0 && wet(k - GRID)) || (j < GRID - 1 && wet(k + GRID))) emit = true;
-        }
-        if (!emit) continue;
+        const c00 = j * (GRID + 1) + i, c10 = c00 + 1;
+        const c01 = c00 + (GRID + 1), c11 = c01 + 1;
+        const d00 = Math.max(cT[c00] - cG[c00], 0), d10 = Math.max(cT[c10] - cG[c10], 0);
+        const d01 = Math.max(cT[c01] - cG[c01], 0), d11 = Math.max(cT[c11] - cG[c11], 0);
+        if (d00 < 0.0008 && d10 < 0.0008 && d01 < 0.0008 && d11 < 0.0008) continue;
         const x0 = i * cell - HALF, x1 = x0 + cell;
         const z0 = j * cell - HALF, z1 = z0 + cell;
-        const d00 = cornerDepth(i, j), d10 = cornerDepth(i + 1, j);
-        const d11 = cornerDepth(i + 1, j + 1), d01 = cornerDepth(i, j + 1);
-        // per-corner surface = ground + depth (+12 mm z-fight guard)
-        const y00 = cornerGround(i, j) + 0.012 + d00;
-        const y10 = cornerGround(i + 1, j) + 0.012 + d10;
-        const y11 = cornerGround(i + 1, j + 1) + 0.012 + d11;
-        const y01 = cornerGround(i, j + 1) + 0.012 + d01;
+        // per-corner surface = ground + table depth (+12 mm z-fight guard)
+        const y00 = cG[c00] + 0.012 + d00, y10 = cG[c10] + 0.012 + d10;
+        const y11 = cG[c11] + 0.012 + d11, y01 = cG[c01] + 0.012 + d01;
         verts.push(x0, y00, z0, x1, y10, z0, x1, y11, z1, x0, y00, z0, x1, y11, z1, x0, y01, z1);
         depths.push(d00, d10, d11, d00, d11, d01);
       }
@@ -476,6 +540,139 @@ export class StormFX {
     geo.setAttribute("aDepth", new THREE.BufferAttribute(new Float32Array(depths), 1));
     geo.setIndex(null);
     geo.computeBoundingSphere();
+  }
+
+  // ------------------------------------------------------------------- river
+  /** The river as a true 3-D water volume (the Timberborn read): a ribbon
+   *  mesh skinned from the terrain's station chain. Its SURFACE rides the
+   *  water table down the channel — near-flat ACROSS the channel, gently
+   *  sloped ALONG it — not the parabolic bed, so the river reads as a body
+   *  of water between its banks instead of a wet film draping every bed
+   *  bump (the old drape made the channel a shiny groove in the ground).
+   *  The vertex stage gives it real travelling waves (WATER_WAVE_GLSL);
+   *  the fragment shades it with the ONE shared water look, so the current,
+   *  foam and colour match the pond sheet and the contact film sheet
+   *  everywhere the three hand over. Built ONCE — the spring-fed channel is
+   *  permanent; the physics pond field beneath it keeps its own water
+   *  accounting untouched. */
+  private buildRiver() {
+    const pts = this.terrain.riverPts;
+    const NA = 26; // cross-section vertices (~0.4 m gorge .. ~1 m lowland)
+    const verts: number[] = [];
+    const depths: number[] = [];
+    const fades: number[] = [];
+    const idx: number[] = [];
+    const rowStart: number[] = [];
+    const sMax = pts.length ? pts[pts.length - 1].s : 1;
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      const a = pts[Math.max(0, i - 1)], b2 = pts[Math.min(pts.length - 1, i + 1)];
+      let tx = b2.x - a.x, ty = b2.y - a.y;
+      const tl = Math.hypot(tx, ty) || 1;
+      tx /= tl; ty /= tl; // downstream tangent
+      const nx = -ty, nz = tx; // across-channel normal
+      // the water level: a shallow rushing gorge deepening to a calm lowland
+      // channel — bank-full-ish, so the waterline rides the carved banks and
+      // the bed fining reads through the clear upper reach
+      const wl = p.bed + 0.16 + 0.30 * (p.s / sMax);
+      const halfW = p.w + 1.9; // a touch past the bank crest for the waterline
+      // fade in past the tarn — the tarn's own pond sheet owns the lake
+      const fade = Math.max(0, Math.min(1, (p.s - 6) / 26));
+      rowStart.push(verts.length / 3);
+      for (let c = 0; c <= NA; c++) {
+        const off = -halfW + (2 * halfW * c) / NA;
+        const sx = p.x + nx * off, sz = p.y + nz * off; // 0..WORLD_SIZE frame
+        const terH = sampleHeight(this.terrain, sx, sz);
+        const depth = Math.max(wl - terH, 0);
+        // dive under the bank where terrain rises past the waterline (the
+        // sheet follows the ground there, hidden, and alpha dies on depth)
+        const y = Math.min(wl, terH + 0.02);
+        verts.push(sx - HALF, y, sz - HALF);
+        depths.push(depth);
+        fades.push(fade);
+      }
+    }
+    // indices — skip quads fully buried under the banks (no fill wasted)
+    for (let i = 0; i < pts.length - 1; i++) {
+      for (let c = 0; c < NA; c++) {
+        const r0 = rowStart[i] + c, r1 = rowStart[i] + c + 1;
+        const r2 = rowStart[i + 1] + c, r3 = rowStart[i + 1] + c + 1;
+        if (Math.max(depths[r0], depths[r1], depths[r2], depths[r3]) < 0.004) continue;
+        idx.push(r0, r2, r1, r1, r2, r3);
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+    geo.setAttribute("aDepth", new THREE.Float32BufferAttribute(depths, 1));
+    geo.setAttribute("aFade", new THREE.Float32BufferAttribute(fades, 1));
+    geo.setIndex(idx);
+    geo.computeBoundingSphere();
+    const mat = new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false, side: THREE.DoubleSide,
+      uniforms: {
+        uTime: { value: 0 },
+        uRain: { value: 0 },
+        uWindDir: { value: new THREE.Vector2(1, 0) },
+        uSky: { value: new THREE.Color(0x8fa3b5) },
+        uSun: { value: new THREE.Color(0xffd9a8) },
+        uSunDir: { value: new THREE.Vector3(0.5, 0.4, -0.6) },
+        uCamPos: { value: new THREE.Vector3() },
+        uFogColor: { value: new THREE.Color(0xe6d2ac) },
+        uFogDensity: { value: 0.0026 },
+        uFlowTex: { value: this.flowTex },
+        // vertex-stage twin of uFlowTex — a sampler shared by both stages
+        // never binds for the vertex stage in this three build (see the
+        // worldEditV twin in world.ts); SAME texture object, own name
+        uFlowTexV: { value: this.flowTex },
+      },
+      vertexShader: `
+        attribute float aDepth;
+        attribute float aFade;
+        uniform float uTime;
+        uniform vec2 uWindDir;
+        varying vec3 vWorld;
+        varying float vDepth;
+        varying float vFade;
+        ${WATER_WAVE_GLSL}
+        void main(){
+          vDepth = aDepth;
+          vFade = aFade;
+          // waves grow with depth and die at the banks / the tarn handoff
+          float shoreFade = smoothstep(0.02, 0.30, aDepth) * aFade;
+          vec3 wp = position;
+          wp.y += waterWaveY(position.xz, shoreFade);
+          vWorld = wp;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(wp, 1.0);
+        }`,
+      fragmentShader: `
+        uniform float uTime, uRain, uFogDensity;
+        uniform vec3 uSky, uSun, uSunDir, uFogColor, uCamPos;
+        uniform vec2 uWindDir;
+        varying vec3 vWorld;
+        varying float vDepth;
+        varying float vFade;
+        ${WATER_SURFACE_GLSL}
+        void main(){
+          if (vDepth < 0.0008) discard;
+          vec3 col;
+          float alpha;
+          waterLook(vWorld, vDepth, col, alpha);
+          // shoreline taper (wide: the last ~1 m of bank fades the veil out
+          // over shallowing water, not on one polygon edge) + tarn handoff
+          alpha *= smoothstep(0.005, 0.09, vDepth) * vFade;
+          if (alpha < 0.004) discard;
+          float fogF = 1.0 - exp(-uFogDensity * uFogDensity * dot(uCamPos - vWorld, uCamPos - vWorld));
+          col = mix(col, uFogColor, clamp(fogF, 0.0, 1.0));
+          gl_FragColor = vec4(col, alpha);
+          // SAME tone-map + output-encode as the terrain (see the film sheet)
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
+        }`,
+    });
+    this.riverMesh = new THREE.Mesh(geo, mat);
+    this.riverMesh.renderOrder = 6; // above the ground overlay (1), puddles (4) and the film sheet (5)
+    this.riverMesh.frustumCulled = false;
+    this.scene.add(this.riverMesh);
   }
 
   setRainQuality(count: number) {
@@ -849,6 +1046,18 @@ export class StormFX {
     pm.uniforms.uFogColor.value.copy(fogColor);
     pm.uniforms.uFogDensity.value = fogDensity;
     pm.uniforms.uCamPos.value.copy(camPos);
+
+    // river ribbon — the SAME environment as the pond sheet (one water look)
+    const rm = this.riverMesh.material as THREE.ShaderMaterial;
+    rm.uniforms.uTime.value = elapsed;
+    rm.uniforms.uRain.value = Math.min(rainAtPlayer / 50, 1);
+    rm.uniforms.uWindDir.value.set(Math.cos(windDirRad), Math.sin(windDirRad));
+    (rm.uniforms.uSky.value as THREE.Color).copy(pm.uniforms.uSky.value as THREE.Color);
+    (rm.uniforms.uSun.value as THREE.Color).copy(pm.uniforms.uSun.value as THREE.Color);
+    rm.uniforms.uSunDir.value.copy(sunDir);
+    rm.uniforms.uFogColor.value.copy(fogColor);
+    rm.uniforms.uFogDensity.value = fogDensity;
+    rm.uniforms.uCamPos.value.copy(camPos);
 
     // the mud sheen rides the SAME sky/sun environment, on the contact
     // overlay too — every frame, film or no film (mud still glows after

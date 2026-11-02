@@ -74,6 +74,10 @@ export interface TerrainData {
   tempC: Float32Array;
   /** river channel intensity 0..1 per cell (1 = thalweg) */
   river: Float32Array;
+  /** the river's station chain — densified path with post-normalisation bed
+   *  heights. The 3-D water ribbon (fx.buildRiver) skins its surface from
+   *  this: the water level rides bed + a depth that grows downstream. */
+  riverPts: RiverPoint[];
   /** the CURRENT: per-cell world-space flow vector (unit dir × vigour 0..1,
    *  two-component stride) — visual only. Rasterised from the river station
    *  chain (downstream tangent, Manning-ish slope vigour) so the water sheets
@@ -131,7 +135,7 @@ function ridgedNoise(rng: () => number): (x: number, y: number) => number {
   };
 }
 
-interface RiverPoint { x: number; y: number; s: number; bed: number; w: number; }
+export interface RiverPoint { x: number; y: number; s: number; bed: number; w: number; }
 
 /**
  * The river: waypoints from the tarn down to the south map edge, densified
@@ -322,6 +326,9 @@ export function buildTerrain(seed = 7): TerrainData {
   for (const z of height) { mn = Math.min(mn, z); mx = Math.max(mx, z); }
   for (let k = 0; k < height.length; k++) height[k] -= mn;
   const maxY = mx - mn;
+  // station beds were sampled PRE-normalisation — bring them into the final
+  // world frame so the water ribbon can skin its surface from them directly
+  for (const p of river) p.bed -= mn;
 
   // ---- 5) per-cell fields: elevation, slope, river mask, distance ---------
   const cellH = new Float32Array(GRID * GRID);
@@ -346,19 +353,24 @@ export function buildTerrain(seed = 7): TerrainData {
     }
   }
   // river mask + distance field (samples are ~4 m apart — direct eval).
-  // Gorge samples (bed above 26 m) also stamp GRAVEL: the mountain reach
-  // of the river is a gravel-bedded gorge with gravel bars/banks.
+  // riverS carries the along-path position of the NEAREST station, so the
+  // soil build can fine the bed DOWNSTREAM (rocky gorge -> gravel bars ->
+  // alluvial sand) by position along the water, not by absolute elevation.
+  // The upper-middle reaches also stamp GRAVEL: a gravel halo of bars and
+  // banks around the gorge reach of the channel.
   const gravelMask = new Float32Array(GRID * GRID);
+  const riverS = new Float32Array(GRID * GRID).fill(-1);
+  const sMax = river.length ? river[river.length - 1].s : 1;
   for (const p of river) {
     const R = Math.max(p.w * 2.6, 14);
-    const gR = p.bed > 26 ? Math.max(p.w * 2.6, 16) : 0; // gravel halo, gorge only
+    const gR = p.s < sMax * 0.45 ? Math.max(p.w * 2.6, 16) : 0; // gravel halo — upper-middle reaches
     const i0 = Math.max(0, Math.floor((p.x - R) / cell)), i1 = Math.min(GRID - 1, Math.ceil((p.x + R) / cell));
     const j0 = Math.max(0, Math.floor((p.y - R) / cell)), j1 = Math.min(GRID - 1, Math.ceil((p.y + R) / cell));
     for (let j = j0; j <= j1; j++) {
       for (let i = i0; i <= i1; i++) {
         const k = j * GRID + i;
         const d = Math.hypot((i + 0.5) * cell - p.x, (j + 0.5) * cell - p.y);
-        riverDist[k] = Math.min(riverDist[k], d);
+        if (d < riverDist[k]) { riverDist[k] = d; riverS[k] = p.s; }
         if (d < p.w) riverMask[k] = Math.max(riverMask[k], 1 - (d / p.w) ** 2 * 0.55);
         if (gR > 0 && d < gR) gravelMask[k] = Math.max(gravelMask[k], 1 - d / gR);
       }
@@ -540,25 +552,33 @@ export function buildTerrain(seed = 7): TerrainData {
         case B_ICE: soil[k] = 0; break;
         default: soil[k] = 1; break; // river bed: alluvial loam
       }
-      // river banks get loam alluvium regardless of biome; the GORGE reach
-      // (high bed) is gravel bars and banks instead — the one place stone
-      // carries in the river itself. Order matters: the alluvium cap below
-      // runs first, the bed-fining override AFTER it (a min(soil,1) cap would
-      // otherwise flatten the gravel back to loam)
+      // river banks get loam alluvium regardless of biome; the upper-middle
+      // reaches carry gravel bars and banks instead — stone in and around the
+      // river itself. Order matters: the alluvium cap below runs first, the
+      // bed-fining override AFTER it (a min(soil,1) cap would otherwise
+      // flatten the gravel back to loam)
       if (riverMask[k] > 0.05 || (riverDist[k] < 12 && b !== B_ICE)) soil[k] = Math.min(soil[k], 1);
       if (gravelMask[k] > 0.12) soil[k] = 5;
       // scree fans at the foot of the steep dry slopes — gravelly colluvium
       // (patches wide enough that their interiors stay PURE gravel past the
       // 5×5 soil blend — the inspector can actually show "Gravel")
       else if (b === B_ROCKY && slope[k] > 0.5 && h < 42 && n3(((i + 0.5) * cell) / 26, ((j + 0.5) * cell) / 26) > 0.1) soil[k] = 5;
-      // river bed: DOWNSTREAM FINING — the mountain reach carries gravel
-      // bars, the lowland bed is alluvial sand, and a noise-dithered band
-      // between (bed ~8..22 m) lets gravel patches fade out downstream (the
-      // 5×5 soil mix then feathers the pedotransfer across the whole reach)
-      if (riverMask[k] > 0.2) {
-        const gravelly = cellH[k] > 15 + 7 * n3(((i + 0.5) * cell) / 22, ((j + 0.5) * cell) / 22);
-        soil[k] = gravelly ? 5 : 0;
+      // river bed: DOWNSTREAM FINING ALONG THE CHANNEL — position along the
+      // water, not absolute elevation. The mountain reach is a rocky gravel
+      // gorge, gravel bars fade out through the middle reaches (noise-dithered
+      // so bars finger into the sand), and the lowland bed is clean alluvial
+      // sand. The 5×5 soil mix feathers each pedotransfer across the bands
+      if (riverMask[k] > 0.2 && riverS[k] >= 0) {
+        const f = riverS[k] / sMax;
+        const dith = n3(((i + 0.5) * cell) / 22, ((j + 0.5) * cell) / 22);
+        if (f < 0.5) soil[k] = 5;                                  // rocky gravel gorge
+        else if (f < 0.75) soil[k] = dith > (f - 0.5) / 0.25 ? 5 : 3; // bars fade into sand
+        else soil[k] = 3;                                          // alluvial sand bed
       }
+      // the tarn shore: glacial till — a patchy gravel ring at the waterline
+      // (bouldery cirque shore, not mud)
+      if (tarnMask[k] > 0.1 && tarnMask[k] < 0.52
+        && n3(((i + 0.5) * cell) / 18, ((j + 0.5) * cell) / 18) > -0.08) soil[k] = 5;
       // the dirt road is built on better-draining loam borrow material
       if (road[k] > 0.35) soil[k] = 1;
       // the settler's meadow at the road's west end (the spawn): cleared
@@ -586,8 +606,13 @@ export function buildTerrain(seed = 7): TerrainData {
     if (b === B_ROCKY) r = 0.45 + 0.55 * Math.min(Math.max((sl - 0.5) / 0.45, 0), 1);
     else if (b === B_MOUNTAIN) r = Math.min(Math.max((sl - 0.35) / 0.35, 0), 1) * Math.min(Math.max((h - 45) / 30, 0), 1);
     else if (b === B_ICE) r = 0.8 * Math.min(Math.max((sl - 0.3) / 0.3, 0), 1) + 0.2;
-    // the gorge channel keeps some gravel-on-rock honesty too
+    // the gorge channel keeps some gravel-on-rock honesty too — and the
+    // UPPER reach (first 30% of the path, right below the tarn) runs rocky:
+    // bedrock shoals glare through the clear rushing water
     if (gravelMask[k] > 0.6) r = Math.max(r, 0.25);
+    if (riverMask[k] > 0.3 && riverS[k] >= 0 && riverS[k] < sMax * 0.3) {
+      r = Math.max(r, 0.28 + 0.27 * (1 - (riverS[k] / (sMax * 0.3))));
+    }
     rockFrac[k] = Math.min(r, 1);
   }
 
@@ -635,7 +660,7 @@ export function buildTerrain(seed = 7): TerrainData {
     }
   }
 
-  return { height, soil, road, biome, moisture, tempC, river: riverMask, pondCap, riverIn, rockFrac, soilMix, flow, minY: 0, maxY };
+  return { height, soil, road, biome, moisture, tempC, river: riverMask, riverPts: river, pondCap, riverIn, rockFrac, soilMix, flow, minY: 0, maxY };
 }
 
 /** the valley road's centreline — ONE definition shared by the terrain

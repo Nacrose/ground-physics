@@ -205,9 +205,9 @@ void mudSheen(inout vec3 col, vec3 nrm, vec3 wpos, float wet, float mud,
 `;
 
 /**
- * The water surface — ONE look shared by BOTH water renderers (the contact
- * film sheet at 6.25 cm and the fine-tier puddle sheet at 4 m), so water
- * reads the same on either side of the contact-window edge.
+ * The water surface — ONE look shared by ALL THREE water renderers (the river
+ * ribbon mesh, the fine-tier pond sheet and the contact film sheet), so water
+ * reads the same everywhere a handoff happens.
  *
  * CALLER CONTRACT (all in scope before including):
  *   uniform float uTime, uRain;
@@ -215,34 +215,30 @@ void mudSheen(inout vec3 col, vec3 nrm, vec3 wpos, float wet, float mud,
  *   uniform vec3  uSky, uSun, uSunDir, uCamPos;
  *   uniform sampler2D uFlowTex;   // world flow field: RG dir·speed, B vigour
  * and afterwards USES: writes col (rgb, fog NOT applied) + alpha [0..1]; the
- * caller still owns the depth<0.6mm discard, its window/edge alpha fade and
- * the fog mix.
+ * caller still owns the depth<0.6mm discard, its window/edge fades and the
+ * fog mix.
  *
- * Look, layer by layer:
- *   body  — CLEAR shallow water: a translucent olive-tea tint the BED shows
- *           through (the terrain's own wet shading owns the darkening), then
- *           Beer-Lambert depth toward the sky-reflecting slate of deep water;
- *           a river runs slightly turbid-milky where the current is strong
- *   waves — where a CURRENT is present (riverOn) the wind capillary trains
- *           fade back and the river's OWN trains take over: crests ACROSS
- *           the channel with phase travelling DOWNSTREAM (a slow meander
- *           warp so the lines aren't ruler-straight) plus a rapids chop that
- *           scales with vigour. THIS is what makes the water read as flowing
- *           instead of rippling in place: the pattern moves along the channel
+ * The look is a stylised WATER VOLUME (the Timberborn read), layer by layer:
+ *   body  — a teal graded by depth: clear aqua shallows the BED reads through
+ *           (the rocky->gravel->sand fining must be visible) into deep teal;
+ *           a river runs at half a pond's extinction so its bed always shows
+ *   waves — where a CURRENT is present (riverOn) crest lines ACROSS the
+ *           channel with phase travelling DOWNSTREAM, plus rapids chop that
+ *           scales with vigour; still water keeps gentle wind trains
  *   streak— anisotropic noise stretched ALONG the current and advected with
- *           it (low frequency downstream, high across): the drifting streak
- *           field real rivers show even before any foam
- *   foam  — white water where the current works: streak foam drawn out along
- *           the flow, breaking-crest foam in the rapids (vigour-gated), and
- *           drifting scum lines hugging the thin banks. Ponds/tarns (no flow
- *           field entry) keep the wind look with zero foam
- *   glint — two-lobe sun specular: a tight sparkle riding the waves plus a
- *           broad soft sheen, so the surface catches the sun like a real one
- *   rim   — a meniscus: thin bright waterline where the film pinches out,
- *           instead of a decal edge cut into the ground
- *   veil  — alpha opens with ACCUMULATED depth only: a sub-cm film is wet
- *           ground (near-invisible sheet), and even deep water keeps a
- *           quarter of the bed readable through it — clarity, not paint
+ *           it: the drifting flow-lines field that makes even a STILL frame
+ *           read as moving water
+ *   foam  — a scalloped shoreline band where the water pinches out, streak
+ *           foam and breaking crests in the rapids (vigour-gated), and thin
+ *           scum lines on the shallows; patchy and grained, never a snowfield
+ *   glint — ONE tight warm sun streak riding the wave crests, hard-capped.
+ *           (The old two-lobe glint at up to +0.9 white on noise-riding
+ *           normals was the 'strange white reflections near the player'.)
+ *   film  — under 4 cm of water this is WET GROUND, not paint: a dark
+ *           translucent veil; the teal volume opens with the smoothstep into
+ *           real depth
+ *   rim   — a thin waterline where the sheet dies into the ground, tinted,
+ *           subtle
  */
 export const WATER_SURFACE_GLSL = /* glsl */ `
 uniform sampler2D uFlowTex;
@@ -263,96 +259,136 @@ void waterLook(vec3 wpos, float depth, out vec3 col, out float alpha) {
   vec2 fDir = flS.rg * 2.0 - 1.0;
   float spd = flS.b;
   float riverOn = smoothstep(0.04, 0.30, spd);
-  // depth-normalised ramp (Beer-Lambert-ish): 0 = film, 1 = deep — but a
-  // RIVER runs CLEAR: its extinction is half a pond's (tea-stained still
-  // water vs. actively flushed current), so a 20 cm channel still shows its
-  // bed through. With the pond's 7.0 the whole channel saturated to full
-  // sky-slate — an opaque plate that read as a snowfield, and the
-  // gravel→sand bed fining was invisible under it
-  float dN = 1.0 - exp(-depth * mix(7.0, 3.0, riverOn));
+  // depth-normalised body fraction: a river runs CLEAR (a pond's extinction
+  // would saturate the channel to an opaque plate and bury the bed fining)
+  float dN = 1.0 - exp(-depth * mix(6.0, 1.5, riverOn));
   vec2 fd = normalize(fDir + uWindDir * 1e-4); // degenerate -> wind dir (riverOn ~ 0 anyway)
   float alongC = dot(p, fd);
   float acrossC = dot(p, vec2(-fd.y, fd.x));
-  float drift = uTime * (0.40 + 2.2 * spd); // downstream pattern advection [m]
+  float drift = uTime * (0.40 + 2.0 * spd); // downstream pattern advection [m]
+  // sky luminance — the water BODY must ride the scene light like every
+  // other surface (a storm-dim world with a bright cyan plate reads as a
+  // glowing decal dropped on the ground)
+  float skyL = clamp(dot(uSky, vec3(0.333)), 0.0, 1.0);
+  // flow-texture LOD: the streak field reads as DIRECTION at gameplay
+  // distance, but at your boots it collapses into brushed-metal noise — so
+  // it (and its foam) fades out over the last few metres to the camera and
+  // close water keeps the calm wind look instead
+  float far = smoothstep(3.0, 16.0, distance(uCamPos, wpos));
   // wind capillary trains (a pond's look) + rain prickle
-  float w1 = sin(dot(p, uWindDir) * 2.6 + uTime * 2.2) * cos(p.x * 1.9 - uTime * 1.5);
-  float w2 = sin((p.x + p.y) * 3.4 + uTime * 3.0) * 0.5;
-  float w3 = sin(dot(p, vec2(-uWindDir.y, uWindDir.x)) * 4.1 - uTime * 2.6) * 0.35;
-  float w4 = sin(dot(p, uWindDir) * 9.0 + uTime * 3.4) * sin(dot(p, vec2(-uWindDir.y, uWindDir.x)) * 7.5 - uTime * 2.9) * 0.30;
+  float w1 = sin(dot(p, uWindDir) * 2.4 + uTime * 2.0) * cos(p.x * 1.7 - uTime * 1.4);
+  float w2 = sin((p.x + p.y) * 3.1 + uTime * 2.8) * 0.5;
   float prickle = uRain * (sin(p.x * 21.0 + uTime * 11.0) * sin(p.y * 17.0 - uTime * 9.0));
   // the current's trains: crest lines ACROSS the channel, phase travelling
   // DOWNSTREAM (phase rides 'alongC'), a slow meander warp bending them,
-  // plus a short ~0.9 m chop — close-range liveliness; without it the
-  // surface at your boots is two slow swells and reads glassy
+  // plus rapids chop — this advection is what makes the water FLOW
   float warp = sin(acrossC * 0.21) * 1.6;
   float c1 = sin(alongC * 2.05 + warp - drift * 0.85);
   float c2 = sin(alongC * 4.6 - drift * 1.4 + acrossC * 0.6);
   float c3 = sin(alongC * 3.1 - drift * 2.1) * sin(acrossC * 2.3 + drift * 0.9); // rapids chop
   float c4 = sin(alongC * 7.3 - drift * 1.9 + acrossC * 1.2) * sin(acrossC * 5.1 + drift * 1.1); // short chop
   float flowR = (0.55 * c1 + 0.32 * c2 + 0.55 * c3 * spd + 0.45 * c4 * spd) * riverOn;
-  float ripple = (w1 + w2 + w3 + w4) * (1.0 - 0.6 * riverOn) + flowR;
-  float amp = mix(0.030 + 0.055 * dN, 0.030 + 0.16 * spd, riverOn);
+  float ripple = (w1 + w2) * (1.0 - 0.6 * riverOn) + flowR;
   // anisotropic streaks: noise stretched ALONG the current and advected with
-  // it — the drifting streak field real rivers show even without foam.
-  // Dense across (1.8 m), long along (18 m): this anisotropy is what makes a
-  // STILL frame read as flowing — direction is texture, motion is time
-  float streak = wFbm(vec2(alongC * 0.5 - drift * 0.8, acrossC * 3.4));
-  float streak2 = wFbm(vec2(alongC * 0.9 - drift * 1.15 + 37.2, acrossC * 4.6 + 11.7));
-  vec3 n = normalize(vec3(ripple * amp + prickle * 0.10, 1.0,
-                          (w2 - w1 * 0.8 - w3 * 0.6 - flowR * 0.8) * amp + prickle * 0.09));
+  // it — the drifting flow-lines field real rivers show even without foam.
+  // Dense across, long along: the anisotropy is what makes a STILL frame
+  // read as flowing — direction is texture, motion is time
+  float streak = wFbm(vec2(alongC * 0.45 - drift * 0.85, acrossC * 4.4));
+  float streak2 = wFbm(vec2(alongC * 0.9 - drift * 1.2 + 37.2, acrossC * 5.2 + 11.7));
+  // surface normal — CALM and coherent. The old normal rode high-frequency
+  // noise under a broad glint lobe: scintillating white speckle patches that
+  // followed the player (the 'white reflections around user near water')
+  vec3 n = normalize(vec3(ripple * 0.14 + prickle * 0.03, 1.0,
+                          (w2 - w1 * 0.7 - flowR * 0.7) * 0.14 + prickle * 0.025));
   vec3 v = normalize(uCamPos - wpos);
   float ndv = max(dot(v, n), 0.0);
-  float fres = pow(1.0 - ndv, 2.4);
-  // sun specular, two lobes: a broad sheen that catches whole wave faces
-  // (reads at any camera angle) + a tight sparkle riding the crests
+  float fres = pow(1.0 - ndv, 2.6);
+  // sun: ONE tight warm streak on the wave crests — capped, never a white
+  // plate however the camera swings. A rain FILM carries no glitter (a 2 mm
+  // sheet on the ground is not open water — glittering films around the
+  // player were half of the 'white reflections' report)
   vec3 sd = normalize(uSunDir);
   float sp = max(dot(reflect(-v, n), sd), 0.0);
-  float glint = pow(sp, 48.0) * 0.5 + pow(sp, 10.0) * 0.07;
-  // body: clear tea over the (wet-shaded, matte) bed -> sky slate with depth;
-  // the shallow tint leans on uSky so it dims under storm light like everything
-  // deepT is CAPPED at ~1.0 x sky (was 0.70 + 0.85*fres = 1.55x at grazing —
-  // every distant pond clipped to a white plate at grazing camera angles);
-  // grazing water still brightens toward the sky, it just can't blow past it
-  vec3 shallowT = mix(vec3(0.30, 0.345, 0.29), uSky * 0.42, 0.35);
-  // a river runs green-teal and CLEAR, not pale ice-blue — the grazing sky
-  // mirror is capped too (deepT below), or the whole channel reads as a
-  // white plate at gameplay camera angles
-  shallowT = mix(shallowT, vec3(0.24, 0.335, 0.30), riverOn * 0.55);
-  vec3 deepT = uSky * (0.52 + 0.45 * fres * (1.0 - 0.45 * riverOn));
-  col = mix(shallowT, deepT, dN);
-  // moving ripple shading on the body itself — the surface visibly LIVES
-  // even looking straight down (fresnel alone cannot do that). On the river
-  // the current's trains shade at nearly DOUBLE contrast: crest-bright /
-  // trough-dark banding along the channel is what reads as 'flowing' at
-  // gameplay distance, and the drifting streak field dapples it as it goes
-  col *= 0.91 + 0.16 * ripple * (0.25 + dN);
-  col *= 1.0 - 0.40 * riverOn * abs(flowR) * (0.30 + 0.70 * dN);
-  col *= 1.0 + 0.38 * riverOn * (streak - 0.5);
-  col += uSun * glint * (0.55 + 0.75 * dN + 0.35 * riverOn);
-  // ---- foam: white water where the current works — but PATCHY, a rapid
-  // is dark green water with white STREAKS and crest lines, not a snowfield:
-  // the thresholds ride high enough that only the strong quarter of the
-  // streak field and the breaking crests whiten (snowfield regression)
-  float foam = 0.0;
-  foam += smoothstep(0.58 - 0.25 * spd, 0.85, streak) * 0.95 * riverOn;
-  foam += smoothstep(0.62, 0.95, c3) * 1.1 * pow(spd, 1.4);
-  foam += riverOn * (1.0 - dN) * (0.15 + 0.50 * smoothstep(0.45, 0.85, streak2));
-  foam *= 0.35 + 0.65 * dN;
-  foam = clamp(foam, 0.0, 0.8);
-  vec3 foamC = mix(vec3(0.84, 0.88, 0.91), uSky, 0.30) * (0.58 + 0.42 * dN);
+  float glint = pow(sp, 80.0) * 0.16 * smoothstep(0.01, 0.06, depth);
+  // body: teal graded by depth — MULTIPLIED by the scene's sky luminance so
+  // it dims with the weather exactly like the ground around it, with a warm
+  // sun kiss on the shallows so it sits in the golden-hour light
+  vec3 shal = mix(vec3(0.235, 0.42, 0.40), uSky * vec3(0.40, 0.52, 0.50), 0.30);
+  vec3 deep = vec3(0.052, 0.175, 0.19);
+  vec3 body = mix(shal, deep, dN);
+  body += uSun * 0.05 * (1.0 - dN) * (1.0 - riverOn * 0.5);
+  // moving crest/trough shading — the surface LIVES even looking straight down
+  body *= 0.89 + 0.22 * ripple * (0.25 + dN);
+  body *= 1.0 - 0.34 * riverOn * abs(flowR) * (0.3 + 0.7 * dN);
+  body *= 1.0 + (0.18 + 0.26 * far) * riverOn * (streak - 0.5);
+  // grazing sky mirror, CAPPED well under sky brightness
+  body = mix(body, uSky * 0.55, fres * (0.34 - 0.20 * riverOn));
+  body += uSun * glint * (0.4 + 0.6 * dN);
+  body *= 0.26 + 0.78 * skyL;
+  // ---- thin films (<4 cm) are WET GROUND: a dark translucent veil over the
+  // bed's own wet shading, not teal paint. The volume opens with depth, and
+  // the shallow margin (4..9 cm) keeps a LOW alpha so the bed owns most of
+  // the pixel — that is where the rocky/gravel/sand fining reads
+  float filmy = 1.0 - smoothstep(0.004, 0.05, depth);
+  body = mix(body, vec3(0.145, 0.16, 0.145), filmy);
+  // ---- foam: a SCALLOPED shoreline band (broken by the streak noise so it
+  // never draws one solid white line along the polygonal waterline) + rapids
+  // streaks and crest breaks, patchy (dark water with white streaks)
+  float scallop = smoothstep(0.28, 0.62, streak2 + 0.18 * wNoise(p * 3.1));
+  float band = (1.0 - smoothstep(0.02, 0.14, depth)) * smoothstep(0.0008, 0.006, depth) * scallop;
+  float rap = riverOn * smoothstep(0.35, 0.70, spd) * mix(0.45, 1.0, far);
+  float foam = band * 0.55;
+  foam += rap * (0.55 * smoothstep(0.55, 0.85, streak) + 0.45 * smoothstep(0.62, 0.95, c3));
+  foam += riverOn * (1.0 - dN) * 0.25 * smoothstep(0.45, 0.85, streak2); // scum lines
+  foam = clamp(foam, 0.0, 0.72);
+  vec3 foamC = mix(vec3(0.86, 0.90, 0.91), uSky, 0.25) * (0.55 + 0.45 * dN);
   // grain the foam — aerated water is speckled, not a flat paint fill
-  foamC *= 0.88 + 0.24 * wNoise(p * 14.0 + vec2(uTime * 0.7, 0.0));
-  col = mix(col, foamC, foam);
-  // meniscus waterline: bright pinch where the film dies into the ground
-  float men = smoothstep(0.0006, 0.0014, depth) * (1.0 - smoothstep(0.0022, 0.0050, depth));
-  col += uSky * (fres * 0.55 + 0.22) * men;
-  // clarity: veil opens with accumulated depth, deep water keeps 22% bed;
-  // foam is solid white — it buys its own opacity. A RUNNING river claims
-  // more of its pixel than a puddle film (0.43 average veil over the bed
-  // let the bright crusted mud underneath own the look — the channel read
-  // as a pale dry plate, not water)
-  float veil = smoothstep(0.0009, 0.010, depth);
-  alpha = veil * (0.22 + 0.58 * dN + 0.26 * riverOn);
-  alpha = min(alpha + foam * 0.30, 0.85);
+  foamC *= 0.82 + 0.30 * wNoise(p * 14.0 + vec2(uTime * 0.7, 0.0));
+  foamC *= 0.55 + 0.50 * skyL;
+  col = mix(body, foamC, foam);
+  // meniscus waterline: thin, tinted, and noise-broken — a hint of the
+  // pinch where the film dies into ground, never a solid line
+  float men = smoothstep(0.0006, 0.0016, depth) * (1.0 - smoothstep(0.003, 0.008, depth));
+  col += uSky * 0.18 * men * (0.45 + 0.55 * wNoise(p * 5.3));
+  // opacity keyed to the SAME depth fraction as the colour: a film is a wet
+  // veil (0.2), a shallow river run stays half-open so the gravel/sand BED
+  // reads through it, deep water and foam claim their pixel. This is the
+  // clarity that makes the downstream fining visible from the bank
+  alpha = mix(0.20, 0.20 + 0.68 * dN, smoothstep(0.004, 0.06, depth));
+  alpha = min(alpha + foam * 0.35, 0.90);
+}
+`;
+
+/**
+ * The water surface's own VERTICAL motion, for the vertex stage of the river
+ * ribbon: the SAME wave trains waterLook shades in the fragment, evaluated as
+ * height and advected downstream with the current. Amplitude rides vigour —
+ * still water carries wind chop only, the rapids get real travelling crests.
+ * shoreFade (0..1) kills the waves at the banks so they never poke through
+ * the terrain.
+ *
+ * CALLER CONTRACT: uniform float uTime; uniform vec2 uWindDir; and the
+ * VERTEX-STAGE TWIN sampler uFlowTexV — in this three build a sampler uniform
+ * shared by both stages never gets its texture bound for the vertex stage
+ * (see worldD's twin in world.ts), so the ribbon declares uFlowTexV and
+ * points it at the same DataTexture as the fragment's uFlowTex.
+ */
+export const WATER_WAVE_GLSL = /* glsl */ `
+uniform sampler2D uFlowTexV;
+float waterWaveY(vec2 p, float shoreFade) {
+  vec4 flS = texture2D(uFlowTexV, (p + vec2(${(WORLD_SIZE / 2).toFixed(1)})) / ${WORLD_SIZE.toFixed(1)});
+  vec2 fDir = flS.rg * 2.0 - 1.0;
+  float spd = flS.b;
+  vec2 fd = normalize(fDir + vec2(1e-4, 0.0));
+  float alongC = dot(p, fd);
+  float acrossC = dot(p, vec2(-fd.y, fd.x));
+  float drift = uTime * (0.40 + 2.0 * spd);
+  float warp = sin(acrossC * 0.21) * 1.6;
+  float y = 0.0;
+  y += 0.060 * spd * sin(alongC * 2.05 + warp - drift * 0.85);
+  y += 0.038 * spd * sin(alongC * 4.6 - drift * 1.4 + acrossC * 0.6);
+  y += 0.024 * spd * sin(alongC * 7.3 - drift * 1.9 + acrossC * 1.2);
+  y += 0.014 * sin(dot(p, uWindDir) * 2.4 + uTime * 2.0) * cos(p.x * 1.7 - uTime * 1.4);
+  return y * shoreFade;
 }
 `;

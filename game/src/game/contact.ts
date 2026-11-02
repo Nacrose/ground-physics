@@ -682,6 +682,15 @@ export class MicroTerrain {
           vec3 col;
           float alpha;
           waterLook(vWorld, vDepth, col, alpha);
+          // the 3-D river ribbon owns the channel: the film steps aside
+          // wherever the flow field carries a current (else the two
+          // translucent layers stack into a bright double-sheen band)
+          vec4 flS = texture2D(uFlowTex, (vWorld.xz + vec2(${WORLD_SIZE / 2}.0)) / ${WORLD_SIZE}.0);
+          alpha *= 1.0 - smoothstep(0.04, 0.30, flS.b);
+          // deep water (the tarn, deep ponds): the fine-tier sheet owns the
+          // volume — the film fades out over the SAME 0.22..0.30 m band the
+          // pond sheet fades back in on, so the two weights sum to one
+          alpha *= 1.0 - smoothstep(0.22, 0.30, vDepth);
           // window handoff: the film dissolves across the SAME band the fine
           // sheet fades in over (7.45 -> 7.90 m), so the two weights sum to
           // one — no thinned-water ring at the window edge
