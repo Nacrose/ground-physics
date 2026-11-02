@@ -43,7 +43,7 @@ import * as THREE from "three";
 import { WORLD_SIZE, GRID, TerrainData, sampleHeight, terrainNormal, cellIndex } from "./terrain";
 import { vertexTint } from "./biomeTint";
 import { Ground } from "./ground";
-import { SOIL_TEXTURES } from "./params";
+import { SOIL_TEXTURES, CFG } from "./params";
 import { NOISE_GLSL, MUD_SURFACE_GLSL, MUD_NORMAL_GLSL, MUD_SHEEN_GLSL, WATER_SURFACE_GLSL } from "./shaderlib";
 
 const NV = 257; // render vertices per side (cell corners)
@@ -109,6 +109,8 @@ export interface DigResult {
   dPenM: number; // achieved spade penetration
   suction: boolean; // extraction suction paid
   hard: boolean; // dry clay: blade fractures / bounces
+  /** bedrock refusal: too much bare rock, the blade clinks off whole */
+  refused?: boolean;
   spoil: { x: number; z: number; volM3: number };
 }
 
@@ -1575,7 +1577,16 @@ export class MicroTerrain {
   digStroke(x: number, z: number, dirX: number, dirZ: number): DigResult {
     const s = this.touchAt(x, z);
     const k = cellIndex(x, z);
-    const tex = SOIL_TEXTURES[this.terrain.soil[k]];
+    const tex = this.ground.cellTex[k];
+    // 0a) BEDROCK REFUSAL: more bare rock than the threshold and the blade
+    // clinks off whole — no bite, no crater, no spoil. The stone is in the
+    // ground now; find the soil mantle beside it, or drive an adit from a
+    // face (the hard-bite logic below is DRY CLAY; this is rock).
+    if (this.terrain.rockFrac[k] > CFG.rockDigRefuse) {
+      this.audit.strokes++;
+      return { volumeM3: 0, dPenM: 0.03, suction: false, hard: true, refused: true,
+        spoil: { x, z, volM3: 0 } };
+    }
     const qUlt = this.ground.qUlt[k];
     const traffic = this.ground.traffic[k];
     // 0) ground condition at the blade: churn flags + spoil + disturbance.
@@ -2074,7 +2085,7 @@ export class MicroTerrain {
       if (!anyRow) continue;
       for (let fi = 0; fi < GRID; fi++) {
         const k = fj * GRID + fi;
-        const tex = SOIL_TEXTURES[soil[k]];
+        const tex = this.ground.cellTex[k];
         const seal = 1 - 0.35 * Math.min(g.keCum[k] / 800, 1);
         const kTraffic = 1 - 0.12 * Math.min(g.traffic[k], 5);
         const kDig = g.disturbed[k] > 0 ? 1.7 : 1;
@@ -2139,7 +2150,7 @@ export class MicroTerrain {
         const wx = x0 + (i + 0.5) * MICRO_CELL;
         const wz = z0 + (j + 0.5) * MICRO_CELL;
         const k = cellIndex(wx, wz);
-        const tex = SOIL_TEXTURES[soil[k]];
+        const tex = this.ground.cellTex[k];
         const churn = (f[v] & 1) !== 0;
         const spoil = (f[v] & 2) !== 0;
         // one shear + one critical-shear per cell (Hjulström-lite, spec §10)

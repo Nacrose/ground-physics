@@ -483,8 +483,12 @@ export class Game {
     const filmHere = this.micro.waterAt(p.x, p.z);
     const rows: Array<[string, string]> = [
       ["BIOME", `${BIOMES[this.terrain.biome[cellIndex(p.x, p.z)]].label} · ${(this.terrain.tempC[cellIndex(p.x, p.z)]).toFixed(0)}°C`],
-      ["TEXTURE", `${tex.label} · ${tex.clay}% clay`],
-      ["WATER CONTENT", `${rep.wPct.toFixed(1)} %  (PL ${tex.PL} · LL ${tex.LL})`],
+      ["TEXTURE", `${tex.label} · ${tex.clay.toFixed(0)}% clay`],
+      ["BEDROCK", (() => { const rf = this.terrain.rockFrac[cellIndex(p.x, p.z)];
+        return rf > 0.5 ? `at surface — ${(rf * 100).toFixed(0)}% bare rock (spade refuses)`
+          : rf > 0.05 ? `shallow — ${(rf * 100).toFixed(0)}% bare rock`
+          : "deep (> 2 m)"; })()],
+      ["WATER CONTENT", `${rep.wPct.toFixed(1)} %  (PL ${tex.PL.toFixed(0)} · LL ${tex.LL.toFixed(0)})`],
       ["CONSISTENCY", rep.consistencyLabel],
       ["LIQUIDITY INDEX", `${(rep.li * 100).toFixed(0)} %  (0 = PL · 100 = LL)`],
       ["UNIT WEIGHT γ", `${gammaBulk.toFixed(1)} kN/m³  (dry ${tex.gammaDry.toFixed(1)})`],
@@ -642,6 +646,12 @@ export class Game {
     }
 
     const res = this.micro.digStroke(aimX, aimZ, dirX, dirZ);
+    if (res.refused) {
+      // bedrock: the clink, a stone-dust puff, nothing else moves
+      this.fx.playDigHit("hard");
+      this.fx.spawnDust(aimX, this.player.groundHeightAt(aimX, aimZ) + 0.1, aimZ, 0.5);
+      return;
+    }
     // grass dies where the crater and the spoil land
     this.world.crushGrass(aimX, aimZ, 0.32, "dig");
     this.world.crushGrass(res.spoil.x, res.spoil.z, 0.4, "dig");

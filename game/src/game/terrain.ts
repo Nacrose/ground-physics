@@ -73,6 +73,13 @@ export interface TerrainData {
   pondCap: Float32Array;
   /** river source (tarn) cells — the spring discharges here */
   riverIn: Uint8Array;
+  /** bare-rock fraction 0..1 per cell (crags: dig refusal, shed rain,
+   *  bearing raft — the mountain finally has stone IN the ground) */
+  rockFrac: Float32Array;
+  /** per-cell soil fractions over SOIL_TEXTURES (6 per cell, sums to 1) —
+   *  biome borders blend the pedotransfer instead of switching soils on a
+   *  line (Ground builds one mixed SoilTexture per cell from these) */
+  soilMix: Float32Array;
   minY: number;
   maxY: number;
 }
@@ -326,9 +333,13 @@ export function buildTerrain(seed = 7): TerrainData {
       slope[k] = smax;
     }
   }
-  // river mask + distance field (samples are ~4 m apart — direct eval)
+  // river mask + distance field (samples are ~4 m apart — direct eval).
+  // Gorge samples (bed above 26 m) also stamp GRAVEL: the mountain reach
+  // of the river is a gravel-bedded gorge with gravel bars/banks.
+  const gravelMask = new Float32Array(GRID * GRID);
   for (const p of river) {
     const R = Math.max(p.w * 2.6, 14);
+    const gR = p.bed > 26 ? Math.max(p.w * 2.6, 16) : 0; // gravel halo, gorge only
     const i0 = Math.max(0, Math.floor((p.x - R) / cell)), i1 = Math.min(GRID - 1, Math.ceil((p.x + R) / cell));
     const j0 = Math.max(0, Math.floor((p.y - R) / cell)), j1 = Math.min(GRID - 1, Math.ceil((p.y + R) / cell));
     for (let j = j0; j <= j1; j++) {
@@ -337,6 +348,7 @@ export function buildTerrain(seed = 7): TerrainData {
         const d = Math.hypot((i + 0.5) * cell - p.x, (j + 0.5) * cell - p.y);
         riverDist[k] = Math.min(riverDist[k], d);
         if (d < p.w) riverMask[k] = Math.max(riverMask[k], 1 - (d / p.w) ** 2 * 0.55);
+        if (gR > 0 && d < gR) gravelMask[k] = Math.max(gravelMask[k], 1 - d / gR);
       }
     }
   }
@@ -441,8 +453,15 @@ export function buildTerrain(seed = 7): TerrainData {
         case B_ICE: soil[k] = 0; break;
         default: soil[k] = 1; break; // river bed: alluvial loam
       }
-      // river banks get loam alluvium regardless of biome
+      // river banks get loam alluvium regardless of biome; the GORGE reach
+      // (high bed) is gravel bars and banks instead — the one place stone
+      // carries in the river itself
       if (riverMask[k] > 0.05 || (riverDist[k] < 12 && b !== B_ICE)) soil[k] = Math.min(soil[k], 1);
+      if (gravelMask[k] > 0.12) soil[k] = 5;
+      // scree fans at the foot of the steep dry slopes — gravelly colluvium
+      // (patches wide enough that their interiors stay PURE gravel past the
+      // 5×5 soil blend — the inspector can actually show "Gravel")
+      else if (b === B_ROCKY && slope[k] > 0.5 && h < 42 && n3(((i + 0.5) * cell) / 26, ((j + 0.5) * cell) / 26) > 0.1) soil[k] = 5;
       // the dirt road is built on better-draining loam borrow material
       if (road[k] > 0.35) soil[k] = 1;
       // the settler's meadow at the road's west end (the spawn): cleared
@@ -460,7 +479,66 @@ export function buildTerrain(seed = 7): TerrainData {
     if (tarnMask[k] > 0.35) { pondCap[k] = 1.6; riverIn[k] = 1; }
   }
 
-  return { height, soil, road, biome, moisture, tempC, river: riverMask, pondCap, riverIn, minY: 0, maxY };
+  // ---- 10) bare-rock fraction: the crags finally have stone IN the ground -
+  // rocky scree steepens into bare rock; the massif goes bare with height;
+  // the ice cap rides on rock. Everything else keeps its soil mantle.
+  const rockFrac = new Float32Array(GRID * GRID);
+  for (let k = 0; k < GRID * GRID; k++) {
+    const b = biome[k], h = cellH[k], sl = slope[k];
+    let r = 0;
+    if (b === B_ROCKY) r = 0.45 + 0.55 * Math.min(Math.max((sl - 0.5) / 0.45, 0), 1);
+    else if (b === B_MOUNTAIN) r = Math.min(Math.max((sl - 0.35) / 0.35, 0), 1) * Math.min(Math.max((h - 45) / 30, 0), 1);
+    else if (b === B_ICE) r = 0.8 * Math.min(Math.max((sl - 0.3) / 0.3, 0), 1) + 0.2;
+    // the gorge channel keeps some gravel-on-rock honesty too
+    if (gravelMask[k] > 0.6) r = Math.max(r, 0.25);
+    rockFrac[k] = Math.min(r, 1);
+  }
+
+  // ---- 11) soil fractions: 5×5 blur of the soil map, one channel per
+  // texture — biome borders BLEND the pedotransfer instead of switching on
+  // a line (interior cells collapse back to their pure base texture)
+  const NS = 6;
+  const soilMix = new Float32Array(GRID * GRID * NS);
+  {
+    const tmp = new Float32Array(GRID * GRID * NS);
+    for (let k = 0; k < GRID * GRID; k++) tmp[k * NS + soil[k]] = 1;
+    // separable box blur, radius 2 (5×5), edge-clamped
+    const R = 2;
+    for (let j = 0; j < GRID; j++) {
+      for (let i = 0; i < GRID; i++) {
+        for (let s = 0; s < NS; s++) {
+          let acc = 0, c = 0;
+          for (let d = -R; d <= R; d++) {
+            const ii = i + d;
+            if (ii < 0 || ii >= GRID) continue;
+            acc += tmp[j * GRID * NS + ii * NS + s]; c++;
+          }
+          soilMix[(j * GRID + i) * NS + s] = acc / c;
+        }
+      }
+    }
+    for (let i = 0; i < GRID; i++) {
+      for (let j = 0; j < GRID; j++) {
+        for (let s = 0; s < NS; s++) {
+          let acc = 0, c = 0;
+          for (let d = -R; d <= R; d++) {
+            const jj = j + d;
+            if (jj < 0 || jj >= GRID) continue;
+            acc += soilMix[(jj * GRID + i) * NS + s]; c++;
+          }
+          soilMix[(j * GRID + i) * NS + s] = acc / c;
+        }
+      }
+    }
+    // renormalise (edge clamping loses a little mass)
+    for (let k = 0; k < GRID * GRID; k++) {
+      let sum = 0;
+      for (let s = 0; s < NS; s++) sum += soilMix[k * NS + s];
+      if (sum > 0) for (let s = 0; s < NS; s++) soilMix[k * NS + s] /= sum;
+    }
+  }
+
+  return { height, soil, road, biome, moisture, tempC, river: riverMask, pondCap, riverIn, rockFrac, soilMix, minY: 0, maxY };
 }
 
 /** the valley road's centreline — ONE definition shared by the terrain

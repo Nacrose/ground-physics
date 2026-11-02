@@ -56,8 +56,9 @@ function makeTexture(
 }
 
 /** Texture order: 0 upland sand, 1 slopes loam, 2 valley clay, 3 desert dune
- *  sand, 4 swamp muck. The first three match rwengine exactly; the two new
- *  ones extend the same pedotransfer so the biomes wet and fail consistently. */
+ *  sand, 4 swamp muck, 5 river gravel. The first three match rwengine
+ *  exactly; the new ones extend the same pedotransfer so the biomes wet and
+ *  fail consistently. */
 export const SOIL_TEXTURES: SoilTexture[] = [
   makeTexture("sandy_loam", "Sandy loam", 65, 25, 10, 0.435, 218.0, 4.9, 25.9, 32.0, 3.0, 21.0, 13.0, 0.6),
   makeTexture("loam", "Loam", 40, 42, 18, 0.451, 478.0, 5.25, 13.0, 28.0, 8.0, 27.0, 18.0, 0.5),
@@ -68,7 +69,43 @@ export const SOIL_TEXTURES: SoilTexture[] = [
   // swamp muck: organic, porous, weak — saturated soup with a huge liquid
   // limit; the deepest mud in the world lives here
   makeTexture("muck", "Muck", 18, 47, 35, 0.62, 420.0, 9.0, 1.2, 21.0, 4.0, 60.0, 30.0, 0.3),
+  // river gravel: channel bars and gorge beds — friction-only, drains at
+  // 310 mm/h so RAIN alone can never mud it (only submersion can), and the
+  // one material that gets STRONGER under your boots, not weaker
+  makeTexture("gravel", "Gravel", 82, 12, 6, 0.40, 60.0, 2.7, 310.0, 35.0, 0.5, 18.0, 9.0, 0.7),
 ];
+
+/** Blend the tabulated textures by fraction — the pedotransfer move for
+ *  in-between soils (Cosby/Clapp-Hornberger class properties are smooth in
+ *  texture space). kSat and psiS span decades, so those two interpolate
+ *  LOGARITHMICALLY (an arithmetic mean would pin a 50/50 sand-clar mix at
+ *  half of sand's K; the geometric mean lands it near the real ~2%).
+ *  Fractions need not be normalised — they are here. */
+export function mixTextures(fracs: number[]): SoilTexture {
+  let sand = 0, silt = 0, clay = 0, thetaS = 0, b = 0, kSat = 0, psiS = 0,
+    phi = 0, c = 0, LL = 0, PL = 0, dr = 0, w = 0;
+  for (let i = 0; i < Math.min(fracs.length, SOIL_TEXTURES.length); i++) {
+    const f = Math.max(fracs[i], 0);
+    if (f <= 0) continue;
+    const t = SOIL_TEXTURES[i];
+    sand += f * t.sand; silt += f * t.silt; clay += f * t.clay;
+    thetaS += f * t.thetaS; b += f * t.b;
+    kSat += f * Math.log10(t.kSatMmH); psiS += f * Math.log10(t.psiSmm);
+    phi += f * t.phiDeg; c += f * t.cEffKpa; LL += f * t.LL; PL += f * t.PL;
+    dr += f * t.relDens; w += f;
+  }
+  if (w <= 0) return SOIL_TEXTURES[1];
+  const n = 1 / w;
+  sand *= n; silt *= n; clay *= n; thetaS *= n; b *= n; phi *= n; c *= n;
+  LL *= n; PL *= n; dr *= n;
+  kSat = Math.pow(10, kSat * n); psiS = Math.pow(10, psiS * n);
+  // label: the two heaviest fractions read as "Loam + 22% sand"
+  const order = fracs.map((f, i) => [f, i] as [number, number]).sort((a, b2) => b2[0] - a[0]);
+  const label = order[1] && order[1][0] * n > 0.18
+    ? `${SOIL_TEXTURES[order[0][1]].label.split(" ")[0]} + ${(order[1][0] * n * 100).toFixed(0)}% ${SOIL_TEXTURES[order[1][1]].key.replace(/_/g, " ")}`
+    : SOIL_TEXTURES[order[0][1]].label;
+  return makeTexture("mixed", label, sand, silt, clay, thetaS, psiS, b, kSat, phi, c, LL, PL, dr);
+}
 
 /** Engine constants (rwengine EngineConfig). */
 export const CFG = {
@@ -90,6 +127,16 @@ export const CFG = {
   /** river source (tarn) spring discharge [m³/s] — feeds the channel every
    *  physics tick; the water genuinely travels the D8 route to the map edge */
   riverSpringQ: 0.06,
+  // ---- shallow bedrock (the crags) ------------------------------------
+  /** bearing boost at full bare-rock fraction (rock is a raft: q_ult climbs
+   *  toward what the rock mass itself carries, not the soil mantle) */
+  rockBearingBoost: 3.5,
+  /** infiltration cut at full bare-rock fraction — bare rock sheds rain into
+   *  runoff instead of drinking it (rill water on the crags runs to the scree) */
+  rockInfilCut: 0.85,
+  /** spade refusal threshold: more bare rock than this and the blade
+   *  clinks off instead of biting (dig elsewhere, or tunnel from a face) */
+  rockDigRefuse: 0.5,
   rhoW: 1000.0,
   // ---- mud material (thixotropy / creep / stickiness / desiccation) --------
   // Mud is a Herschel-Bulkley solid-liquid: it has a yield stress (no sink

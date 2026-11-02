@@ -13,14 +13,18 @@ caps** in the NW falls into foothills and a central valley; the prevailing SW
 wind wets its flank (a **rainforest** belt below the crags) and leaves the
 east basin in the lee — a **desert** of longitudinal dunes and saguaro cacti.
 A **river** is born at a tarn high on the massif (the water source: a spring
-that never stops), cuts a gorge down the flank, meanders across the valley
-past the **swamp** lowlands and exits the south map edge. Between them:
-**grassland**, dry **hills**, **forest** and **rocky** scree — each with its
-own soil (the swamp's muck is the deepest mud in the world; the desert's dune
-sand never really muds at all), and the dirt road still fords the river where
-it crosses. The storm makes every one of them differently wet — and the
-minimap, the soil inspector (now with a BIOME row) and the mud itself all
-know where you are.
+that never stops), cuts a **gravel-bedded gorge** down the flank, meanders
+across the valley past the **swamp** lowlands and exits the south map edge.
+Between them: **grassland**, dry **hills**, **forest** and **rocky** scree —
+and the ground itself is six materials now: the swamp's muck is the deepest
+mud in the world, the desert's dune sand never really muds, the gorge's
+**gravel** drinks 310 mm/h so rain alone can never liquefy it (only the
+river submerging it can), the crags carry real **bedrock** at the surface
+(the spade clinks off; the rock sheds rain and rafts a wagon), and biome
+borders **blend their soils** — a fraction-weighted pedotransfer, not a
+switch on a line. The dirt road still fords the river; the storm makes every
+material differently wet; and the minimap, the soil inspector (BIOME /
+TEXTURE / BEDROCK rows) and the mud itself all know where you are.
 
 ![golden hour](docs/screenshot-golden-hour.jpg)
 *Clear Sky preset — golden hour over the valley road.*
@@ -111,6 +115,7 @@ src/
     biomeTint.ts       the ONE vertex-tint formula shared by all three ground
                        meshes (world / contact window / edit ring)
     params.ts          soil texture tables + presets (ported from config.py)
+                       + mixTextures: the fraction-weighted pedotransfer blend
     ground.ts          Green-Ampt, routing, full geotech chain (the physics)
     contact.ts         16 m micro-terrain: boot prints, ruts, spade work, spoil
                        relaxation — volume-conserving soil deformation

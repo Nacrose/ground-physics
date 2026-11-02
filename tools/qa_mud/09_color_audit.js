@@ -92,7 +92,7 @@
       const nM = shNoise(x * 2.9, z * 2.9);
       const nG = shNoise(x * 11.0, z * 11.0);
       const cov = Math.min(Math.max(mud * (0.55 + 0.60 * nP) * (0.82 + 0.18 * nM), 0), 1);
-      const mb = soilId > 0.84 ? [0.055, 0.048, 0.040] : soilId > 0.6 ? [0.22, 0.175, 0.125] : soilId > 0.4 ? [0.096, 0.082, 0.068] : soilId > 0.2 ? [0.138, 0.103, 0.072] : [0.192, 0.152, 0.104];
+      const mb = soilId > 0.9 ? [0.30, 0.27, 0.23] : soilId > 0.7 ? [0.055, 0.048, 0.040] : soilId > 0.5 ? [0.22, 0.175, 0.125] : soilId > 0.3 ? [0.096, 0.082, 0.068] : soilId > 0.1 ? [0.138, 0.103, 0.072] : [0.192, 0.152, 0.104];
       let mudCol = mb.map(v => v * (0.87 + 0.26 * nM) * (0.92 + 0.16 * nG));
       mudCol = mudCol.map(v => v * (1 - 0.18 * (1 - gel)));
       mudCol = mudCol.map(v => v * (0.88 + 0.12 * Math.min(Math.max(wet, 0), 1)));

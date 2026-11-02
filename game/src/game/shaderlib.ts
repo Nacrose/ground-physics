@@ -98,13 +98,15 @@ void mudSurface(inout vec3 col, inout float rough, vec2 wuv, float wet, float mu
   // wet-sheen streaking, not brightness speckle. Remoulded churn darkens;
   // drying mud pales slightly ahead of the crust.
   float gelF = g2.r, crust = g2.g, soilId = g2.a;
-  // five soils now: byte 0/64/128/191/255 → sandy loam / loam / silty clay
-  // loam / dune sand / muck. Every body stays below its own saturated tint
-  // (the darkest-state rule) — muck is the darkest mud in the world.
-  vec3 mudBase = soilId > 0.84 ? vec3(0.055, 0.048, 0.040)        // muck (swamp)
-               : soilId > 0.6 ? vec3(0.22, 0.175, 0.125)          // dune sand
-               : (soilId > 0.4 ? vec3(0.096, 0.082, 0.068)        // silty clay loam
-                               : (soilId > 0.2 ? vec3(0.138, 0.103, 0.072)
+  // six soils now: byte 0/51/102/153/204/255 → sandy loam / loam / silty
+  // clay loam / dune sand / muck / gravel. Every body stays below its own
+  // saturated tint (the darkest-state rule) — muck is the darkest mud in
+  // the world, gravel mud the palest gray-brown.
+  vec3 mudBase = soilId > 0.9 ? vec3(0.30, 0.27, 0.23)          // gravel (bars/gorge)
+               : soilId > 0.7 ? vec3(0.055, 0.048, 0.040)        // muck (swamp)
+               : soilId > 0.5 ? vec3(0.22, 0.175, 0.125)         // dune sand
+               : (soilId > 0.3 ? vec3(0.096, 0.082, 0.068)       // silty clay loam
+                               : (soilId > 0.1 ? vec3(0.138, 0.103, 0.072)
                                                : vec3(0.192, 0.152, 0.104))); // sandy loam
   vec3 mudCol = mudBase * (0.87 + 0.26 * nM) * (0.92 + 0.16 * nG);
   mudCol *= 1.0 - 0.18 * (1.0 - gelF);

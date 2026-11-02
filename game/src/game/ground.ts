@@ -9,7 +9,7 @@
  * Fredlund apparent cohesion, Terzaghi bearing capacity, Atterberg
  * consistency (solid / plastic / liquid MUD), CBR.
  */
-import { CFG, DEG, SOIL_TEXTURES, SoilTexture, bearingFactors, medianDropMm } from "./params";
+import { CFG, DEG, SOIL_TEXTURES, SoilTexture, bearingFactors, medianDropMm, mixTextures } from "./params";
 import { GRID, WORLD_SIZE, TerrainData, cellIndex, B_SWAMP } from "./terrain";
 
 const N = GRID * GRID;
@@ -136,19 +136,42 @@ export class Ground {
   riverOutM3 = 0;
   /** cached river-source (tarn) cell list — the spring discharges here */
   private springCells: number[] = [];
+  /** per-cell EFFECTIVE soil texture — mixed from terrain.soilMix at biome
+   *  borders (interior cells share the pure base object). Every physics
+   *  read goes through this, never SOIL_TEXTURES[soil[k]] again. */
+  cellTex: SoilTexture[];
 
   constructor(terrain: TerrainData, initSat: number) {
     this.terrain = terrain;
     this.theta = [new Float32Array(N), new Float32Array(N), new Float32Array(N), new Float32Array(N)];
     this.springCells = [];
     for (let k = 0; k < N; k++) if (terrain.riverIn[k]) this.springCells.push(k);
+    // mixed textures: fraction-weighted pedotransfer per cell (pure cells
+    // alias the shared base object; blends are CACHED — the 5×5 blur only
+    // ever produces multiples of 1/25, so a few hundred unique mixtures
+    // cover the whole map)
+    this.cellTex = new Array<SoilTexture>(N);
+    const fr = new Array<number>(SOIL_TEXTURES.length);
+    const mixCache = new Map<string, SoilTexture>();
+    for (let k = 0; k < N; k++) {
+      let dom = 0, domF = 0;
+      for (let s = 0; s < SOIL_TEXTURES.length; s++) {
+        fr[s] = terrain.soilMix[k * SOIL_TEXTURES.length + s] ?? 0;
+        if (fr[s] > domF) { domF = fr[s]; dom = s; }
+      }
+      if (domF >= 0.965) { this.cellTex[k] = SOIL_TEXTURES[dom]; continue; }
+      const key = fr.map((f) => Math.round(f * 25)).join(",");
+      let tex = mixCache.get(key);
+      if (!tex) { tex = mixTextures(fr); mixCache.set(key, tex); }
+      this.cellTex[k] = tex;
+    }
     this.reset(initSat);
   }
 
   /** re-initialise all state (weather scenario switch) */
   reset(initSat: number) {
     for (let k = 0; k < N; k++) {
-      const tex = SOIL_TEXTURES[this.terrain.soil[k]];
+      const tex = this.cellTex[k];
       const jit = 0.94 + 0.12 * ((k * 2654435761) % 1000) / 1000;
       // biome climate modulates the preset's uniform saturation: the desert
       // starts dry, the rainforest moist, the swamp near-saturated soup
@@ -348,14 +371,18 @@ export class Ground {
     for (let k = 0; k < N; k++) {
       const avail = hP[k];
       if (avail <= 1e-7) { F[k] = Math.max(F[k], 2e-3); this.wetFlux[k] = 0; continue; }
-      const tex = SOIL_TEXTURES[soil[k]];
+      const tex = this.cellTex[k];
       const seal = 1 - CFG.keSealFrac * Math.min(ke[k] / CFG.keSealJ, 1)
         - CFG.crustSealFrac * this.mudCrust[k]; // dried-mud skin seals too
       // disturbed soil infiltrates faster (crust broken, structure open);
       // compacted paths shed water — the desire-path feedback (spec §2)
       const kTraffic = 1 - 0.12 * Math.min(this.traffic[k], 5);
       const kDig = this.disturbed[k] > 0 ? 1.7 : 1;
-      const ks = (tex.kSatMmH / 3600) / 1000 * seal * kTraffic * kDig; // m/s
+      // bare rock sheds rain: the crags drink a fraction of what soil does
+      // and the rest leaves as rill runoff toward the scree (the stone is
+      // IN the ground now, not just painted on top of it)
+      const kRock = 1 - CFG.rockInfilCut * this.terrain.rockFrac[k];
+      const ks = (tex.kSatMmH / 3600) / 1000 * seal * kTraffic * kDig * kRock; // m/s
       const dTheta = Math.max(tex.thetaS - theta0[k], 1e-3);
       const Fk = Math.max(F[k], 2e-3);
       const psiF = Math.min(
@@ -377,7 +404,7 @@ export class Ground {
     for (let L = 0; L < 3; L++) {
       const th = this.theta[L], thn = this.theta[L + 1];
       for (let k = 0; k < N; k++) {
-        const tex = SOIL_TEXTURES[soil[k]];
+        const tex = this.cellTex[k];
         const excess = th[k] - tex.thetaFc;
         if (excess <= 1e-5) continue;
         const kUnsat = ((tex.kSatMmH / 3600) / 1000) *
@@ -394,7 +421,7 @@ export class Ground {
     {
       const th = this.theta[3];
       for (let k = 0; k < N; k++) {
-        const tex = SOIL_TEXTURES[soil[k]];
+        const tex = this.cellTex[k];
         const excess = th[k] - tex.thetaFc;
         if (excess <= 1e-5) continue;
         const kUnsat = ((tex.kSatMmH / 3600) / 1000) *
@@ -414,7 +441,7 @@ export class Ground {
       const ePot = (4e-3 * f.sw * (1 + 0.35 * f.windMs) * dq * 1.2) / 1000; // m/s
       const ePotDt = ePot * dt;
       for (let k = 0; k < N; k++) {
-        const tex = SOIL_TEXTURES[soil[k]];
+        const tex = this.cellTex[k];
         // puddle evaporation at full potential
         const ePond = Math.min(ePotDt, this.hPond[k]);
         this.hPond[k] -= ePond;
@@ -465,7 +492,7 @@ export class Ground {
     {
       const dth = dt / 3600;
       for (let k = 0; k < N; k++) {
-        const tex = SOIL_TEXTURES[soil[k]];
+        const tex = this.cellTex[k];
         // (a) gel recovery — clay-fraction-scaled (sand has no gel to rebuild)
         if (tex.clay > 2 && this.gel[k] < 1) {
           const tau = CFG.gelTauH / tex.clay; // 30% clay ≈ 6 game-hours
@@ -599,7 +626,7 @@ export class Ground {
           if (this.microCovered[k]) continue; // the contact tier owns it
           const load = this.sedKg[k];
           if (h[k] <= 1e-3 && load <= 1e-9) continue;
-          const tex = SOIL_TEXTURES[soil[k]];
+          const tex = this.cellTex[k];
           // shear on the routed film (slope captured by the routing pass)
           const tau = 1000 * 9.81 * h[k] * Math.max(slopeOf[k], 0.01); // Pa
           const armor = Math.min(this.keCum[k] / CFG.keSealJ, 1) * (this.disturbed[k] > 0 ? 0.25 : 1);
@@ -657,7 +684,7 @@ export class Ground {
     const soil = this.terrain.soil;
     const th0 = this.theta[0], th1 = this.theta[1];
     for (let k = 0; k < N; k++) {
-      const tex = SOIL_TEXTURES[soil[k]];
+      const tex = this.cellTex[k];
       const th = (CFG.soilDz[0] / 0.3) * th0[k] + (CFG.soilDz[1] / 0.3) * th1[k];
       const Sr = Math.max(0, Math.min(th / tex.thetaS, 1));
       const wPct = (100 * th * 1000) / tex.rhoDry;
@@ -684,6 +711,9 @@ export class Ground {
       const [Nq, Nc, Ng] = bearingFactors(phiEff);
       let qUlt = 1.2 * cEff * Nc + 0.4 * gammaEff * CFG.footingB * Ng;
       qUlt = Math.max(qUlt, 2);
+      // shallow bedrock is a raft: the soil mantle can be soup and the rock
+      // below still carries the load (the crags hold a wagon, mud or not)
+      qUlt *= 1 + CFG.rockBearingBoost * this.terrain.rockFrac[k];
       // shear strength at 0.3 m
       const sigmaV = gammaBulk * 0.3;
       const uPos = submerged && Sr >= 0.999 ? CFG.gammaW * this.hPond[k] * 1000 : 0;
@@ -717,7 +747,9 @@ export class Ground {
       // smooth mud factor: ramps through plastic → past LL
       const mud = Math.max(0, Math.min((wPct - (tex.PL + 0.55 * (tex.LL - tex.PL))) /
         (0.6 * (tex.LL - tex.PL)), 1));
-      this.mudFactor[k] = mud * mud * (3 - 2 * mud); // smoothstep
+      // bare rock cannot soup: the visible mud fraction dies with the soil
+      // mantle (a crag tops out as wet stained rock, never a mud field)
+      this.mudFactor[k] = mud * mud * (3 - 2 * mud) * (1 - 0.85 * this.terrain.rockFrac[k]);
       // wetness for darkening: saturation of the top layer
       this.wetness[k] = Math.max(0, Math.min((th0[k] - tex.thetaWp) / (tex.thetaS - tex.thetaWp), 1));
     }
@@ -744,7 +776,7 @@ export class Ground {
     const E = 120 * Math.max(this.suction[k] * this.sr[k] + 3, 10);
     const sEl = (contactKpa * CFG.footingB * (1 - 0.3 * 0.3)) / E;
     const excess = Math.max(contactKpa - qUlt, 0);
-    const tex = SOIL_TEXTURES[this.terrain.soil[k]];
+    const tex = this.cellTex[k];
     const [Nq] = bearingFactors(tex.phiEff);
     let sPl = excess > 0 ? Math.min(excess / Math.max(tex.gammaDry * Nq, 1), CFG.maxRutM) : 0;
     if (this.consistency[k] === 2) sPl = Math.max(sPl, isPlayer ? 0.22 : 0.35);
@@ -755,7 +787,7 @@ export class Ground {
       sPl = Math.min(sPl + CFG.mudCreepRate * (ratio - 1) * dwellS * ramp,
         isPlayer ? 0.3 : CFG.maxRutM);
     }
-    const sTotal = Math.max(0, Math.min(sEl + sPl, isPlayer ? 0.32 : CFG.maxRutM));
+    const sTotal = Math.max(0, Math.min((sEl + sPl) * (1 - 0.9 * this.terrain.rockFrac[k]), isPlayer ? 0.32 : CFG.maxRutM));
     this.rut[k] = Math.min(this.rut[k] + sTotal * (isPlayer ? 0.35 : 1), CFG.maxRutM + 0.2);
     const verdict = sTotal < 0.05 ? "PASSABLE" : sTotal < 0.25 ? "MARGINAL (rutting)" : "BOGGED";
     return { sinkage: sTotal, verdict };
@@ -772,7 +804,8 @@ export class Ground {
     const ratio = contactKpa / q;
     if (ratio <= 1) return 0; // below yield: a gel holds the boot up
     const ramp = Math.min(dwellS / CFG.mudCreepRampS, 1);
-    const inc = Math.min(CFG.mudCreepRate * (ratio - 1) * dwellS * ramp, 0.01);
+    const inc = Math.min(CFG.mudCreepRate * (ratio - 1) * dwellS * ramp, 0.01)
+      * (1 - 0.9 * this.terrain.rockFrac[k]);
     this.rut[k] = Math.min(this.rut[k] + inc * 0.5, CFG.maxRutM + 0.2);
     // standing churn also slowly remolds what it rests on
     if (this.consistency[k] >= 1) this.gel[k] = Math.max(0, this.gel[k] - 0.01 * dwellS);
@@ -825,7 +858,8 @@ export class Ground {
     const kComp = 1 - 0.08 * Math.min(this.traffic[k], 5);
     // remolded (low-gel) liquid mud takes a deeper print than rested mud
     const kRemold = 1 + 0.4 * (1 - this.gel[k]) * (this.consistency[k] === 2 ? 1 : 0.25);
-    const sink = (mud * 0.24 * kRemold + Math.min(this.rut[k], 0.2)) * kComp;
+    const sink = (mud * 0.24 * kRemold + Math.min(this.rut[k], 0.2)) * kComp
+      * (1 - 0.9 * this.terrain.rockFrac[k]);
     return { mud, pondM: pond, slow, sink, rut: this.rut[k], stick: this.stick[k], gel: this.gel[k] };
   }
 
@@ -835,7 +869,7 @@ export class Ground {
 
   cellReport(x: number, y: number): CellReport {
     const k = cellIndex(x, y);
-    const tex = SOIL_TEXTURES[this.terrain.soil[k]];
+    const tex = this.cellTex[k];
     const Fk = Math.max(this.infiltF[k], 2e-3);
     const dTheta = Math.max(tex.thetaS - this.theta[0][k], 1e-3);
     const psiF = Math.min(Math.max((tex.psiSmm / 1000) *
