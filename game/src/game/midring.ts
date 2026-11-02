@@ -23,6 +23,7 @@
  */
 import * as THREE from "three";
 import { WORLD_SIZE, TerrainData, sampleHeight } from "./terrain";
+import { vertexTint } from "./biomeTint";
 import { MicroTerrain } from "./contact";
 
 const HALF = WORLD_SIZE / 2;
@@ -64,10 +65,6 @@ export class MidRing {
   private readonly geo: THREE.PlaneGeometry;
   private readonly pos: THREE.BufferAttribute;
   private readonly col: THREE.BufferAttribute;
-  // painterly tint — identical recipe to World.buildTerrainMesh (non-allocating)
-  private readonly cDry = new THREE.Color(0xb9985a);
-  private readonly cLush = new THREE.Color(0x7d8a4e);
-  private readonly cRock = new THREE.Color(0x8d8478);
   private readonly cTmp = new THREE.Color();
 
   constructor(private terrain: TerrainData, private micro: MicroTerrain) {
@@ -158,11 +155,10 @@ export class MidRing {
         const h = sampleHeight(this.terrain, x + HALF, z + HALF);
         const k = j * (MID_SEG + 1) + i;
         pos.setXYZ(k, x, h, z);
-        const hn = Math.min(Math.max(h / 18, 0), 1);
-        c.copy(this.cDry).lerp(this.cLush, 1 - hn);
-        if (h > 14.5) c.lerp(this.cRock, Math.min((h - 14.5) / 5, 0.6));
-        const m = 0.92 + 0.16 * Math.sin(x * 0.171 + z * 0.137) * Math.sin(x * 0.043 - z * 0.061);
-        col.setXYZ(k, c.r * m, c.g * m, c.b * m);
+        // identical tint to world.buildTerrainMesh — the shared biomeTint
+        // vertexTint (one definition, all three ground meshes)
+        vertexTint(this.terrain, x, z, h, c);
+        col.setXYZ(k, c.r, c.g, c.b);
       }
     }
     pos.needsUpdate = true;

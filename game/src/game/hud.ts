@@ -186,20 +186,32 @@ export class HUD {
     const ctx = this.mapBase.getContext("2d")!;
     const img = ctx.createImageData(GRID, GRID);
     const cell = WORLD_SIZE / GRID;
+    // biome palette (matches the terrain vertex tint hues)
+    const bcol: Array<[number, number, number]> = [
+      [185, 152, 90], // grassland
+      [94, 108, 64], // forest
+      [168, 154, 94], // hills
+      [63, 94, 48], // rainforest
+      [217, 181, 124], // desert
+      [85, 82, 55], // swamp
+      [141, 132, 120], // rocky
+      [125, 122, 116], // mountain
+      [237, 241, 244], // ice
+      [107, 91, 68], // river bed
+    ];
     for (let j = 0; j < GRID; j++) {
       for (let i = 0; i < GRID; i++) {
         const k = j * GRID + i;
         const h = (terrain.height[j * (GRID + 1) + i] + terrain.height[(j + 1) * (GRID + 1) + i + 1]) / 2;
-        const soil = terrain.soil[k];
-        const hn = Math.min(h / 18, 1);
-        let r: number, g: number, b: number;
-        if (soil === 2) { r = 122; g = 108; b = 84; } // valley clay
-        else if (soil === 1) { r = 138; g = 132; b = 86; } // loam slopes
-        else { r = 158; g = 141; b = 92; } // sandy upland
-        const shade = 0.72 + hn * 0.5;
-        r *= shade; g *= shade; b *= shade;
-        if (terrain.road[k] > 0.35) { r = 96; g = 82; b = 62; }
-        img.data[k * 4] = r; img.data[k * 4 + 1] = g; img.data[k * 4 + 2] = b; img.data[k * 4 + 3] = 255;
+        const b = terrain.biome[k];
+        const [r, g, bl] = bcol[b] ?? bcol[0];
+        // hillshade: brighter crests, darker hollows (relief reads on the map)
+        const shade = 0.66 + Math.min(Math.max(h / 70, 0), 1) * 0.55;
+        img.data[k * 4] = Math.min(255, r * shade);
+        img.data[k * 4 + 1] = Math.min(255, g * shade);
+        img.data[k * 4 + 2] = Math.min(255, bl * shade);
+        img.data[k * 4 + 3] = 255;
+        if (terrain.road[k] > 0.35) { img.data[k * 4] = 96; img.data[k * 4 + 1] = 82; img.data[k * 4 + 2] = 62; }
       }
     }
     ctx.putImageData(img, 0, 0);

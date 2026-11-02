@@ -5,7 +5,8 @@
  * valley wagon (the trafficability stage).
  */
 import * as THREE from "three";
-import { GRID, MESH_SEG, WORLD_SIZE, TerrainData, sampleHeight, terrainNormal } from "./terrain";
+import { GRID, MESH_SEG, WORLD_SIZE, TerrainData, sampleHeight, terrainNormal, roadCenterY, BIOMES, B_RAINFOREST, B_SWAMP, B_ROCKY, B_DESERT, B_HILLS, B_GRASSLAND, B_MOUNTAIN, B_ICE } from "./terrain";
+import { vertexTint } from "./biomeTint";
 import { Ground } from "./ground";
 import { MicroTerrain, MICRO_SIZE, MICRO_HALF, DELTA_ENCODE, WTEXEL } from "./contact";
 import { MidRing } from "./midring";
@@ -53,6 +54,13 @@ export class World {
   grass: THREE.InstancedMesh;
   treesTrunk: THREE.InstancedMesh;
   treesCanopy: THREE.InstancedMesh;
+  /** conifer family (taiga belt + mountain fringe) */
+  coniferTrunk: THREE.InstancedMesh;
+  coniferCanopy: THREE.InstancedMesh;
+  coniferTip: THREE.InstancedMesh;
+  /** saguaro cacti (desert) */
+  cacti: THREE.InstancedMesh;
+  cactiArms: THREE.InstancedMesh;
   rocks: THREE.InstancedMesh;
   wagon: THREE.Group;
   terrainMesh: THREE.Mesh;
@@ -67,6 +75,8 @@ export class World {
 
   private cloudMats: THREE.SpriteMaterial[] = [];
   private canopyMat: THREE.MeshStandardMaterial;
+  private coniferMat!: THREE.MeshStandardMaterial;
+  private cactusMat!: THREE.MeshStandardMaterial;
   private grassCount: number;
   private baseGrassCount: number;
   private micro: MicroTerrain | null;
@@ -170,7 +180,9 @@ export class World {
     this.buildRocks();
     this.buildWagon();
 
-    scene.fog = new THREE.FogExp2(0xe6d2ac, 0.0026);
+    // thinner clear-sky haze: the mountain massif has to read from the
+    // valley floor (~450 m away) instead of dissolving into golden fog
+    scene.fog = new THREE.FogExp2(0xe6d2ac, 0.0011);
   }
 
   // ------------------------------------------------------------------ terrain
@@ -191,15 +203,11 @@ export class World {
       // around it (no visible seam where the two meshes meet)
       terrainNormal(this.terrain, x + HALF, z + HALF, n);
       nrm.setXYZ(i, n[0], n[1], n[2]);
-      // painterly vertex tint: dry golden uplands, greener lows, rock high
-      const hn = Math.min(Math.max(h / 18, 0), 1);
-      const dry = new THREE.Color(0xb9985a); // dry golden grass
-      const lush = new THREE.Color(0x7d8a4e); // greener lowland
-      c.copy(dry).lerp(lush, 1 - hn);
-      if (h > 14.5) c.lerp(new THREE.Color(0x8d8478), Math.min((h - 14.5) / 5, 0.6)); // rocky ridge
-      // subtle mottling
-      const m = 0.92 + 0.16 * Math.sin(x * 0.171 + z * 0.137) * Math.sin(x * 0.043 - z * 0.061);
-      colors[i * 3] = c.r * m; colors[i * 3 + 1] = c.g * m; colors[i * 3 + 2] = c.b * m;
+      // painterly vertex tint: the SHARED biome formula (biomeTint.ts) — the
+      // contact overlay and the mid ring bake the exact same field, so all
+      // three surfaces shade identically wherever they hand over
+      vertexTint(this.terrain, x, z, h, c);
+      colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
     }
     geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
     nrm.needsUpdate = true;
@@ -571,11 +579,12 @@ float liftAt(in vec2 wuv){
         uLiftTex: { value: this.liftTex },
         uMicroOrigin: { value: new THREE.Vector2(0, 0) },
         uFogColor: { value: new THREE.Color(0xe6d2ac) },
-        uFogDensity: { value: 0.0026 },
+        uFogDensity: { value: 0.0011 },
         uFadeR: { value: 118.0 },
       },
       vertexShader: `
         attribute float aRand;
+        attribute vec3 aTint;
         uniform float uTime, uWind, uWorldSize, uFadeR;
         uniform vec2 uWindDir, uMicroOrigin;
         uniform vec3 uCamPos;
@@ -584,12 +593,13 @@ float liftAt(in vec2 wuv){
         uniform float uMidOn;
         varying vec2 vUv;
         varying float vRand;
+        varying vec3 vTint;
         varying float vWet;
         varying float vWind;
         varying float vViewDist;
         varying float vTrample;
         void main(){
-          vUv = uv; vRand = aRand;
+          vUv = uv; vRand = aRand; vTint = aTint;
           vec4 ipos = instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
           vec2 guv = vec2(ipos.x / uWorldSize + 0.5, ipos.z / uWorldSize + 0.5);
           vec4 g = texture2D(uGroundTex, guv);
@@ -648,10 +658,12 @@ float liftAt(in vec2 wuv){
         uniform float uSunI, uFogDensity;
         varying vec2 vUv;
         varying float vRand, vWet, vWind, vViewDist, vTrample;
+        varying vec3 vTint;
         void main(){
-          // golden dry grass with per-blade variation; greener when wet
-          vec3 dry = vec3(0.82, 0.64, 0.30);
-          vec3 lush = vec3(0.42, 0.48, 0.24);
+          // biome blade colour: dry face slightly lifted, wet face deep-green
+          // (the biome hue carries; moisture only shifts value + hue a touch)
+          vec3 dry = vTint * 1.16;
+          vec3 lush = vTint * vec3(0.55, 0.74, 0.42);
           vec3 col = mix(dry, lush, vRand * 0.35 + vWet * 0.40);
           col *= 0.8 + 0.45 * vUv.y; // dark base → lit tip
           // trampled: dusty trodden straw — the path reads THROUGH the grass
@@ -678,6 +690,8 @@ float liftAt(in vec2 wuv){
     const scl = new THREE.Vector3();
     const posv = new THREE.Vector3();
     const rands = new Float32Array(this.grassCount);
+    const tints = new Float32Array(this.grassCount * 3);
+    const grassCols = BIOMES.map((b) => new THREE.Color(b.grassColor));
     let seed = 99;
     const rnd = () => { seed = (seed * 69621) % 2147483647; return seed / 2147483647; };
     let placed = 0;
@@ -687,21 +701,26 @@ float liftAt(in vec2 wuv){
     while (placed < this.grassCount) {
       const i = Math.floor(rnd() * GRID), j = Math.floor(rnd() * GRID);
       const k = j * GRID + i;
-      const soilId = this.terrain.soil[k];
+      const bd = BIOMES[this.terrain.biome[k]];
       const road = this.terrain.road[k];
-      // grass favours upland/slopes, avoids road & heavy clay valley
-      const p = soilId === 0 ? 0.95 : soilId === 1 ? 0.72 : 0.16;
-      if (rnd() > p * (1 - road * 0.92)) continue;
+      // biome density (grassland/rainforest thick, desert sparse, ice bare),
+      // still dodging the road like every version of this meadow
+      if (rnd() > bd.grassP * (1 - road * 0.92)) continue;
       const x = (i + rnd()) * cell - HALF;
       const z = (j + rnd()) * cell - HALF;
       const y = sampleHeight(this.terrain, x + HALF, z + HALF) - 0.03;
-      const s = 0.55 + rnd() * 0.9;
+      const s = (0.55 + rnd() * 0.9) * bd.grassH;
       posv.set(x, y, z);
       q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rnd() * Math.PI * 2);
       scl.set(s, s * (0.7 + rnd() * 0.75), s);
       m.compose(posv, q, scl);
       this.grass.setMatrixAt(placed, m);
       rands[placed] = rnd();
+      const gc = grassCols[this.terrain.biome[k]];
+      const jitter = 0.82 + rnd() * 0.36;
+      tints[placed * 3] = gc.r * jitter;
+      tints[placed * 3 + 1] = gc.g * jitter;
+      tints[placed * 3 + 2] = gc.b * jitter;
       this.grassX[placed] = x;
       this.grassZ[placed] = z;
       const bk = Math.floor(x / GRASS_BUCKET) * 4096 + Math.floor(z / GRASS_BUCKET);
@@ -710,6 +729,7 @@ float liftAt(in vec2 wuv){
       placed++;
     }
     geo.setAttribute("aRand", new THREE.InstancedBufferAttribute(rands, 1));
+    geo.setAttribute("aTint", new THREE.InstancedBufferAttribute(tints, 3));
     this.grass.instanceMatrix.needsUpdate = true;
     this.scene.add(this.grass);
   }
@@ -793,28 +813,38 @@ float liftAt(in vec2 wuv){
   }
 
   // -------------------------------------------------------------------- trees
-  private scatterOnUplands(count: number, minH: number): Array<[number, number, number]> {
-    const out: Array<[number, number, number]> = [];
-    let seed = 1234;
+  /** biome scatter: rejection-sample candidate cells, then place per the
+   *  biome's tree/conifer/cactus probabilities. Avoids the road. */
+  private scatterByBiome(kind: "tree" | "conifer" | "cactus"):
+    Array<{ x: number; y: number; z: number; biome: number; h: number }> {
+    const out: Array<{ x: number; y: number; z: number; biome: number; h: number }> = [];
+    let seed = kind === "tree" ? 1234 : kind === "conifer" ? 4321 : 777;
     const rnd = () => { seed = (seed * 48271) % 2147483647; return seed / 2147483647; };
     const cell = WORLD_SIZE / GRID;
+    const target = kind === "tree" ? 2400 : kind === "conifer" ? 1400 : 400;
     let guard = 0;
-    while (out.length < count && guard < count * 60) {
+    while (out.length < target && guard < target * 80) {
       guard++;
       const i = Math.floor(rnd() * GRID), j = Math.floor(rnd() * GRID);
       const k = j * GRID + i;
-      if (this.terrain.soil[k] === 2) continue; // no trees in clay valley
       if (this.terrain.road[k] > 0.25) continue;
-      const x = (i + rnd()) * cell - HALF, z = (j + rnd()) * cell - HALF;
-      const h = sampleHeight(this.terrain, x + HALF, z + HALF);
-      if (h < minH) continue;
-      out.push([x, h, z]);
+      const b = this.terrain.biome[k];
+      const bd = BIOMES[b];
+      const p = kind === "tree" ? bd.treeP : kind === "conifer" ? bd.coniferP : bd.cactusP;
+      if (p <= 0 || rnd() > p) continue;
+      const n = p >= 0.9 ? 2 : 1; // rainforest packs doubles
+      for (let c = 0; c < n && out.length < target; c++) {
+        const x = (i + rnd()) * cell - HALF, z = (j + rnd()) * cell - HALF;
+        const h = sampleHeight(this.terrain, x + HALF, z + HALF);
+        out.push({ x, y: h, z, biome: b, h });
+      }
     }
     return out;
   }
 
   private buildTrees() {
-    const spots = this.scatterOnUplands(90, 4.5);
+    // ---- broadleaf family (grassland, forest, rainforest, swamp, hills) --
+    const spots = this.scatterByBiome("tree");
     const trunkGeo = new THREE.CylinderGeometry(0.16, 0.30, 3.1, 6);
     trunkGeo.translate(0, 1.55, 0);
     const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5a4632, roughness: 0.9, flatShading: true });
@@ -827,36 +857,152 @@ float liftAt(in vec2 wuv){
     const m = new THREE.Matrix4(), q = new THREE.Quaternion(), scl = new THREE.Vector3(), p = new THREE.Vector3();
     let seed = 77;
     const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
-    spots.forEach(([x, y, z], idx) => {
-      const s = 0.75 + rnd() * 0.85;
-      p.set(x, y - 0.1, z);
+    const canopyCol = new THREE.Color();
+    const rainDeep = new THREE.Color(0x2c4a22);
+    const temperate = new THREE.Color(0x55603a);
+    const swampPale = new THREE.Color(0x6b7a4a);
+    spots.forEach((sp, idx) => {
+      // rainforest trees run tall + deep green; grassland stocky; swamp pale
+      const tropical = sp.biome === B_RAINFOREST;
+      const tall = tropical ? 1.35 + rnd() * 0.75 : 0.75 + rnd() * 0.85;
+      const sw = sp.biome === B_SWAMP ? 0.85 : 1.0;
+      const s = tropical ? 0.9 + rnd() * 0.7 : 0.75 + rnd() * 0.85;
+      p.set(sp.x, sp.y - 0.1, sp.z);
       q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rnd() * Math.PI * 2);
-      scl.set(s, s * (0.9 + rnd() * 0.5), s);
+      scl.set(s, tall * sw, s);
       m.compose(p, q, scl);
       this.treesTrunk.setMatrixAt(idx, m);
       this.treesCanopy.setMatrixAt(idx, m);
+      canopyCol.copy(temperate);
+      if (tropical) canopyCol.lerp(rainDeep, 0.55 + rnd() * 0.35);
+      else if (sp.biome === B_SWAMP) canopyCol.copy(swampPale);
+      else if (sp.biome === B_GRASSLAND) canopyCol.offsetHSL(0.02, 0.05, 0.04 * rnd());
+      canopyCol.offsetHSL((rnd() - 0.5) * 0.02, 0, (rnd() - 0.5) * 0.05);
+      this.treesCanopy.setColorAt(idx, canopyCol);
     });
     this.treesTrunk.castShadow = true;
     this.treesCanopy.castShadow = true;
     this.scene.add(this.treesTrunk, this.treesCanopy);
+
+    // ---- conifer family (forest belt, mountain fringe, dry hills) --------
+    const cSpots = this.scatterByBiome("conifer");
+    const cTrunkGeo = new THREE.CylinderGeometry(0.12, 0.24, 2.6, 6);
+    cTrunkGeo.translate(0, 1.3, 0);
+    const cTrunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3a2a, roughness: 0.92, flatShading: true });
+    this.coniferTrunk = new THREE.InstancedMesh(cTrunkGeo, cTrunkMat, cSpots.length);
+    const coneGeo = new THREE.ConeGeometry(1.55, 4.6, 7);
+    coneGeo.translate(0, 4.4, 0);
+    const cone2Geo = new THREE.ConeGeometry(1.05, 3.0, 7);
+    cone2Geo.translate(0, 6.6, 0);
+    this.coniferMat = new THREE.MeshStandardMaterial({ color: 0x2e4632, roughness: 0.88, flatShading: true });
+    this.coniferCanopy = new THREE.InstancedMesh(coneGeo, this.coniferMat, cSpots.length);
+    this.coniferTip = new THREE.InstancedMesh(cone2Geo, this.coniferMat, cSpots.length);
+    const coniferCol = new THREE.Color();
+    const taiga = new THREE.Color(0x2e4632);
+    const alpine = new THREE.Color(0x46584a);
+    let cseed = 31;
+    const crnd = () => { cseed = (cseed * 16807) % 2147483647; return cseed / 2147483647; };
+    cSpots.forEach((s, idx) => {
+      const sc = 0.7 + crnd() * 0.8 + Math.min(s.h / 90, 0.35); // bigger up high
+      p.set(s.x, s.y - 0.1, s.z);
+      q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), crnd() * Math.PI * 2);
+      scl.set(sc * 0.9, sc, sc * 0.9);
+      m.compose(p, q, scl);
+      this.coniferTrunk.setMatrixAt(idx, m);
+      this.coniferCanopy.setMatrixAt(idx, m);
+      this.coniferTip.setMatrixAt(idx, m);
+      coniferCol.copy(taiga).lerp(alpine, Math.min(s.h / 70, 0.55) * crnd());
+      coniferCol.offsetHSL((crnd() - 0.5) * 0.015, 0, (crnd() - 0.5) * 0.04);
+      this.coniferCanopy.setColorAt(idx, coniferCol);
+      this.coniferTip.setColorAt(idx, coniferCol);
+    });
+    this.coniferTrunk.castShadow = true;
+    this.coniferCanopy.castShadow = true;
+    this.scene.add(this.coniferTrunk, this.coniferCanopy, this.coniferTip);
+
+    // ---- cactus family (desert) ------------------------------------------
+    const kSpots = this.scatterByBiome("cactus");
+    if (kSpots.length > 0) {
+      const kGeo = new THREE.CylinderGeometry(0.28, 0.34, 2.3, 7);
+      kGeo.translate(0, 1.15, 0);
+      const armGeo = new THREE.CylinderGeometry(0.17, 0.19, 1.0, 6);
+      armGeo.translate(0, 0.5, 0);
+      this.cactusMat = new THREE.MeshStandardMaterial({ color: 0x4f7a3d, roughness: 0.82, flatShading: true });
+      this.cacti = new THREE.InstancedMesh(kGeo, this.cactusMat, kSpots.length);
+      this.cactiArms = new THREE.InstancedMesh(armGeo, this.cactusMat, kSpots.length * 2);
+      const kcol = new THREE.Color(0x4f7a3d);
+      let kseed = 5150;
+      const krnd = () => { kseed = (kseed * 48271) % 2147483647; return kseed / 2147483647; };
+      let armIdx = 0;
+      kSpots.forEach((s, idx) => {
+        const sc = 0.7 + krnd() * 0.85;
+        p.set(s.x, s.y - 0.05, s.z);
+        q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), krnd() * Math.PI * 2);
+        scl.set(sc, sc * (0.8 + krnd() * 0.7), sc);
+        m.compose(p, q, scl);
+        this.cacti.setMatrixAt(idx, m);
+        this.cacti.setColorAt(idx, kcol.clone().offsetHSL(0, (krnd() - 0.5) * 0.06, (krnd() - 0.5) * 0.06));
+        for (let a = 0; a < 2; a++) {
+          if (krnd() < 0.35) continue;
+          const side = krnd() < 0.5 ? 1 : -1;
+          p.set(s.x + side * 0.42 * sc, s.y + 0.55 * sc + krnd() * 0.5, s.z);
+          q.setFromEuler(new THREE.Euler(0, 0, side * (Math.PI / 2 - 0.5)));
+          scl.set(sc * 0.8, sc * 0.9, sc * 0.8);
+          m.compose(p, q, scl);
+          this.cactiArms.setMatrixAt(armIdx, m);
+          armIdx++;
+        }
+      });
+      this.cactiArms.count = armIdx;
+      this.cacti.castShadow = true;
+      this.scene.add(this.cacti, this.cactiArms);
+    }
   }
 
   // -------------------------------------------------------------------- rocks
   private buildRocks() {
-    const spots = this.scatterOnUplands(130, 6.5);
+    // scree + boulder fields: rocky/mountain/ice get the dense scatter,
+    // desert edges and hills get a sprinkle
+    const spots: Array<{ x: number; y: number; z: number; biome: number }> = [];
+    let seed = 313;
+    const rnd = () => { seed = (seed * 48271) % 2147483647; return seed / 2147483647; };
+    const cell = WORLD_SIZE / GRID;
+    const target = 380;
+    let guard = 0;
+    while (spots.length < target && guard < target * 60) {
+      guard++;
+      const i = Math.floor(rnd() * GRID), j = Math.floor(rnd() * GRID);
+      const k = j * GRID + i;
+      if (this.terrain.road[k] > 0.25) continue;
+      const b = this.terrain.biome[k];
+      const p = b === B_ROCKY ? 0.85 : b === B_MOUNTAIN ? 0.5 : b === B_ICE ? 0.3
+        : b === B_DESERT ? 0.06 : b === B_HILLS ? 0.1 : 0.03;
+      if (rnd() > p) continue;
+      const x = (i + rnd()) * cell - HALF, z = (j + rnd()) * cell - HALF;
+      spots.push({ x, y: sampleHeight(this.terrain, x + HALF, z + HALF), z, biome: b });
+    }
     const geo = new THREE.DodecahedronGeometry(0.55, 0);
     const mat = new THREE.MeshStandardMaterial({ color: 0x8a8177, roughness: 0.95, flatShading: true });
     this.rocks = new THREE.InstancedMesh(geo, mat, spots.length);
     const m = new THREE.Matrix4(), q = new THREE.Quaternion(), scl = new THREE.Vector3(), p = new THREE.Vector3();
-    let seed = 313;
-    const rnd = () => { seed = (seed * 48271) % 2147483647; return seed / 2147483647; };
-    spots.forEach(([x, y, z], idx) => {
-      const s = 0.4 + rnd() * 1.5;
-      p.set(x, y - 0.15 * s, z);
-      q.setFromEuler(new THREE.Euler(rnd() * 0.6, rnd() * Math.PI * 2, rnd() * 0.6));
-      scl.set(s, s * (0.5 + rnd() * 0.5), s);
+    let rseed = 313;
+    const rrnd = () => { rseed = (rseed * 48271) % 2147483647; return rseed / 2147483647; };
+    const rcol = new THREE.Color();
+    const gray = new THREE.Color(0x8a8177);
+    const highGray = new THREE.Color(0xa3a49e);
+    const desertRed = new THREE.Color(0xa07b5c);
+    spots.forEach((s, idx) => {
+      const big = s.biome === B_ROCKY || s.biome === B_MOUNTAIN;
+      const sc = (big ? 0.5 : 0.35) + rrnd() * (big ? 2.1 : 1.3);
+      p.set(s.x, s.y - 0.15 * sc, s.z);
+      q.setFromEuler(new THREE.Euler(rrnd() * 0.6, rrnd() * Math.PI * 2, rrnd() * 0.6));
+      scl.set(sc, sc * (0.5 + rrnd() * 0.5), sc);
       m.compose(p, q, scl);
       this.rocks.setMatrixAt(idx, m);
+      rcol.copy(gray);
+      if (s.biome === B_MOUNTAIN || s.biome === B_ICE) rcol.lerp(highGray, rrnd() * 0.6);
+      else if (s.biome === B_DESERT) rcol.lerp(desertRed, 0.45 + rrnd() * 0.3);
+      this.rocks.setColorAt(idx, rcol);
     });
     this.rocks.castShadow = true;
     this.scene.add(this.rocks);
@@ -887,11 +1033,11 @@ float liftAt(in vec2 wuv){
     shaft.position.set(2.0, 0.62, 0.3);
     const shaft2 = shaft.clone(); shaft2.position.z = -0.3;
     this.wagon.add(shaft, shaft2);
-    // park it on the road in the clay valley
-    // (wx/wz are already in the 0..WORLD_SIZE frame that sampleHeight expects)
-    const roadY = (x: number) => 0.30 + 0.08 * Math.sin((x / WORLD_SIZE) * Math.PI * 1.7 + 0.4);
+    // park it on the road in the valley (roadCenterY is the terrain's own
+    // road definition — wx/wz are already in the 0..WORLD_SIZE frame that
+    // sampleHeight expects)
     const wx = 40;
-    const wz = roadY(wx) * WORLD_SIZE;
+    const wz = roadCenterY(wx);
     const wy = sampleHeight(this.terrain, wx, wz);
     this.wagon.position.set(wx - HALF, wy - 0.06, wz - HALF);
     this.wagon.rotation.y = 0.35;
@@ -932,11 +1078,12 @@ float liftAt(in vec2 wuv){
     this.sun.position.set(px + sd.x * 220, sd.y * 220 + 40, pz + sd.z * 220);
     this.sun.target.position.set(px, 0, pz);
 
-    // fog & sky tint respond to cloudiness
+    // fog & sky tint respond to cloudiness (clear sky stays THIN now — see
+    // the constructor note — so the mountain biomes read from the valley)
     const fog = this.scene.fog as THREE.FogExp2;
     const clearC = new THREE.Color(0xe6d2ac), stormC = new THREE.Color(0x5c646e);
     fog.color.copy(clearC).lerp(stormC, cloudiness);
-    fog.density = 0.0026 + cloudiness * 0.0055;
+    fog.density = 0.0011 + cloudiness * 0.0055;
     const gm = this.grass.material as THREE.ShaderMaterial;
     gm.uniforms.uFogColor.value.copy(fog.color);
     gm.uniforms.uFogDensity.value = fog.density;

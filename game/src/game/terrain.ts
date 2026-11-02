@@ -1,19 +1,78 @@
 /**
- * Terrain: 768 m walkable catchment generated the same way as rwengine's
- * state.py (regional rise + Gaussian ridge/valley/hills + spectral noise),
- * with soil texture zones by elevation quantiles and a winding dirt road
- * through the valley floor (the trafficability stage).
+ * Terrain: 768 m walkable biome world.
+ *
+ * A NW mountain massif (ridged, ice-capped on the highest peaks) falls into
+ * foothills and a central valley; the prevailing SW wind wets its flank
+ * (rainforest) and leaves the east basin + NE corner in the lee (desert with
+ * longitudinal dunes). The RIVER is born at a tarn (the water source) carved
+ * into the massif's SE flank, cuts a channel SE across the valley and exits
+ * at the south map edge; its flat lowland reaches grow swamp. Mid elevations
+ * carry forest on the wet side, dry grassy hills on the lee; steep ground is
+ * rocky. Soils follow biome (loam grass, clay loam rainforest, dune sand
+ * desert, muck swamp), and the dirt road still winds through the valley —
+ * fording the river where it crosses.
+ *
+ * The physics contract with the old single-valley world is kept: same node
+ * grid, same soil texture tables, road mask semantics, and the spawn meadow
+ * stays loam so the QA mud cells keep their references.
  */
 
 export const WORLD_SIZE = 768; // m
 export const GRID = 192; // physics cells per side (4 m cells)
 export const MESH_SEG = 512; // render mesh segments — 1.5 m quads, smooth shading
 
+// ------------------------------------------------------------------- biomes
+export interface BiomeDef {
+  key: string;
+  label: string;
+  /** painterly vertex-tint base colour */
+  color: number;
+  /** grass blade tint */
+  grassColor: number;
+  /** grass placement probability (per candidate cell) */
+  grassP: number;
+  /** grass height scale */
+  grassH: number;
+  /** broadleaf trees per candidate cell (expected) */
+  treeP: number;
+  /** conifer trees per candidate cell */
+  coniferP: number;
+  /** cacti per candidate cell */
+  cactusP: number;
+}
+
+export const BIOMES: BiomeDef[] = [
+  { key: "grassland", label: "GRASSLAND", color: 0xb9985a, grassColor: 0xc8a356, grassP: 0.9, grassH: 1.0, treeP: 0.05, coniferP: 0.0, cactusP: 0.0 },
+  { key: "forest", label: "FOREST", color: 0x5e6c40, grassColor: 0x6d7a44, grassP: 0.42, grassH: 1.0, treeP: 0.55, coniferP: 0.28, cactusP: 0.0 },
+  { key: "hills", label: "HILLS", color: 0xa89a5e, grassColor: 0xbfae62, grassP: 0.55, grassH: 0.85, treeP: 0.1, coniferP: 0.06, cactusP: 0.0 },
+  { key: "rainforest", label: "RAINFOREST", color: 0x3f5e30, grassColor: 0x2f5c26, grassP: 0.95, grassH: 1.55, treeP: 1.0, coniferP: 0.0, cactusP: 0.0 },
+  { key: "desert", label: "DESERT", color: 0xd9b57c, grassColor: 0xc7b06a, grassP: 0.05, grassH: 0.45, treeP: 0.0, coniferP: 0.0, cactusP: 0.35 },
+  { key: "swamp", label: "SWAMP", color: 0x555237, grassColor: 0x7c8a4e, grassP: 0.62, grassH: 1.85, treeP: 0.12, coniferP: 0.0, cactusP: 0.0 },
+  { key: "rocky", label: "ROCKY", color: 0x8d8478, grassColor: 0x9a9160, grassP: 0.16, grassH: 0.6, treeP: 0.02, coniferP: 0.05, cactusP: 0.0 },
+  { key: "mountain", label: "MOUNTAIN", color: 0x7d7a74, grassColor: 0x8c8a6c, grassP: 0.05, grassH: 0.5, treeP: 0.0, coniferP: 0.1, cactusP: 0.0 },
+  { key: "ice", label: "ICE", color: 0xedf1f4, grassColor: 0xffffff, grassP: 0.0, grassH: 0.3, treeP: 0.0, coniferP: 0.0, cactusP: 0.0 },
+  { key: "river", label: "RIVER", color: 0x6b5b44, grassColor: 0x7c8a4e, grassP: 0.0, grassH: 0.8, treeP: 0.0, coniferP: 0.0, cactusP: 0.0 },
+];
+export const B_GRASSLAND = 0, B_FOREST = 1, B_HILLS = 2, B_RAINFOREST = 3,
+  B_DESERT = 4, B_SWAMP = 5, B_ROCKY = 6, B_MOUNTAIN = 7, B_ICE = 8, B_RIVER = 9;
+
 export interface TerrainData {
   /** height (m) on (GRID+1)^2 node grid, row-major, y*=(GRID+1) */
   height: Float32Array;
   soil: Uint8Array; // texture id per GRID^2 cell
   road: Float32Array; // 0..1 road mask per cell
+  /** biome id per cell (BIOMES index) */
+  biome: Uint8Array;
+  /** climate moisture 0..1 per cell (drives init saturation + veg) */
+  moisture: Float32Array;
+  /** static temperature °C per cell (lapse + south gradient; ice line) */
+  tempC: Float32Array;
+  /** river channel intensity 0..1 per cell (1 = thalweg) */
+  river: Float32Array;
+  /** per-cell depression cap [m] — river/tarn cells hold real water */
+  pondCap: Float32Array;
+  /** river source (tarn) cells — the spring discharges here */
+  riverIn: Uint8Array;
   minY: number;
   maxY: number;
 }
@@ -44,39 +103,186 @@ function valueNoise(rng: () => number): (x: number, y: number) => number {
   };
 }
 
+/** ridged noise 0..1 — crest lines for the massif */
+function ridgedNoise(rng: () => number): (x: number, y: number) => number {
+  const v = valueNoise(rng);
+  return (x: number, y: number) => {
+    const r = 1 - Math.abs(v(x, y));
+    return Math.pow(Math.max(r, 0), 1.6);
+  };
+}
+
+interface RiverPoint { x: number; y: number; s: number; bed: number; w: number; }
+
+/**
+ * The river: waypoints from the tarn down to the south map edge, densified
+ * with meander noise. The BED PROFILE is adaptive — sampled from the actual
+ * terrain lows along the route and forced strictly descending — so the
+ * channel is always cut below its surroundings and always flows downhill,
+ * whatever the relief it crosses. Width grows downstream.
+ */
+function buildRiverPath(rng: () => number, height: Float32Array, cell: number): RiverPoint[] {
+  const ctrl: Array<[number, number]> = [
+    [245, 236], [272, 276], [318, 318], [382, 358], [420, 430],
+    [408, 502], [442, 568], [436, 648], [472, 722], [496, 768],
+  ];
+  // meander jitter at interior control points
+  for (let i = 1; i < ctrl.length - 1; i++) {
+    ctrl[i][0] += (rng() - 0.5) * 22;
+    ctrl[i][1] += (rng() - 0.5) * 16;
+  }
+  // densify: Catmull-Rom through control points, ~4 m steps
+  const catmull = (p0: number, p1: number, p2: number, p3: number, t: number) => {
+    const t2 = t * t, t3 = t2 * t;
+    return 0.5 * ((2 * p1) + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
+  };
+  const raw: Array<{ x: number; y: number }> = [];
+  for (let i = 0; i < ctrl.length - 1; i++) {
+    const p0 = ctrl[Math.max(0, i - 1)], p1 = ctrl[i], p2 = ctrl[i + 1],
+      p3 = ctrl[Math.min(ctrl.length - 1, i + 2)];
+    const segLen = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
+    const steps = Math.max(2, Math.round(segLen / 4));
+    for (let k = 0; k < steps; k++) {
+      const t = k / steps;
+      raw.push({ x: catmull(p0[0], p1[0], p2[0], p3[0], t), y: catmull(p0[1], p1[1], p2[1], p3[1], t) });
+    }
+  }
+  raw.push({ x: ctrl[ctrl.length - 1][0], y: ctrl[ctrl.length - 1][1] });
+
+  // adaptive monotone bed: each sample sits below its local terrain low AND
+  // below the previous sample (strict descent — water always has a way out)
+  const pts: RiverPoint[] = [];
+  let s = 0, prevBed = Infinity;
+  for (let i = 0; i < raw.length; i++) {
+    if (i > 0) s += Math.hypot(raw[i].x - raw[i - 1].x, raw[i].y - raw[i - 1].y);
+    const u = Math.min(s / 900, 1);
+    const w = 4.2 + 6.5 * u; // half-width: 4.2 m mountain gorge -> 10.7 m lowland
+    // local terrain low in a disc of 1.6 channel widths
+    let localLow = Infinity;
+    const R = w * 1.6;
+    const i0 = Math.max(0, Math.floor((raw[i].x - R) / cell)), i1 = Math.min(GRID, Math.ceil((raw[i].x + R) / cell));
+    const j0 = Math.max(0, Math.floor((raw[i].y - R) / cell)), j1 = Math.min(GRID, Math.ceil((raw[i].y + R) / cell));
+    for (let j = j0; j <= j1; j++) {
+      for (let ii = i0; ii <= i1; ii++) {
+        const dx = ii * cell - raw[i].x, dy = j * cell - raw[i].y;
+        if (dx * dx + dy * dy <= R * R) localLow = Math.min(localLow, height[j * (GRID + 1) + ii]);
+      }
+    }
+    let bed = Math.min(prevBed - 0.12, localLow - 0.45);
+    bed = Math.max(bed, -20); // absolute guard (pre-normalisation)
+    prevBed = bed;
+    pts.push({ x: raw[i].x, y: raw[i].y, s, bed, w });
+  }
+  return pts;
+}
+
 export function buildTerrain(seed = 7): TerrainData {
   const rng = mulberry32(seed);
-  const n1 = valueNoise(rng), n2 = valueNoise(rng), n3 = valueNoise(rng);
+  const n1 = valueNoise(rng), n2 = valueNoise(rng), n3 = valueNoise(rng), n4 = valueNoise(rng);
+  const r1 = ridgedNoise(rng), r2 = ridgedNoise(rng);
   const S = WORLD_SIZE;
-
-  // rwengine terrain recipe, rescaled from 64 km to 768 m
-  const gauss = (x: number, y: number, cx: number, cy: number, sx: number, sy: number) =>
-    Math.exp(-((x - cx) ** 2) / (2 * sx * sx) - ((y - cy) ** 2) / (2 * sy * sy));
 
   const height = new Float32Array((GRID + 1) * (GRID + 1));
   const cell = S / GRID;
+
+  // ---- 1) base relief -------------------------------------------------------
+  // the east desert basin mask (dune terrain), and a slightly wider lee mask
+  // for climate dryness (the dry ring around the dunes is flat sand plain)
+  const desertMaskAt = (x: number, y: number) =>
+    Math.exp(-((((x - 620) / 190) ** 2) + (((y - 330) / 230) ** 2)) * 1.4);
+  const leeMaskAt = (x: number, y: number) =>
+    Math.exp(-((((x - 620) / 150) ** 2) + (((y - 330) / 180) ** 2)) * 1.4);
   for (let j = 0; j <= GRID; j++) {
     for (let i = 0; i <= GRID; i++) {
       const x = i * cell, y = j * cell;
       let z = 0;
-      z += 9.0 * (x / S) - 4.5; // regional west→east rise
-      z += 11.0 * gauss(x, y, S * 0.5, S * 0.78, 120, 170); // southern ridge
-      z -= 5.5 * gauss(x, y, S * 0.5, S * 0.30, 110, 200); // northern valley axis
-      z += 7.0 * gauss(x, y, S * 0.33, S * 0.45, 90, 80); // western hill
-      z += 5.0 * gauss(x, y, S * 0.72, S * 0.42, 100, 85); // eastern hill
-      // the clay bank — a steep little knoll north of the road bend (45 m off
-      // the corridor, clear of the wagon story): the one piece of ground steep
-      // enough to drive an adit into (~17° flanks vs the ≤10° regional slopes)
-      z += 4.5 * gauss(x, y, S * 0.3125, S * 0.4297, 11, 9);
-      // fractal detail (3 octaves)
-      z += 1.6 * n1(x / 96, y / 96) + 0.8 * n2(x / 48, y / 48) + 0.4 * n3(x / 24, y / 24);
+      // fractal base (4 octaves)
+      z += 8.0 * n1(x / 110, y / 110) + 4.2 * n2(x / 55, y / 55)
+        + 2.0 * n3(x / 27, y / 27) + 0.9 * n4(x / 13, y / 13);
+      // regional tilt: NW high, SE low
+      z += 14 * (1 - (x + y) / (2 * S));
+      // NW mountain massif: ridged dome, ~100 m peaks
+      const mArg = ((x - 190) / 150) ** 2 + ((y - 168) / 175) ** 2;
+      const massif = Math.exp(-mArg * 1.15);
+      z += 100 * massif * (0.38 + 0.62 * (0.5 * r1(x / 62, y / 62) + 0.5 * r2(x / 31, y / 31)));
+      // north ridge extension (the rain wall that dries the east basin)
+      const nrArg = ((x - 330) / 190) ** 2 + ((y - 95) / 95) ** 2;
+      z += 46 * Math.exp(-nrArg * 1.2) * (0.5 + 0.5 * r1(x / 48 + 7, y / 48));
+      // southern hill belt (rolling, dry) — flanking, never ON, the river
+      z += 26 * Math.exp(-(((x - 575) / 150) ** 2 + ((y - 555) / 125) ** 2)) * (0.55 + 0.45 * n2(x / 41 + 3, y / 41));
+      z += 16 * Math.exp(-(((x - 250) / 130) ** 2 + ((y - 615) / 120) ** 2));
+      // east desert basin: flatten toward a sand plain + longitudinal dunes
+      const desert = desertMaskAt(x, y);
+      if (desert > 0.01) {
+        const dune = 1.9 * Math.sin((x - y) * 0.105 + 3.2 * n3(x / 95 + 11, y / 95))
+          + 0.8 * n4(x / 26 + 5, y / 26);
+        z = z * (1 - desert * 0.82) + (5.2 + dune) * desert * 0.82;
+      }
       height[j * (GRID + 1) + i] = z;
     }
   }
-  // flatten the road corridor BEFORE normalising
+
+  // ---- 2) the tarn (river source): bowl carved into the massif flank -------
+  const TARN = { x: 245, y: 236, R: 15, elev: 58 };
+  for (let j = 0; j <= GRID; j++) {
+    for (let i = 0; i <= GRID; i++) {
+      const x = i * cell, y = j * cell;
+      const d = Math.hypot(x - TARN.x, y - TARN.y);
+      if (d < TARN.R) {
+        const bowl = TARN.elev + 2.4 * ((d / TARN.R) ** 2 - 1);
+        const k = j * (GRID + 1) + i;
+        height[k] = Math.min(height[k], bowl);
+      }
+    }
+  }
+
+  // ---- 3) the river: adaptive profile, then carve channel + banks ----------
+  const river = buildRiverPath(rng, height, cell);
+  for (const p of river) {
+    const w = p.w;
+    const i0 = Math.max(0, Math.floor((p.x - w * 3.4) / cell)), i1 = Math.min(GRID, Math.ceil((p.x + w * 3.4) / cell));
+    const j0 = Math.max(0, Math.floor((p.y - w * 3.4) / cell)), j1 = Math.min(GRID, Math.ceil((p.y + w * 3.4) / cell));
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const x = i * cell, y = j * cell;
+        const d = Math.hypot(x - p.x, y - p.y);
+        if (d > w * 3.4) continue;
+        const k = j * (GRID + 1) + i;
+        if (d < w) {
+          // parabolic bed: thalweg 0.5 m below the profile at centre
+          const bed = p.bed - 0.5 * (1 - (d / w) ** 2);
+          height[k] = Math.min(height[k], bed);
+        } else {
+          // banks: pull down toward a shoulder line, feathering out
+          const t = (d - w) / (2.4 * w); // 0 at bank crest -> 1 at blend edge
+          const shoulder = p.bed + (d - w) * 0.62;
+          height[k] = height[k] * t + Math.min(height[k], shoulder) * (1 - t);
+        }
+      }
+    }
+  }
+  // floodplain: the low reach — the valley floor follows the river
+  for (const p of river) {
+    if (p.bed > 26) continue;
+    const R = 68;
+    const i0 = Math.max(0, Math.floor((p.x - R) / cell)), i1 = Math.min(GRID, Math.ceil((p.x + R) / cell));
+    const j0 = Math.max(0, Math.floor((p.y - R) / cell)), j1 = Math.min(GRID, Math.ceil((p.y + R) / cell));
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const x = i * cell, y = j * cell;
+        const d = Math.hypot(x - p.x, y - p.y);
+        if (d > R) continue;
+        const k = j * (GRID + 1) + i;
+        const blend = 0.5 * Math.exp(-(d - p.w) / 40);
+        const plain = Math.min(height[k], p.bed + 2.6 + 0.8 * n4(x / 30, y / 30));
+        height[k] = height[k] * (1 - blend) + plain * blend;
+      }
+    }
+  }
+
+  // ---- 4) the road: flatten AFTER the river so it fords the channel --------
   const road = new Float32Array(GRID * GRID);
-  // road: sine curve roughly following the valley, west→east
-  const roadY = (x: number) => S * (0.30 + 0.08 * Math.sin((x / S) * Math.PI * 1.7 + 0.4));
+  const roadY = roadCenterY;
   for (let j = 0; j < GRID; j++) {
     for (let i = 0; i < GRID; i++) {
       const x = (i + 0.5) * cell, y = (j + 0.5) * cell;
@@ -84,7 +290,6 @@ export function buildTerrain(seed = 7): TerrainData {
       const r = Math.max(0, 1 - dy / 9.0); // 9 m half-width, soft edges
       road[j * GRID + i] = Math.min(r * 1.6, 1);
       if (r > 0) {
-        // pull terrain toward the local road centre height
         const ci = i, cj = Math.max(0, Math.min(GRID, Math.round(roadY(x) / cell - 0.5)));
         const ch = height[Math.min(GRID, cj) * (GRID + 1) + Math.min(GRID, ci)];
         const k = 0.55 * Math.min(r * 1.6, 1);
@@ -99,25 +304,169 @@ export function buildTerrain(seed = 7): TerrainData {
   for (let k = 0; k < height.length; k++) height[k] -= mn;
   const maxY = mx - mn;
 
-  // soil texture by elevation quantiles (valley clay, slope loam, upland sand)
+  // ---- 5) per-cell fields: elevation, slope, river mask, distance ---------
   const cellH = new Float32Array(GRID * GRID);
+  const slope = new Float32Array(GRID * GRID);
+  const riverMask = new Float32Array(GRID * GRID);
+  const riverDist = new Float32Array(GRID * GRID).fill(1e9);
+  const tarnMask = new Float32Array(GRID * GRID);
   for (let j = 0; j < GRID; j++) {
     for (let i = 0; i < GRID; i++) {
-      const h = (height[j * (GRID + 1) + i] + height[j * (GRID + 1) + i + 1] +
-        height[(j + 1) * (GRID + 1) + i] + height[(j + 1) * (GRID + 1) + i + 1]) / 4;
-      cellH[j * GRID + i] = h;
+      const k = j * GRID + i;
+      const h00 = height[j * (GRID + 1) + i], h10 = height[j * (GRID + 1) + i + 1];
+      const h01 = height[(j + 1) * (GRID + 1) + i], h11 = height[(j + 1) * (GRID + 1) + i + 1];
+      const h = (h00 + h10 + h01 + h11) / 4;
+      cellH[k] = h;
+      // steepest gradient across the cell's corners (max descent proxy)
+      let smax = 0;
+      smax = Math.max(smax, Math.abs(h00 - h10) / cell);
+      smax = Math.max(smax, Math.abs(h00 - h01) / cell);
+      smax = Math.max(smax, Math.abs(h10 - h11) / cell);
+      smax = Math.max(smax, Math.abs(h01 - h11) / cell);
+      slope[k] = smax;
     }
   }
-  const sorted = Float32Array.from(cellH).sort();
-  const q30 = sorted[Math.floor(0.3 * sorted.length)];
-  const q70 = sorted[Math.floor(0.7 * sorted.length)];
-  const soil = new Uint8Array(GRID * GRID);
-  for (let k = 0; k < cellH.length; k++) {
-    soil[k] = cellH[k] < q30 ? 2 : cellH[k] < q70 ? 1 : 0;
-    // the dirt road is built on better-draining loam borrow material
-    if (road[k] > 0.35) soil[k] = 1;
+  // river mask + distance field (samples are ~4 m apart — direct eval)
+  for (const p of river) {
+    const R = Math.max(p.w * 2.6, 14);
+    const i0 = Math.max(0, Math.floor((p.x - R) / cell)), i1 = Math.min(GRID - 1, Math.ceil((p.x + R) / cell));
+    const j0 = Math.max(0, Math.floor((p.y - R) / cell)), j1 = Math.min(GRID - 1, Math.ceil((p.y + R) / cell));
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const k = j * GRID + i;
+        const d = Math.hypot((i + 0.5) * cell - p.x, (j + 0.5) * cell - p.y);
+        riverDist[k] = Math.min(riverDist[k], d);
+        if (d < p.w) riverMask[k] = Math.max(riverMask[k], 1 - (d / p.w) ** 2 * 0.55);
+      }
+    }
   }
-  return { height, soil, road, minY: 0, maxY };
+  for (let j = 0; j < GRID; j++) {
+    for (let i = 0; i < GRID; i++) {
+      const k = j * GRID + i;
+      const d = Math.hypot((i + 0.5) * cell - TARN.x, (j + 0.5) * cell - TARN.y);
+      if (d < TARN.R + 3) tarnMask[k] = Math.max(0, 1 - d / (TARN.R + 3));
+    }
+  }
+
+  // ---- 6) climate: temperature (lapse) + moisture (windward/lee/river) ----
+  const tempC = new Float32Array(GRID * GRID);
+  const moisture = new Float32Array(GRID * GRID);
+  // orographic term: uphill component along the wind (blowing toward NE),
+  // gated by local steepness — slopes rain out, flats hardly feel it
+  const oro = new Float32Array(GRID * GRID);
+  const WX = Math.SQRT1_2, WY = -Math.SQRT1_2; // wind blows toward NE
+  for (let j = 1; j < GRID - 1; j++) {
+    for (let i = 1; i < GRID - 1; i++) {
+      const k = j * GRID + i;
+      const gx = (cellH[j * GRID + i + 1] - cellH[j * GRID + i - 1]) / (2 * cell);
+      const gy = (cellH[(j + 1) * GRID + i] - cellH[(j - 1) * GRID + i]) / (2 * cell);
+      oro[k] = WX * gx + WY * gy;
+    }
+  }
+  // heavy separable blur of the orographic field (mountain-scale)
+  const oroB = new Float32Array(GRID * GRID);
+  {
+    const tmp = new Float32Array(GRID * GRID);
+    const R = 9;
+    for (let j = 0; j < GRID; j++) {
+      for (let i = 0; i < GRID; i++) {
+        let s = 0, c = 0;
+        for (let d = -R; d <= R; d++) {
+          const ii = i + d;
+          if (ii >= 0 && ii < GRID) { s += oro[j * GRID + ii]; c++; }
+        }
+        tmp[j * GRID + i] = s / c;
+      }
+    }
+    for (let i = 0; i < GRID; i++) {
+      for (let j = 0; j < GRID; j++) {
+        let s = 0, c = 0;
+        for (let d = -R; d <= R; d++) {
+          const jj = j + d;
+          if (jj >= 0 && jj < GRID) { s += tmp[jj * GRID + i]; c++; }
+        }
+        oroB[j * GRID + i] = s / c;
+      }
+    }
+  }
+  for (let j = 0; j < GRID; j++) {
+    for (let i = 0; i < GRID; i++) {
+      const k = j * GRID + i;
+      const h = cellH[k];
+      tempC[k] = 24 - 0.225 * h + 5.5 * (j / GRID - 0.5);
+      const swBase = 1 - (i + j) / (2 * GRID); // SW corner 1 -> NE corner 0
+      // windward lift to +0.5; leeward dryness capped at -0.3 (the shadow
+      // exists but the diagonal gradient carries most of the moisture story)
+      const oroT = Math.max(-0.3, Math.min(oroB[k] * 3.2, 0.5)) * Math.min(slope[k] * 4, 1);
+      const nearRiver = Math.exp(-Math.min(riverDist[k], 400) / 38);
+      const noiseM = 0.09 * n1(((i + 0.5) * cell) / 90, ((j + 0.5) * cell) / 90);
+      const leeDry = 0.5 * leeMaskAt((i + 0.5) * cell, (j + 0.5) * cell);
+      let m = 0.26 + 0.38 * swBase + 0.42 * oroT + 0.22 * nearRiver + noiseM - leeDry;
+      moisture[k] = Math.max(0.02, Math.min(m, 1));
+    }
+  }
+
+  // ---- 7) biomes ------------------------------------------------------------
+  const biome = new Uint8Array(GRID * GRID);
+  for (let k = 0; k < GRID * GRID; k++) {
+    const h = cellH[k], sl = slope[k], m = moisture[k], t = tempC[k];
+    let b: number;
+    if (t < 1.5) b = B_ICE;
+    else if (h > 58) b = B_MOUNTAIN;
+    else if (riverMask[k] > 0.12 || tarnMask[k] > 0.25) b = B_RIVER;
+    else if (m > 0.45 && sl < 0.075 && h < 20 && riverDist[k] < 42) b = B_SWAMP;
+    else if (m < 0.22) b = B_DESERT;
+    else if (m > 0.66 && t > 16 && h < 38 && sl < 0.8) b = B_RAINFOREST;
+    else if (sl > 0.5) b = B_ROCKY;
+    else if (h >= 30) b = m > 0.42 ? B_FOREST : B_HILLS;
+    else b = B_GRASSLAND;
+    biome[k] = b;
+  }
+
+  // ---- 8) soils by biome (with river-bank alluvium + road borrow) ----------
+  const soil = new Uint8Array(GRID * GRID);
+  for (let j = 0; j < GRID; j++) {
+    for (let i = 0; i < GRID; i++) {
+      const k = j * GRID + i;
+      const b = biome[k], m = moisture[k], h = cellH[k];
+      switch (b) {
+        case B_GRASSLAND: soil[k] = m < 0.38 ? 0 : 1; break;
+        case B_FOREST: soil[k] = h > 46 ? 0 : 1; break;
+        case B_HILLS: soil[k] = 0; break;
+        case B_RAINFOREST: soil[k] = 2; break;
+        case B_DESERT: soil[k] = 3; break;
+        case B_SWAMP: soil[k] = 4; break;
+        case B_ROCKY: soil[k] = 0; break;
+        case B_MOUNTAIN: soil[k] = 0; break;
+        case B_ICE: soil[k] = 0; break;
+        default: soil[k] = 1; break; // river bed: alluvial loam
+      }
+      // river banks get loam alluvium regardless of biome
+      if (riverMask[k] > 0.05 || (riverDist[k] < 12 && b !== B_ICE)) soil[k] = Math.min(soil[k], 1);
+      // the dirt road is built on better-draining loam borrow material
+      if (road[k] > 0.35) soil[k] = 1;
+      // the settler's meadow at the road's west end (the spawn): cleared
+      // loam ground so the walk-in QA cells keep their soil references
+      const dSp = Math.hypot((i + 0.5) * cell - 20, (j + 0.5) * cell - roadY(20));
+      if (dSp < 48) soil[k] = 1;
+    }
+  }
+
+  // ---- 9) pond caps + the spring --------------------------------------------
+  const pondCap = new Float32Array(GRID * GRID).fill(0.25);
+  const riverIn = new Uint8Array(GRID * GRID);
+  for (let k = 0; k < GRID * GRID; k++) {
+    if (riverMask[k] > 0.15) pondCap[k] = 0.55;
+    if (tarnMask[k] > 0.35) { pondCap[k] = 1.6; riverIn[k] = 1; }
+  }
+
+  return { height, soil, road, biome, moisture, tempC, river: riverMask, pondCap, riverIn, minY: 0, maxY };
+}
+
+/** the valley road's centreline — ONE definition shared by the terrain
+ *  build, the wagon park and the player spawn (they must agree) */
+export function roadCenterY(x: number): number {
+  return WORLD_SIZE * (0.44 + 0.07 * Math.sin((x / WORLD_SIZE) * Math.PI * 1.5 + 0.3));
 }
 
 /** bilinear height sampling in world coords */

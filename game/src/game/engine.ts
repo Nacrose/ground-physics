@@ -4,7 +4,7 @@
  * quality auto-scaler (30 fps).
  */
 import * as THREE from "three";
-import { buildTerrain, TerrainData, WORLD_SIZE, sampleHeight } from "./terrain";
+import { buildTerrain, TerrainData, WORLD_SIZE, sampleHeight, BIOMES, cellIndex, roadCenterY } from "./terrain";
 import { Ground } from "./ground";
 import { World } from "./world";
 import { StormFX } from "./fx";
@@ -171,7 +171,7 @@ export class Game {
     this.fx = new StormFX(this.scene, this.terrain, this.ground, 5600, this.micro);
     this.tunnel = new Tunnel(this.scene, this.terrain, this.ground);
     // spawn on the road near the wagon
-    const spawnZ = (0.30 + 0.08 * Math.sin((20 / WORLD_SIZE) * Math.PI * 1.7 + 0.4)) * WORLD_SIZE;
+    const spawnZ = roadCenterY(20);
     this.player = new Player(this.scene, this.terrain, this.ground, this.fx, this.micro,
       20 - HALF, spawnZ - HALF,
       (x, z, r, mode) => this.world.crushGrass(x, z, r, mode));
@@ -482,6 +482,7 @@ export class Game {
     const gammaBulk = tex.gammaDry + tex.thetaS * rep.sr * 9.81;
     const filmHere = this.micro.waterAt(p.x, p.z);
     const rows: Array<[string, string]> = [
+      ["BIOME", `${BIOMES[this.terrain.biome[cellIndex(p.x, p.z)]].label} · ${(this.terrain.tempC[cellIndex(p.x, p.z)]).toFixed(0)}°C`],
       ["TEXTURE", `${tex.label} · ${tex.clay}% clay`],
       ["WATER CONTENT", `${rep.wPct.toFixed(1)} %  (PL ${tex.PL} · LL ${tex.LL})`],
       ["CONSISTENCY", rep.consistencyLabel],

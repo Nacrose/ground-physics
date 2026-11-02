@@ -55,11 +55,19 @@ function makeTexture(
   };
 }
 
-/** Texture order matches rwengine: 0 upland sand, 1 slopes loam, 2 valley clay. */
+/** Texture order: 0 upland sand, 1 slopes loam, 2 valley clay, 3 desert dune
+ *  sand, 4 swamp muck. The first three match rwengine exactly; the two new
+ *  ones extend the same pedotransfer so the biomes wet and fail consistently. */
 export const SOIL_TEXTURES: SoilTexture[] = [
   makeTexture("sandy_loam", "Sandy loam", 65, 25, 10, 0.435, 218.0, 4.9, 25.9, 32.0, 3.0, 21.0, 13.0, 0.6),
   makeTexture("loam", "Loam", 40, 42, 18, 0.451, 478.0, 5.25, 13.0, 28.0, 8.0, 27.0, 18.0, 0.5),
   makeTexture("silty_clay_loam", "Silty clay loam", 15, 55, 30, 0.5, 356.0, 7.75, 3.4, 24.0, 15.0, 32.0, 20.0, 0.4),
+  // desert dune sand: drains fast, barely cohesive, never really muds — the
+  // one soil you can always cross (loose, but always crossable)
+  makeTexture("dune_sand", "Dune sand", 92, 5, 3, 0.395, 70.0, 3.5, 105.0, 31.0, 0.4, 15.0, 5.0, 0.45),
+  // swamp muck: organic, porous, weak — saturated soup with a huge liquid
+  // limit; the deepest mud in the world lives here
+  makeTexture("muck", "Muck", 18, 47, 35, 0.62, 420.0, 9.0, 1.2, 21.0, 4.0, 60.0, 30.0, 0.3),
 ];
 
 /** Engine constants (rwengine EngineConfig). */
@@ -75,8 +83,13 @@ export const CFG = {
   keSealFrac: 0.35, // max Ks reduction from crusting
   /** depression-storage cap [m]: beyond this, routed water spills out of the
    *  catchment as sub-grid basin outflow (no river outlet until Phase 3 —
-   *  without the cap a closed bowl silently lakes up 13+ m of phantom water) */
+   *  without the cap a closed bowl silently lakes up 13+ m of phantom water).
+   *  River-channel and tarn cells get their own deeper per-cell cap
+   *  (terrain.pondCap) so the river can hold a real channel of water. */
   depressionMaxM: 0.25,
+  /** river source (tarn) spring discharge [m³/s] — feeds the channel every
+   *  physics tick; the water genuinely travels the D8 route to the map edge */
+  riverSpringQ: 0.06,
   rhoW: 1000.0,
   // ---- mud material (thixotropy / creep / stickiness / desiccation) --------
   // Mud is a Herschel-Bulkley solid-liquid: it has a yield stress (no sink

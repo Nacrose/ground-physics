@@ -26,8 +26,24 @@
   };
 
   // ---- vertex tint (world.ts bake) ------------------------------------
-  const dry = [0.7255, 0.5961, 0.3529], lush = [0.4902, 0.5412, 0.3059], rock = [0.5529, 0.5176, 0.4706];
+  // ---- vertex tint (biomeTint.vertexTint port — the shared formula the
+  // world mesh, contact overlay and mid ring all bake) --------------------
+  // biome palette, raw hex/255 (same space the previous audit used)
+  const BCOL = [
+    [0.7255, 0.5961, 0.3529], // 0 grassland
+    [0.3686, 0.4235, 0.2510], // 1 forest
+    [0.6588, 0.6039, 0.3686], // 2 hills
+    [0.2471, 0.3686, 0.1882], // 3 rainforest
+    [0.8510, 0.7098, 0.4863], // 4 desert
+    [0.3333, 0.3216, 0.2157], // 5 swamp
+    [0.5529, 0.5176, 0.4706], // 6 rocky
+    [0.4902, 0.4784, 0.4549], // 7 mountain
+    [0.9294, 0.9451, 0.9569], // 8 ice
+    [0.4196, 0.3569, 0.2667], // 9 river
+  ];
+  const ROCKHI = [0.6588, 0.6784, 0.6980], SNOW = [0.9608, 0.9725, 0.9804];
   const MOTTLE = 0.92; // mean of 0.92+0.16*sin*sin
+  const BIOME = g.terrain.biome;
   const heightAt = (x, z) => {
     const fx = (x + WS / 2) / 4, fz = (z + WS / 2) / 4;
     const i = Math.min(N, Math.max(0, Math.floor(fx))), j = Math.min(N, Math.max(0, Math.floor(fz)));
@@ -38,13 +54,22 @@
   };
   const vertexTint = (x, z) => {
     const h = heightAt(x, z);
-    const hn = Math.min(Math.max(h / 18, 0), 1);
-    const c = [0, 1, 2].map(i => dry[i] + (lush[i] - dry[i]) * (1 - hn));
-    if (h > 14.5) {
-      const k = Math.min((h - 14.5) / 5, 0.6);
-      for (let i = 0; i < 3; i++) c[i] += (rock[i] - c[i]) * k;
-    }
-    return c.map(v => v * MOTTLE);
+    // bilinear biome colour (at cell centres this collapses to the cell's
+    // own biome — exactly what the mesh bakes there)
+    const gx = (x + WS / 2) / 4 - 0.5, gz = (z + WS / 2) / 4 - 0.5;
+    const i0 = Math.min(N - 1, Math.max(0, Math.floor(gx))), j0 = Math.min(N - 1, Math.max(0, Math.floor(gz)));
+    const i1 = Math.min(N - 1, i0 + 1), j1 = Math.min(N - 1, j0 + 1);
+    const u = Math.min(Math.max(gx - i0, 0), 1), v = Math.min(Math.max(gz - j0, 0), 1);
+    const c00 = BCOL[BIOME[j0 * N + i0]], c10 = BCOL[BIOME[j0 * N + i1]];
+    const c01 = BCOL[BIOME[j1 * N + i0]], c11 = BCOL[BIOME[j1 * N + i1]];
+    let c = [0, 1, 2].map(ch => (c00[ch] * (1 - u) + c10[ch] * u) * (1 - v) + (c01[ch] * (1 - u) + c11[ch] * u) * v);
+    const hn = Math.min(Math.max(h / 60, 0), 1);
+    c = c.map(vv => vv * (0.86 + 0.30 * hn));
+    const bm = BIOME[Math.min(N - 1, Math.max(0, Math.floor((z + WS / 2) / 4))) * N
+      + Math.min(N - 1, Math.max(0, Math.floor((x + WS / 2) / 4)))];
+    if (bm === 7) { const kk = Math.min(Math.max((h - 60) / 55, 0), 0.6); c = c.map((vv, ch) => vv + (ROCKHI[ch] - vv) * kk); }
+    if (bm === 8) { const kk = Math.min(Math.max((h - 92) / 18, 0), 0.85); c = c.map((vv, ch) => vv + (SNOW[ch] - vv) * kk); }
+    return c.map(vv => vv * MOTTLE);
   };
 
   // ---- classify + evaluate (mudSurface port, FIXED version) -----------
@@ -67,7 +92,7 @@
       const nM = shNoise(x * 2.9, z * 2.9);
       const nG = shNoise(x * 11.0, z * 11.0);
       const cov = Math.min(Math.max(mud * (0.55 + 0.60 * nP) * (0.82 + 0.18 * nM), 0), 1);
-      const mb = soilId > 0.75 ? [0.096, 0.082, 0.068] : soilId > 0.4 ? [0.138, 0.103, 0.072] : [0.192, 0.152, 0.104];
+      const mb = soilId > 0.84 ? [0.055, 0.048, 0.040] : soilId > 0.6 ? [0.22, 0.175, 0.125] : soilId > 0.4 ? [0.096, 0.082, 0.068] : soilId > 0.2 ? [0.138, 0.103, 0.072] : [0.192, 0.152, 0.104];
       let mudCol = mb.map(v => v * (0.87 + 0.26 * nM) * (0.92 + 0.16 * nG));
       mudCol = mudCol.map(v => v * (1 - 0.18 * (1 - gel)));
       mudCol = mudCol.map(v => v * (0.88 + 0.12 * Math.min(Math.max(wet, 0), 1)));

@@ -41,6 +41,7 @@
  */
 import * as THREE from "three";
 import { WORLD_SIZE, GRID, TerrainData, sampleHeight, terrainNormal, cellIndex } from "./terrain";
+import { vertexTint } from "./biomeTint";
 import { Ground } from "./ground";
 import { SOIL_TEXTURES } from "./params";
 import { NOISE_GLSL, MUD_SURFACE_GLSL, MUD_NORMAL_GLSL, MUD_SHEEN_GLSL, WATER_SURFACE_GLSL } from "./shaderlib";
@@ -960,9 +961,6 @@ export class MicroTerrain {
     const bn = this.aBaseN.array as Float32Array;
     const col = this.aColor.array as Float32Array;
     const c = new THREE.Color();
-    const dry = new THREE.Color(0xb9985a);
-    const lush = new THREE.Color(0x7d8a4e);
-    const rock = new THREE.Color(0x8d8478);
     const nrm: [number, number, number] = [0, 1, 0];
     // cell-centred physics fields
     for (let j = j0; j <= j1; j++) {
@@ -986,12 +984,10 @@ export class MicroTerrain {
         bh[v] = h;
         terrainNormal(this.terrain, wx + GRID_HALF, wz + GRID_HALF, nrm);
         bn[v * 3] = nrm[0]; bn[v * 3 + 1] = nrm[1]; bn[v * 3 + 2] = nrm[2];
-        // identical tint formula to world.buildTerrainMesh
-        const hn = Math.min(Math.max(h / 18, 0), 1);
-        c.copy(dry).lerp(lush, 1 - hn);
-        if (h > 14.5) c.lerp(rock, Math.min((h - 14.5) / 5, 0.6));
-        const m = 0.92 + 0.16 * Math.sin(wx * 0.171 + wz * 0.137) * Math.sin(wx * 0.043 - wz * 0.061);
-        col[v * 3] = c.r * m; col[v * 3 + 1] = c.g * m; col[v * 3 + 2] = c.b * m;
+        // identical tint formula to world.buildTerrainMesh — the SHARED
+        // biomeTint.vertexTint (one definition, all three meshes)
+        vertexTint(this.terrain, wx, wz, h, c);
+        col[v * 3] = c.r; col[v * 3 + 1] = c.g; col[v * 3 + 2] = c.b;
       }
     }
     this.aBaseH.needsUpdate = true;

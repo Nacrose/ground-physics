@@ -10,7 +10,7 @@
  * consistency (solid / plastic / liquid MUD), CBR.
  */
 import { CFG, DEG, SOIL_TEXTURES, SoilTexture, bearingFactors, medianDropMm } from "./params";
-import { GRID, WORLD_SIZE, TerrainData, cellIndex } from "./terrain";
+import { GRID, WORLD_SIZE, TerrainData, cellIndex, B_SWAMP } from "./terrain";
 
 const N = GRID * GRID;
 const CELL = WORLD_SIZE / GRID;
@@ -73,6 +73,7 @@ export interface CellReport {
 }
 
 export class Ground {
+  private terrain: TerrainData;
   // prognostic fields (all GRID*GRID)
   theta: Float32Array[]; // 4 soil layers, volumetric
   hPond = new Float32Array(N); // m
@@ -129,10 +130,18 @@ export class Ground {
   mudCrust = new Float32Array(N);
   /** stickiness 0..1 per cell (Atterberg sticky-limit window) */
   stick = new Float32Array(N);
+  /** river ledger: spring inflow + map-edge outflow [m³] (the water source
+   *  story — the tarn feeds, the south edge drains, mass is accounted) */
+  riverInM3 = 0;
+  riverOutM3 = 0;
+  /** cached river-source (tarn) cell list — the spring discharges here */
+  private springCells: number[] = [];
 
   constructor(terrain: TerrainData, initSat: number) {
     this.terrain = terrain;
     this.theta = [new Float32Array(N), new Float32Array(N), new Float32Array(N), new Float32Array(N)];
+    this.springCells = [];
+    for (let k = 0; k < N; k++) if (terrain.riverIn[k]) this.springCells.push(k);
     this.reset(initSat);
   }
 
@@ -141,14 +150,26 @@ export class Ground {
     for (let k = 0; k < N; k++) {
       const tex = SOIL_TEXTURES[this.terrain.soil[k]];
       const jit = 0.94 + 0.12 * ((k * 2654435761) % 1000) / 1000;
-      const th = tex.thetaS * initSat * jit;
+      // biome climate modulates the preset's uniform saturation: the desert
+      // starts dry, the rainforest moist, the swamp near-saturated soup
+      const moist = this.terrain.moisture[k];
+      let sat = initSat * (0.55 + 0.95 * moist);
+      if (this.terrain.biome[k] === B_SWAMP) sat = Math.max(sat, 0.9);
+      const th = tex.thetaS * Math.min(sat, 1) * jit;
       for (let L = 0; L < 4; L++) this.theta[L][k] = th;
-      this.hPond[k] = 0; this.infiltF[k] = 0; this.keCum[k] = 0; this.rut[k] = 0;
+      // the river exists from t=0: the tarn is full, the channel carries
+      // its steady running depth (the spring keeps it topped up)
+      const rv = this.terrain.river[k];
+      this.hPond[k] = rv > 0.15 ? 0.26 * rv : 0;
+      if (this.terrain.riverIn[k]) this.hPond[k] = 1.25;
+      this.infiltF[k] = 0; this.keCum[k] = 0; this.rut[k] = 0;
       this.branch[k] = 0; this.traffic[k] = 0; this.disturbed[k] = 0; this.compAcc[k] = 0;
       this.wetFlux[k] = 0;
       this.gel[k] = 1; this.mudCrust[k] = 0; this.stick[k] = 0;
     }
     this.basinOutflowM3 = 0;
+    this.riverInM3 = 0;
+    this.riverOutM3 = 0;
     this.loanPond.fill(0);
     this.sedKg.fill(0);
     this.microCovered.fill(0);
@@ -488,6 +509,14 @@ export class Ground {
     const outflow = this.routeOut;
     const inflow = this.routeIn;
     outflow.fill(0); inflow.fill(0);
+    // ---- river source: the tarn spring discharges into its cells (the
+    // water source of the whole channel — booked in the river ledger)
+    if (this.springCells.length > 0) {
+      const qSpring = CFG.riverSpringQ * dt; // m³ this tick
+      const perCell = qSpring / this.springCells.length / (CELL * CELL);
+      for (const k of this.springCells) h[k] += perCell;
+      this.riverInM3 += qSpring;
+    }
     const depStore = 0.002; // 2 mm micro-depression storage
     const nMan = 0.05;
     const height = this.terrain.height;
@@ -517,13 +546,33 @@ export class Ground {
           }
         }
         slopeOf[k] = bestSlope;
-        if (bestK < 0) continue;
+        // ---- off-map spill: a border cell with water can leave the domain
+        // (the river's exit) — a virtual neighbour one cell below any
+        // border terrain. Routed volume is booked as river outflow, never
+        // silently destroyed.
+        let offMap = false;
+        if ((i === 0 || i === GRID - 1 || j === 0 || j === GRID - 1) && bestSlope < 0.75) {
+          bestSlope = 0.75;
+          offMap = true;
+        }
+        if (bestK < 0 && !offMap) continue;
         // Manning velocity for the excess depth
         const v = (1 / nMan) * Math.pow(hExcess, 5 / 3) * Math.sqrt(bestSlope);
         let q = Math.min(v * dt, CELL * CELL * hExcess); // volumetric m3
         q = Math.min(q, hExcess * CELL * CELL * 0.5);
         const dq = q / (CELL * CELL); // depth equivalent [m]
         outflow[k] += dq;
+        if (offMap) {
+          this.riverOutM3 += q;
+          // suspended load leaves with the spilled water, at its concentration
+          if (!this.microCovered[k] && this.sedKg[k] > 1e-9) {
+            const share = Math.min(q / (CELL * CELL * Math.max(h[k], 1e-3)), 0.9);
+            const expKg = this.sedKg[k] * share;
+            this.sedKg[k] -= expKg;
+            this.sedLedger.exportedKg += expKg;
+          }
+          continue;
+        }
         inflow[bestK] += dq;
         // ---- sediment rides the routed water (skip contact-tier cells) ---
         if (!this.microCovered[k] && this.sedKg[k] > 1e-9) {
@@ -578,15 +627,15 @@ export class Ground {
       }
     }
 
-    // depression-cap spillover. This catchment has no mapped outlet channel
-    // yet (rivers are Phase 3), so a closed bowl would silently pile up a
-    // phantom lake — 13+ m of invisible water keeping the valley on the
-    // wetting branch for months. Water beyond a legible sheet depth leaves
-    // as sub-grid basin outflow, booked in the ledger so mass is accounted,
-    // never silently destroyed (spec §4: conserve, and never forget).
+    // depression-cap spillover. Interior bowls with no mapped outlet still
+    // cap at the legible sheet depth and spill as sub-grid basin outflow
+    // (booked, never silently destroyed). River-channel and tarn cells carry
+    // their own deeper per-cell cap — the channel HOLDS its water (that is
+    // the river) while a closed field bowl still cannot phantom-lake.
     // Suspended load leaves with the spilled water, at its concentration.
-    const cap = CFG.depressionMaxM;
+    const pondCap = this.terrain.pondCap;
     for (let k = 0; k < N; k++) {
+      const cap = pondCap.length === N ? pondCap[k] : CFG.depressionMaxM;
       if (h[k] > cap) {
         const spillVol = (h[k] - cap) * CELL * CELL;
         this.basinOutflowM3 += spillVol;
@@ -839,11 +888,15 @@ export class Ground {
 
   /** pack render textures. #1 RGBA: R wetness, G pond, B mud, A road.
    *  #2 RGBA: R gel (structure), G crust (desiccation), B stick (adhesion),
-   *  A soil texture index (0 / 0.5 / 1 = sand / loam / silty clay loam). */
+   *  A soil texture index (quantised across all soil textures). */
   packTexture(road: Float32Array) {
     const d = this.texData;
     const d2 = this.texData2;
-    const soilByte = [0, 128, 255];
+    // soil index quantised across the texture count (3 soils: 0/128/255;
+    // 5 soils: 0/64/128/191/255 — the shader decodes with the same steps)
+    const nSoils = SOIL_TEXTURES.length;
+    const soilByte: number[] = [];
+    for (let s = 0; s < nSoils; s++) soilByte.push(Math.round((s * 255) / (nSoils - 1)));
     for (let k = 0; k < N; k++) {
       d[k * 4 + 0] = Math.min(255, this.wetness[k] * 255) | 0;
       d[k * 4 + 1] = Math.min(255, Math.min(Math.max(this.hPond[k], this.loanPond[k]) / 0.12, 1) * 255) | 0;

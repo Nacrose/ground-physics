@@ -54,7 +54,8 @@ float crackSeam(vec2 wuv, float plateM, float worldSizeM) {
  *   float uWorldSizeM — world extent in metres (uniform or constant)
  *   vec4  g2 — the mud-MATERIAL state sampled from uGroundTex2:
  *              R gel (thixotropic structure 0..1), G crust (desiccation),
- *              B stick (adhesion), A soilId (sand→loam→silty clay)
+ *              B stick (adhesion), A soilId (sandy loam→loam→silty clay→
+ *              dune sand→muck, quantised)
  * and afterwards USES: none (works on col/rough in place).
  *
  * Look, layer by layer:
@@ -97,9 +98,14 @@ void mudSurface(inout vec3 col, inout float rough, vec2 wuv, float wet, float mu
   // wet-sheen streaking, not brightness speckle. Remoulded churn darkens;
   // drying mud pales slightly ahead of the crust.
   float gelF = g2.r, crust = g2.g, soilId = g2.a;
-  vec3 mudBase = soilId > 0.75 ? vec3(0.096, 0.082, 0.068)
-               : (soilId > 0.4 ? vec3(0.138, 0.103, 0.072)
-                               : vec3(0.192, 0.152, 0.104));
+  // five soils now: byte 0/64/128/191/255 → sandy loam / loam / silty clay
+  // loam / dune sand / muck. Every body stays below its own saturated tint
+  // (the darkest-state rule) — muck is the darkest mud in the world.
+  vec3 mudBase = soilId > 0.84 ? vec3(0.055, 0.048, 0.040)        // muck (swamp)
+               : soilId > 0.6 ? vec3(0.22, 0.175, 0.125)          // dune sand
+               : (soilId > 0.4 ? vec3(0.096, 0.082, 0.068)        // silty clay loam
+                               : (soilId > 0.2 ? vec3(0.138, 0.103, 0.072)
+                                               : vec3(0.192, 0.152, 0.104))); // sandy loam
   vec3 mudCol = mudBase * (0.87 + 0.26 * nM) * (0.92 + 0.16 * nG);
   mudCol *= 1.0 - 0.18 * (1.0 - gelF);
   mudCol *= mix(0.88, 1.0, clamp(wet, 0.0, 1.0));
