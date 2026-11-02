@@ -6,7 +6,12 @@
  * (rainforest) and leaves the east basin + NE corner in the lee (desert with
  * longitudinal dunes). The RIVER is born at a tarn (the water source) carved
  * into the massif's SE flank, cuts a channel SE across the valley and exits
- * at the south map edge; its flat lowland reaches grow swamp. Mid elevations
+ * at the south map edge; its flat lowland reaches grow swamp. The water
+ * itself VISIBLY TRAVELS — a flow field (direction + slope-fed vigour) drives
+ * downstream crest motion, drifting streaks and rapids foam on the surface —
+ * and the bed FINES downstream like a real river: gravel bars in the gorge,
+ * noise-dithered gravel-into-sand through the middle reaches, alluvial sand
+ * on the lowland bed. Mid elevations
  * carry forest on the wet side, dry grassy hills on the lee; steep ground is
  * rocky. Soils follow biome (loam grass, clay loam rainforest, dune sand
  * desert, muck swamp), and the dirt road still winds through the valley —
@@ -69,6 +74,13 @@ export interface TerrainData {
   tempC: Float32Array;
   /** river channel intensity 0..1 per cell (1 = thalweg) */
   river: Float32Array;
+  /** the CURRENT: per-cell world-space flow vector (unit dir × vigour 0..1,
+   *  two-component stride) — visual only. Rasterised from the river station
+   *  chain (downstream tangent, Manning-ish slope vigour) so the water sheets
+   *  can move their wave crests, streaks and foam DOWNSTREAM: a river that
+   *  reads as flowing instead of a ribbon ripbling in place. Ponds, the tarn
+   *  and dry ground carry no entry (0,0) and keep the wind-ripple look. */
+  flow: Float32Array;
   /** per-cell depression cap [m] — river/tarn cells hold real water */
   pondCap: Float32Array;
   /** river source (tarn) cells — the spring discharges here */
@@ -360,6 +372,81 @@ export function buildTerrain(seed = 7): TerrainData {
     }
   }
 
+  // ---- 5b) the flow field: where the water visibly MOVES -------------------
+  // Rasterised from the station chain (visual only — the physics routes its
+  // own water). Direction = downstream tangent; vigour = station bed slope
+  // through a Manning-ish sqrt scaling, so the gorge rages (~0.9) and the
+  // lowland glides (~0.2). Thalweg carries the current; bank margins trail
+  // off to still water. One 3×3 soften removes station-to-station tangent
+  // jitter, and the tarn is damped back to near-still (a lake with a drift).
+  const flow = new Float32Array(GRID * GRID * 2);
+  for (let si = 0; si < river.length - 1; si++) {
+    const a = river[si], b = river[si + 1];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const ds = Math.hypot(dx, dy) || 1;
+    const S = Math.max(a.bed - b.bed, 0) / ds; // station bed slope
+    // floor 0.45: even the flattest reach drifts visibly (~1 m/s of pattern
+    // motion) — a river that only moves where it's steep reads as ponds in a
+    // row; the gorge rides the cap at 1.0
+    const spd = Math.max(0.45, Math.min(0.45 + (S - 0.03) * 9, 1));
+    const R = a.w * 1.35;
+    const i0 = Math.max(0, Math.floor((a.x - R) / cell)), i1 = Math.min(GRID - 1, Math.ceil((a.x + R) / cell));
+    const j0 = Math.max(0, Math.floor((a.y - R) / cell)), j1 = Math.min(GRID - 1, Math.ceil((a.y + R) / cell));
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const k = j * GRID + i;
+        const d = Math.hypot((i + 0.5) * cell - a.x, (j + 0.5) * cell - a.y);
+        if (d > R) continue;
+        const lat = 1 - Math.min(d / a.w, 1) ** 2 * 0.85;
+        const v = spd * lat;
+        // MAX-wins write: a meander's far-side station stamps this cell later
+        // at a bigger d — overwriting would erase the thalweg's own stronger
+        // stamp (the flow must not fade wherever the channel bends)
+        const cur = Math.hypot(flow[k * 2], flow[k * 2 + 1]);
+        if (v > cur) {
+          flow[k * 2] = (dx / ds) * v;
+          flow[k * 2 + 1] = (dy / ds) * v;
+        }
+      }
+    }
+  }
+  {
+    // soften the DIRECTION (station-to-station tangent jitter) but keep the
+    // magnitude as a local MAX — a mean would average a narrow thalweg away
+    // into its dry neighbours (a 1-2 cell channel reading 0.03 everywhere
+    // was exactly that: the river must stay vigorous where it IS vigorous)
+    const tmp = flow.slice();
+    for (let j = 0; j < GRID; j++) {
+      for (let i = 0; i < GRID; i++) {
+        let sx = 0, sy = 0, sm = 0, mx = 0;
+        for (let dj = -1; dj <= 1; dj++) {
+          for (let di = -1; di <= 1; di++) {
+            const ii = i + di, jj = j + dj;
+            if (ii < 0 || ii >= GRID || jj < 0 || jj >= GRID) continue;
+            const kk = jj * GRID + ii;
+            const vx = tmp[kk * 2], vy = tmp[kk * 2 + 1];
+            const m = Math.hypot(vx, vy);
+            sx += vx; sy += vy; sm += m;
+            if (m > mx) mx = m;
+          }
+        }
+        const k = j * GRID + i;
+        if (sm > 1e-4) {
+          const inv = mx / (Math.hypot(sx, sy) || 1); // weighted dir, local-max speed
+          flow[k * 2] = sx * inv;
+          flow[k * 2 + 1] = sy * inv;
+        } else {
+          flow[k * 2] = 0;
+          flow[k * 2 + 1] = 0;
+        }
+        // the tarn sits still (a lake with a drift, not a current)
+        const still = 1 - 0.92 * tarnMask[k];
+        flow[k * 2] *= still;
+        flow[k * 2 + 1] *= still;
+      }
+    }
+  }
+
   // ---- 6) climate: temperature (lapse) + moisture (windward/lee/river) ----
   const tempC = new Float32Array(GRID * GRID);
   const moisture = new Float32Array(GRID * GRID);
@@ -455,13 +542,23 @@ export function buildTerrain(seed = 7): TerrainData {
       }
       // river banks get loam alluvium regardless of biome; the GORGE reach
       // (high bed) is gravel bars and banks instead — the one place stone
-      // carries in the river itself
+      // carries in the river itself. Order matters: the alluvium cap below
+      // runs first, the bed-fining override AFTER it (a min(soil,1) cap would
+      // otherwise flatten the gravel back to loam)
       if (riverMask[k] > 0.05 || (riverDist[k] < 12 && b !== B_ICE)) soil[k] = Math.min(soil[k], 1);
       if (gravelMask[k] > 0.12) soil[k] = 5;
       // scree fans at the foot of the steep dry slopes — gravelly colluvium
       // (patches wide enough that their interiors stay PURE gravel past the
       // 5×5 soil blend — the inspector can actually show "Gravel")
       else if (b === B_ROCKY && slope[k] > 0.5 && h < 42 && n3(((i + 0.5) * cell) / 26, ((j + 0.5) * cell) / 26) > 0.1) soil[k] = 5;
+      // river bed: DOWNSTREAM FINING — the mountain reach carries gravel
+      // bars, the lowland bed is alluvial sand, and a noise-dithered band
+      // between (bed ~8..22 m) lets gravel patches fade out downstream (the
+      // 5×5 soil mix then feathers the pedotransfer across the whole reach)
+      if (riverMask[k] > 0.2) {
+        const gravelly = cellH[k] > 15 + 7 * n3(((i + 0.5) * cell) / 22, ((j + 0.5) * cell) / 22);
+        soil[k] = gravelly ? 5 : 0;
+      }
       // the dirt road is built on better-draining loam borrow material
       if (road[k] > 0.35) soil[k] = 1;
       // the settler's meadow at the road's west end (the spawn): cleared
@@ -538,7 +635,7 @@ export function buildTerrain(seed = 7): TerrainData {
     }
   }
 
-  return { height, soil, road, biome, moisture, tempC, river: riverMask, pondCap, riverIn, rockFrac, soilMix, minY: 0, maxY };
+  return { height, soil, road, biome, moisture, tempC, river: riverMask, pondCap, riverIn, rockFrac, soilMix, flow, minY: 0, maxY };
 }
 
 /** the valley road's centreline — ONE definition shared by the terrain

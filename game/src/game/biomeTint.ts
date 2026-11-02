@@ -8,12 +8,16 @@
  * colored square following the player across biome ground.
  */
 import * as THREE from "three";
-import { GRID, WORLD_SIZE, TerrainData, BIOMES, B_ICE, B_MOUNTAIN } from "./terrain";
+import { GRID, WORLD_SIZE, TerrainData, BIOMES, B_ICE, B_MOUNTAIN, B_RIVER } from "./terrain";
 
 const HALF = WORLD_SIZE / 2;
 const biomeCols = BIOMES.map((b) => new THREE.Color(b.color));
 const rockHi = new THREE.Color(0xa8adb2);
 const snow = new THREE.Color(0xf5f8fa);
+// the river bed FINES downstream: stony gray bars in the mountain reach
+// pale into alluvial sand by the lowlands (the water tint rides on top)
+const bedStone = new THREE.Color(0x8f897d);
+const bedSand = new THREE.Color(0xb8a884);
 
 /** bilinear biome colour (x, z in the -HALF..HALF world frame) — blends the
  *  four nearest cells' biome colours so borders shade across ~4 m, not alias */
@@ -58,6 +62,15 @@ export function vertexTint(t: TerrainData, x: number, z: number, h: number, out:
   const bm = biomeIdAt(t, x, z);
   if (bm === B_MOUNTAIN) out.lerp(rockHi, Math.min(Math.max((h - 60) / 55, 0), 0.6));
   if (bm === B_ICE) out.lerp(snow, Math.min(Math.max((h - 92) / 18, 0), 0.85));
+  // the river bed tells the geology: fining = bed elevation 13..28 m — a
+  // gray gravel-cobble gorge paling into sandy alluvium downstream (matches
+  // the soil map's downstream fining so what you SEE through the water is
+  // what the spade meets)
+  if (bm === B_RIVER) {
+    const fining = Math.min(Math.max((h - 13) / 15, 0), 1);
+    out.lerp(bedStone, 0.55 * fining);
+    out.lerp(bedSand, 0.45 * (1 - fining));
+  }
   const m = 0.92 + 0.16 * Math.sin(x * 0.171 + z * 0.137) * Math.sin(x * 0.043 - z * 0.061);
   out.multiplyScalar(m);
 }

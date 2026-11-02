@@ -621,8 +621,13 @@ export class MicroTerrain {
     this.waterTex.minFilter = THREE.LinearFilter;
     this.waterTex.magFilter = THREE.LinearFilter;
     this.waterTex.needsUpdate = true;
+    // flow-field fallback until fx wires the real one in: dead calm (the
+    // shader's wind look — a null sampler would break the program)
+    const flowFb = new THREE.DataTexture(new Uint8Array([128, 128, 0, 255]), 1, 1, THREE.RGBAFormat);
+    flowFb.needsUpdate = true;
     const uniforms: { [k: string]: { value: unknown } } = {
       uWaterTex: { value: this.waterTex },
+      uFlowTex: { value: flowFb },
       uMicroOrigin: { value: new THREE.Vector2(0, 0) },
       uMicroEdge: { value: MICRO_HALF - 0.55 }, // 7.45 — fine sheet fades in over the SAME 0.45 m band
       uTime: { value: 0 },
@@ -910,6 +915,13 @@ export class MicroTerrain {
     (u.uFogColor.value as THREE.Color).copy(fogColor);
     u.uFogDensity.value = fogDensity;
     (u.uWindDir.value as THREE.Vector2).set(Math.cos(windDirRad), Math.sin(windDirRad));
+  }
+
+  /** the river's flow field — fx wires the ONE world texture in so the film
+   *  sheet and the fine-tier sheet carry the SAME current (the river keeps
+   *  flowing across the contact-window edge, no still square follows you) */
+  setFlowTexture(tex: THREE.DataTexture) {
+    this.waterUniforms.uFlowTex.value = tex;
   }
 
   /** World wires the shared ground-state texture in (single source of truth) */
@@ -1934,7 +1946,18 @@ export class MicroTerrain {
         if (iLo < 0) continue;
         const regionArea = cnt * CELL_AREA;
         const mean = accS[k] / cnt;
-        const target = g.nodeH(fi, fj) + g.hPond[k];
+        // the grid's water surface expressed at the FILM's sampling datum:
+        // the bilinear CENTRE height of the fine cell (mean of its 4 nodes),
+        // not nodeH's SE corner. On sloping ground — the river's gorge bed
+        // above all — the corner node sits slope×2 m off the centre; that
+        // offset swallowed the whole 0.3 m channel pond and the loan NEVER
+        // fired: the film stayed bone dry over running water (the puddle
+        // sheet then faded out inside the window and the river simply ended
+        // in a dry square around the player)
+        const H = this.terrain.height, G1 = GRID + 1;
+        const centreH = (H[fj * G1 + fi] + H[fj * G1 + fi + 1]
+          + H[(fj + 1) * G1 + fi] + H[(fj + 1) * G1 + fi + 1]) * 0.25;
+        const target = centreH + g.hPond[k];
         if (mean < target - 1e-3 && g.hPond[k] > 1e-7) {
           // grid surface stands proud: loan water down (uniform lift)
           const dv = Math.min((target - mean) * regionArea, g.hPond[k] * FINE_AREA);

@@ -125,8 +125,13 @@ export const CFG = {
    *  (terrain.pondCap) so the river can hold a real channel of water. */
   depressionMaxM: 0.25,
   /** river source (tarn) spring discharge [m³/s] — feeds the channel every
-   *  physics tick; the water genuinely travels the D8 route to the map edge */
-  riverSpringQ: 0.06,
+   *  physics tick; the water genuinely travels the D8 route to the map edge.
+   *  2.0 m³/s is a mountain-catchment spring: it SUSTAINS the channel's
+   *  running depth (Manning equilibrium ~0.13-0.23 m over the reaches, below
+   *  the 0.55 m river pondCap). The old 0.06 could not — the t=0 channel
+   *  water drained off the map edge within the first game-minutes and the
+   *  "river" was a damp line by the time anyone walked to it */
+  riverSpringQ: 2.0,
   // ---- shallow bedrock (the crags) ------------------------------------
   /** bearing boost at full bare-rock fraction (rock is a raft: q_ult climbs
    *  toward what the rock mass itself carries, not the soil mantle) */

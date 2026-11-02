@@ -29,6 +29,10 @@ export class StormFX {
   splash: THREE.InstancedMesh;
   dust: THREE.InstancedMesh;
   puddleMesh: THREE.Mesh;
+  /** the river's flow field as a world texture (RG = dir·speed, B = vigour)
+   *  — ONE texture shared by this sheet and the contact film sheet so the
+   *  current reads identically across the window edge */
+  flowTex: THREE.DataTexture;
   private rainGeo: THREE.InstancedBufferGeometry;
 
   /** quality-level cap on visible drops (setRainQuality) */
@@ -86,6 +90,9 @@ export class StormFX {
     this.buildDust();
     this.buildMudDrops();
     this.buildPuddles();
+    // the contact-tier film sheet rides the SAME flow field (set once — the
+    // river doesn't move, it just travels along itself)
+    if (this.micro) this.micro.setFlowTexture(this.flowTex);
 
     this.splashLife = new Float32Array(this.splashCount).fill(-1);
     this.splashPos = new Float32Array(this.splashCount * 3);
@@ -308,6 +315,21 @@ export class StormFX {
 
   // ----------------------------------------------------------------- puddles
   private buildPuddles() {
+    // the flow field texture: RG = world-space dir·speed (−1..1), B = vigour
+    // 0..1. Ponds / dry ground encode (0,0,0) — the shader's wind look. 4 m
+    // texels, linear-filtered: the current bends smoothly with the channel
+    const fdat = new Uint8Array(GRID * GRID * 4);
+    for (let k = 0; k < GRID * GRID; k++) {
+      const fxv = this.terrain.flow[k * 2], fyv = this.terrain.flow[k * 2 + 1];
+      fdat[k * 4] = Math.max(0, Math.min(255, Math.round(fxv * 127.5 + 127.5)));
+      fdat[k * 4 + 1] = Math.max(0, Math.min(255, Math.round(fyv * 127.5 + 127.5)));
+      fdat[k * 4 + 2] = Math.max(0, Math.min(255, Math.round(Math.hypot(fxv, fyv) * 255)));
+      fdat[k * 4 + 3] = 255;
+    }
+    this.flowTex = new THREE.DataTexture(fdat, GRID, GRID, THREE.RGBAFormat);
+    this.flowTex.minFilter = THREE.LinearFilter;
+    this.flowTex.magFilter = THREE.LinearFilter;
+    this.flowTex.needsUpdate = true;
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(0), 3));
     geo.setAttribute("aDepth", new THREE.BufferAttribute(new Float32Array(0), 1));
@@ -331,6 +353,7 @@ export class StormFX {
         // so no thinned-water square ring follows the player
         uWinOrigin: { value: new THREE.Vector2(0, 0) },
         uWinHalf: { value: MICRO_HALF - 0.55 },
+        uFlowTex: { value: this.flowTex },
       },
       vertexShader: `
         attribute float aDepth; // pond depth at this vertex [m]
