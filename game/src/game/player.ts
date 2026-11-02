@@ -277,6 +277,41 @@ export class Player {
     this.cold = Math.max(0, Math.min(1, this.cold
       + dt * (a.wetAmount > 0.4 && spd < 1.5 ? 0.1 : -0.12)));
     a.cold = this.cold;
+    a.yaw = this.yaw;
+
+    // --- NEW: Feed Physics Circumstances into the Procedural System ---
+    
+    // 1. Slope Normal (Already calculated as nrm above)
+    a.slopeNormal.set(nrm[0], nrm[1], nrm[2]);
+    
+    // 2. World Velocity (For momentum/inertia calculations)
+    a.worldVelocity.set(
+      move.x * this.speed, 
+      this.jumpVel, 
+      move.z * this.speed
+    );
+
+    // 3. Wind Velocity (Hook this up to your weather/storm engine)
+    // Using a placeholder to ensure the code runs; pass real wind data if available
+    a.windVelocity.set(0, 0, 0); 
+
+    // 4. Micro-Terrain Foot Heights (Crucial for IK foot planting)
+    // We calculate where the feet *would* be based on the current gait phase
+    const fwdVec = new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+    const rightVec = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+    
+    const lFootPos = this.pos.clone()
+      .addScaledVector(rightVec, 0.13)
+      .addScaledVector(fwdVec, Math.sin(a.gaitPhase) * 0.25);
+      
+    const rFootPos = this.pos.clone()
+      .sub(rightVec.clone().multiplyScalar(0.13))
+      .sub(fwdVec.clone().multiplyScalar(Math.sin(a.gaitPhase) * 0.25));
+
+    // Calculate how far the ground is below (or above) the hips
+    a.leftFootTerrainY = this.groundHeightAt(lFootPos.x, lFootPos.z) - this.pos.y;
+    a.rightFootTerrainY = this.groundHeightAt(rFootPos.x, rFootPos.z) - this.pos.y;
+
     a.update(dt);
 
     this.group.position.set(this.pos.x, this.pos.y, this.pos.z);
