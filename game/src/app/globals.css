@@ -237,6 +237,8 @@ body { background: #05070a; overflow: hidden; }
   padding-left: 0.45em; /* balance letter-spacing */
 }
 .hud-boot-sub { font-size: 0.9rem; letter-spacing: 0.28em; color: #b9a985; }
+.hud-boot-build { margin-top: 10px; font-size: 0.7rem; letter-spacing: 0.22em; color: #8a7d5f; opacity: 0.85; }
+.hud-build { position: absolute; top: 6px; left: 10px; font-size: 0.6rem; letter-spacing: 0.14em; opacity: 0.4; }
 .hud-boot-ctl {
   margin-top: 34px; font-size: 0.85rem; letter-spacing: 0.35em; color: #e8c987;
   border: 1px solid rgba(232,201,135,0.4); padding: 12px 28px 12px 34px;

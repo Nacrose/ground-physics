@@ -6,6 +6,7 @@
  */
 import { GRID, WORLD_SIZE, TerrainData } from "./terrain";
 import { Ground } from "./ground";
+import { BUILD_TAG } from "./params";
 
 export interface HUDState {
   tMin: number;
@@ -173,12 +174,17 @@ export class HUD {
       <div class="hud-hint-sub">the ground is stateful — dig it, churn it, compact it; the soil remembers</div>`;
     this.root.appendChild(this.hintEl);
 
+    // ---- build stamp (tiny, dim, top-left) ----------------------------------
+    const buildEl = div("hud-build", `BUILD ${BUILD_TAG}`);
+    this.root.appendChild(buildEl);
+
     // ---- boot screen -------------------------------------------------------------
     this.bootEl = document.createElement("div");
     this.bootEl.className = "hud-boot";
     this.bootEl.innerHTML = `
       <div class="hud-boot-title">STORMCOUNTRY</div>
       <div class="hud-boot-sub">a living rain &amp; ground-physics engine</div>
+      <div class="hud-boot-build">build ${BUILD_TAG}</div>
       <div class="hud-boot-ctl">CLICK TO RIDE OUT</div>`;
     this.root.appendChild(this.bootEl);
   }

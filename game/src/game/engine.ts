@@ -10,7 +10,7 @@ import { World } from "./world";
 import { StormFX } from "./fx";
 import { Player, InputState } from "./player";
 import { WeatherPlayer } from "./weather";
-import { PRESETS, WeatherEntry } from "./params";
+import { PRESETS, WeatherEntry, BUILD_TAG } from "./params";
 import { MicroTerrain } from "./contact";
 import { Tunnel } from "./tunnel";
 import { HUD, SettingDef, SettingValue } from "./hud";
@@ -208,6 +208,8 @@ export class Game {
     if (typeof window !== "undefined") {
       (window as unknown as { __game?: Game }).__game = this;
     }
+    // identify the shipped build — ends the "which zip is running" guessing
+    console.log(`[stormcountry] build ${BUILD_TAG}`);
     this.loop();
   }
 

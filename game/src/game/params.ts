@@ -202,6 +202,11 @@ export interface PresetDef {
   wetStart: boolean; // start pre-soaked (clear-sky drying story)
 }
 
+/** shipped-build tag — shown on the boot screen, the HUD corner and the
+ *  browser console so a running game always identifies itself (bump on every
+ *  delivery; format MM-DD + letter) */
+export const BUILD_TAG = "11-03c";
+
 export const PRESETS: PresetDef[] = [
   { key: "clear_sky", label: "Clear Sky — drying cycle", labelShort: "CLEAR SKY", timescale: 24, initSat: 0.78, wetStart: true },
   { key: "drizzle", label: "Drizzle — stratiform band", labelShort: "DRIZZLE", timescale: 8, initSat: 0.5, wetStart: false },

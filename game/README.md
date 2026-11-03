@@ -1,5 +1,10 @@
 # Stormcountry — the playable 3D layer
 
+> **Build 11-03c** — soil regimes (Voronoi mudcracks, per-moisture-state
+> structure). The running game shows `BUILD 11-03c` on the boot screen, in the
+> HUD's top-left corner and in the browser console — check it to confirm which
+> build you are playing.
+
 A third-person, RDR2-flavoured weather sandbox built on the **same physics as the
 Python `rwengine`** in this repository. You run around a 768 m biome world
 while a real storm passes over you: rain hammers down with a Marshall-Palmer
