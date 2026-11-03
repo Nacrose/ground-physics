@@ -1,7 +1,7 @@
 /**
  * HUD: RDR2-flavoured minimal interface — circular minimap with a live
  * wetness/mud overlay, weather readout, wagon trafficability verdict,
- * the soil inspector card (E), cinematic letterbox / grain / vignette / flash
+ * the soil inspector card (I), cinematic letterbox / grain / vignette / flash
  * overlays, and the boot screen.
  */
 import { GRID, WORLD_SIZE, TerrainData } from "./terrain";
@@ -160,7 +160,8 @@ export class HUD {
         <span>F</span><span>dig (hold) — spade / drive the face</span>
         <span>B</span><span>cut an adit into a hillside</span>
         <span>R</span><span>raise a timber set in the adit</span>
-        <span>E</span><span>inspect soil</span>
+        <span>I</span><span>inspect soil</span>
+        <span>E</span><span>mount / dismount the bike (when near)</span>
         <span>1 – 5</span><span>weather front over this ground</span>
         <span>Shift + 1 – 5</span><span>fresh scenario world</span>
         <span>T</span><span>time speed</span>

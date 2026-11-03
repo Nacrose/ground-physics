@@ -47,7 +47,7 @@ TEXTURE / BEDROCK rows) and the mud itself all know where you are.
 *Thunderstorm peak — 135 mm/h, the wagon is BOGGED with a 70 cm rut.*
 
 ![soil inspector](docs/screenshot-soil-inspector.jpg)
-*The soil inspector (E) — live Terzaghi / Fredlund / Atterberg column survey under your feet.*
+*The soil inspector (I) — live Terzaghi / Fredlund / Atterberg column survey under your feet.*
 
 ---
 
@@ -73,7 +73,8 @@ No other setup: the five weather timelines are bundled in `public/weather/`.
 | `Shift` | sprint |
 | `Space` | jump (a pathetic hop when bogged) |
 | mouse wheel | camera zoom |
-| `E` | soil inspector — live column survey at your feet |
+| `I` | soil inspector — live column survey at your feet |
+| `E` | mount / dismount the steampunk bike (when near) |
 | `T` | cycle time scale (1× … 64×) |
 | `1`–`5` | switch scenario: clear sky, drizzle, thunderstorm, cold front, monsoon |
 | `G` | cycle graphics quality (LOW / MEDIUM / HIGH / ULTRA) |

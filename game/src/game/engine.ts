@@ -397,7 +397,7 @@ export class Game {
       if (code === "KeyO" || code === "Escape") this.toggleSettings();
       return;
     }
-    if (code === "KeyE") this.toggleInspector();
+    if (code === "KeyI") this.toggleInspector();
     if (code === "KeyO") this.toggleSettings();
     if (code === "KeyT") {
       const w = this.weather;

@@ -289,7 +289,7 @@ export class SteampunkWorkerBot {
 export class SteampunkFleet {
   group = new THREE.Group(); bike: SteampunkBike; drones: SteampunkDrone[] = []; bots: SteampunkWorkerBot[] = [];
   mounted = false; lastPlayerPos = new THREE.Vector3(); lastInput: InputLike | null = null;
-  private keyHandler = (e: KeyboardEvent) => { if (e.code === "KeyE") this.toggleMount(); if (e.code === "KeyI") this.printInventory(); };
+  private keyHandler = (e: KeyboardEvent) => { if (e.code === "KeyE") this.toggleMount(); if (e.code === "KeyP") this.printInventory(); };
   constructor(scene: THREE.Scene, getHeight: (x: number, z: number) => number, spawn: THREE.Vector3, private fx?: any, private trample?: TrampleLike) {
     this.bike = new SteampunkBike(getHeight, spawn.clone(), fx); this.group.add(this.bike.group);
     const movementDrone = new SteampunkDrone("movement", getHeight, spawn.clone().add(V(1.5, 2.2, 1.2)), fx, trample);
