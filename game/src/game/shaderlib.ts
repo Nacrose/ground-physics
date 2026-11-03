@@ -13,7 +13,26 @@ import { WORLD_SIZE } from "./terrain";
 
 /** cheap deterministic value noise + 2-octave fbm on world-metre coords */
 export const NOISE_GLSL = /* glsl */ `
-float shHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float shHash(vec2 p) { vec3 q = fract(vec3(p.xyx) * 0.1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
+vec2 shHash22(vec2 p) { vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973)); q += dot(q, q.yzx + 33.33); return fract((q.xx + q.yz) * q.zy); }
+// cellular noise: x = distance to nearest feature point, y = second nearest,
+// z = per-cell random id. (y - x) ~ 0 on cell borders -> crack networks;
+// x alone -> rounded aggregates (crumb).
+vec3 shWorley(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  float d1 = 8.0, d2 = 8.0, id = 0.0;
+  for (int j = -1; j <= 1; j++) {
+    for (int k = -1; k <= 1; k++) {
+      vec2 g = vec2(float(k), float(j));
+      vec2 o = shHash22(i + g);
+      vec2 r = g + o - f;
+      float d = dot(r, r);
+      if (d < d1) { d2 = d1; d1 = d; id = o.x + o.y * 1.7; }
+      else if (d < d2) { d2 = d; }
+    }
+  }
+  return vec3(sqrt(d1), sqrt(d2), fract(id));
+}
 float shNoise(vec2 p) {
   vec2 i = floor(p), f = fract(p);
   vec2 u = f * f * (3.0 - 2.0 * f);
@@ -29,23 +48,12 @@ float shFbm(vec2 p) { return 0.55 * shNoise(p) + 0.30 * shNoise(p * 2.7) + 0.15 
  */
 const CRACK_SEAM_GLSL = /* glsl */ `
 float crackSeam(vec2 wuv, float plateM, float worldSizeM) {
-  vec2 wpM = wuv * worldSizeM;
-  // organic plate warp: real desiccation cracks form IRREGULAR polygons,
-  // never a square lattice. The warp frequency must be at PLATE scale
-  // (~1 m features) so neighbouring plates get different offsets — a
-  // low-frequency warp just shifts the whole grid rigidly and it still
-  // reads as perfect squares (needs shNoise from NOISE_GLSL, included
-  // before MUD_SURFACE_GLSL by both callers)
-  vec2 warp = vec2(shNoise(wpM * 0.85) - 0.5, shNoise(wpM * 0.85 + 31.7) - 0.5)
-            + 0.5 * vec2(shNoise(wpM * 2.3 + 11.3) - 0.5, shNoise(wpM * 2.3 + 47.9) - 0.5);
-  vec2 cp = (wpM + warp * plateM * 0.6) / plateM;
-  vec2 cid = floor(cp);
-  vec3 p3s = fract(vec3(cid.xyx) * 0.1031);
-  p3s += dot(p3s, p3s.yzx + 33.33);
-  float hsh = fract((p3s.x + p3s.y) * p3s.z);
-  vec2 f = fract(cp);
-  float edge = min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y));
-  return 1.0 - smoothstep(0.015 + 0.05 * hsh, 0.06 + 0.06 * hsh, edge);
+  // Voronoi plates: irregular polygons with 5-7 sides and tapering seams,
+  // like real mudcracks (a warped square lattice always reads as paving)
+  vec3 w = shWorley(wuv * worldSizeM / plateM);
+  float e = w.y - w.x;               // ~0 on a plate border
+  float jit = fract(w.z * 7.31);     // each plate its own seam width
+  return 1.0 - smoothstep(0.03 + 0.04 * jit, 0.09 + 0.07 * jit, e);
 }
 `;
 
@@ -93,6 +101,48 @@ void mudSurface(inout vec3 col, inout float rough, vec2 wuv, float wet, float mu
   // moisture ramp: one monotone curve with a visible step between every
   // state (OMC is damp, saturated is 2.4 stops down — never the same color)
   col *= 1.0 - 0.60 * pow(clamp(wet, 0.0, 1.0), 0.62);
+  // ---- moisture-regime STRUCTURE (cm-scale), faded out with eye distance so it
+  // never shimmers and costs nothing past ~40 m. The ramp above sets the
+  // colour of each state; this gives each state its TEXTURE:
+  //   very dry  pale, dusty grain; clayey ground cracks into curled plates
+  //   OMC       friable crumb — rounded aggregates, dark crevices, matte
+  //   saturated slumped smooth (structure fades out)
+  float wetC = clamp(wet, 0.0, 1.0);
+  float dryW = 1.0 - smoothstep(0.04, 0.34, wetC);
+  float omcW = smoothstep(0.14, 0.42, wetC) * (1.0 - smoothstep(0.62, 0.90, wetC));
+  float satW = smoothstep(0.66, 0.96, wetC);
+  float eyeD = length(mp - 0.5 * worldSizeM - cameraPosition.xz) + 0.5 * abs(cameraPosition.y);
+  float lodNear = 1.0 - smoothstep(9.0, 40.0, eyeD);
+  float lodGrain = 1.0 - smoothstep(4.0, 20.0, eyeD);
+  float grainN = (shNoise(mp * 65.0) - 0.5) * 0.17 + (shNoise(mp * 19.0) - 0.5) * 0.11;
+  col *= 1.0 + grainN * lodGrain * (0.45 + 0.85 * dryW) * (1.0 - 0.7 * satW);
+  float lumS = dot(col, vec3(0.299, 0.587, 0.114));
+  col = mix(col, vec3(lumS), 0.18 * dryW) * (1.0 + 0.08 * dryW);   // dry soil: paler, greyer
+  // which ground cracks: soil id byte 0/.2/.4/.6/.8/1 = sandy loam / loam /
+  // silty clay loam / dune sand / muck / gravel — clay shrinks, sand does not
+  float sId = g2.a;
+  float clayS = sId < 0.1 ? 0.15 : (sId < 0.3 ? 0.55 : (sId < 0.5 ? 1.0 : (sId < 0.7 ? 0.0 : (sId < 0.9 ? 0.2 : 0.0))));
+  float kC = dryW * lodNear * clayS * smoothstep(0.20, 0.55, shNoise(mp * 0.21));
+  if (kC > 0.01) {
+    vec3 w1 = shWorley(mp * 2.6);                       // ~38 cm plates
+    float e1 = w1.y - w1.x;
+    float crack1 = 1.0 - smoothstep(0.035, 0.105, e1);  // 1.5-4 cm wide
+    vec3 w2 = shWorley(mp * 9.0 + 17.0);                // ~11 cm secondary net
+    float crack2 = (1.0 - smoothstep(0.030, 0.075, w2.y - w2.x)) * smoothstep(0.30, 0.70, w1.x);
+    float plate = 0.90 + 0.20 * w1.z;                   // each plate its own tone
+    float lip = smoothstep(0.10, 0.30, e1);             // curled edges catch light
+    col *= mix(1.0, plate * (0.86 + 0.18 * lip), kC);
+    col *= 1.0 - clamp(crack1 + 0.6 * crack2, 0.0, 1.0) * kC * 0.64;
+  }
+  float kO = omcW * lodNear * (1.0 - 0.6 * satW);
+  if (kO > 0.01) {
+    vec3 c1 = shWorley(mp * 11.0 + 5.0);                // ~9 cm crumbs
+    // gentle: tilth is texture, not spots — crevices darken ~20%, aggregates lift ~8%
+    float shade = mix(1.08, 0.80, smoothstep(0.0, 0.62, c1.x)) * (0.95 + 0.10 * c1.z);
+    vec3 c2 = shWorley(mp * 2.6 + 41.0);                // ~38 cm clods
+    shade *= mix(1.0, 0.90 + 0.16 * smoothstep(0.0, 0.6, c2.x), 0.6);
+    col *= mix(1.0, shade, kO * (0.55 + 0.45 * lodNear));
+  }
   // mud body: the soil's own bare FINES, saturated past the liquid limit —
   // darker than the same soil in any wet state (a mud pool also buries the
   // vegetation tint, so this is absolute, not col-relative). Mottle is ±13%
@@ -149,14 +199,30 @@ void mudSurface(inout vec3 col, inout float rough, vec2 wuv, float wet, float mu
  */
 export const MUD_NORMAL_GLSL = /* glsl */ `
 void mudNormal(inout vec3 nrm, vec2 wuv, float wet, float mud, float worldSizeM) {
-  float amp = 0.030 * mud + 0.018 * wet;
-  if (amp < 1e-4) return;
   vec2 mp = wuv * worldSizeM;
+  float eyeD = length(mp - 0.5 * worldSizeM - cameraPosition.xz) + 0.5 * abs(cameraPosition.y);
+  float lodGrain = 1.0 - smoothstep(4.0, 22.0, eyeD);
+  float wetC = clamp(wet, 0.0, 1.0);
+  // dry + moist soil is rough at the cm scale (grit, crumbs); saturated smooths out
+  float roughSoil = (1.0 - smoothstep(0.55, 0.95, wetC)) * lodGrain;
+  float amp = 0.030 * mud + 0.018 * wet;
+  if (amp < 1e-4 && roughSoil < 1e-3) return;
   float e = 0.05;
-  float c0 = shFbm(mp * 6.0);
-  float cx = shFbm((mp + vec2(e, 0.0)) * 6.0);
-  float cz = shFbm((mp + vec2(0.0, e)) * 6.0);
-  nrm = normalize(nrm + vec3(-(cx - c0) / e * amp, 0.0, -(cz - c0) / e * amp));
+  vec3 d = vec3(0.0);
+  if (amp >= 1e-4) {
+    float c0 = shFbm(mp * 6.0);
+    float cx = shFbm((mp + vec2(e, 0.0)) * 6.0);
+    float cz = shFbm((mp + vec2(0.0, e)) * 6.0);
+    d += vec3(-(cx - c0) / e * amp, 0.0, -(cz - c0) / e * amp);
+  }
+  if (roughSoil > 1e-3) {
+    float g = 0.02;
+    float h0 = shNoise(mp * 38.0) + 0.6 * shNoise(mp * 14.0);
+    float hx = shNoise((mp + vec2(g, 0.0)) * 38.0) + 0.6 * shNoise((mp + vec2(g, 0.0)) * 14.0);
+    float hz = shNoise((mp + vec2(0.0, g)) * 38.0) + 0.6 * shNoise((mp + vec2(0.0, g)) * 14.0);
+    d += vec3(-(hx - h0) / g, 0.0, -(hz - h0) / g) * 0.011 * roughSoil;
+  }
+  nrm = normalize(nrm + d);
 }
 `;
 
