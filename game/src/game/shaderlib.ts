@@ -275,6 +275,14 @@ void waterLook(vec3 wpos, float depth, out vec3 col, out float alpha) {
   // it (and its foam) fades out over the last few metres to the camera and
   // close water keeps the calm wind look instead
   float far = smoothstep(3.0, 16.0, distance(uCamPos, wpos));
+  // distance-adaptive waterline widths, declared early: the solid foam
+  // edge widens from ~18 cm of depth near the camera to ~60 cm at range so
+  // the bright line always subtends several pixels (fixed-metre features go
+  // sub-pixel past ~30 m and the waterline collapses to a raw aliased cut)
+  // cap at ~55% of local depth: a shallow lowland run (0.3-0.5 m) must keep
+  // its water-coloured middle — the foam owns the band, never the whole bed
+  float edgeW = min(mix(0.16, 1.15, far), 0.55 * depth);
+  float edge = (1.0 - smoothstep(0.02, edgeW, depth)) * smoothstep(0.0008, 0.005, depth);
   // wind capillary trains (a pond's look) + rain prickle
   float w1 = sin(dot(p, uWindDir) * 2.4 + uTime * 2.0) * cos(p.x * 1.7 - uTime * 1.4);
   float w2 = sin((p.x + p.y) * 3.1 + uTime * 2.8) * 0.5;
@@ -287,7 +295,10 @@ void waterLook(vec3 wpos, float depth, out vec3 col, out float alpha) {
   float c2 = sin(alongC * 4.6 - drift * 1.4 + acrossC * 0.6);
   float c3 = sin(alongC * 3.1 - drift * 2.1) * sin(acrossC * 2.3 + drift * 0.9); // rapids chop
   float c4 = sin(alongC * 7.3 - drift * 1.9 + acrossC * 1.2) * sin(acrossC * 5.1 + drift * 1.1); // short chop
-  float flowR = (0.55 * c1 + 0.32 * c2 + 0.55 * c3 * spd + 0.45 * c4 * spd) * riverOn;
+  // the long swell: a ~9 m train whose crests stay multi-pixel at 50 m —
+  // the chunky Timberborn-scale motion far water needs (near detail rides c1-c4)
+  float c0 = sin(alongC * 0.70 - drift * 0.45 + warp * 0.5);
+  float flowR = (0.42 * c0 + 0.50 * c1 + 0.28 * c2 + 0.55 * c3 * spd + 0.45 * c4 * spd) * riverOn;
   float ripple = (w1 + w2) * (1.0 - 0.6 * riverOn) + flowR;
   // anisotropic streaks: noise stretched ALONG the current and advected with
   // it — the drifting flow-lines field real rivers show even without foam.
@@ -313,14 +324,24 @@ void waterLook(vec3 wpos, float depth, out vec3 col, out float alpha) {
   // body: teal graded by depth — MULTIPLIED by the scene's sky luminance so
   // it dims with the weather exactly like the ground around it, with a warm
   // sun kiss on the shallows so it sits in the golden-hour light
-  vec3 shal = mix(vec3(0.235, 0.42, 0.40), uSky * vec3(0.40, 0.52, 0.50), 0.30);
-  vec3 deep = vec3(0.052, 0.175, 0.19);
+  vec3 shal = mix(vec3(0.30, 0.55, 0.52), uSky * vec3(0.40, 0.52, 0.50), 0.30);
+  vec3 deep = vec3(0.040, 0.140, 0.170);
   vec3 body = mix(shal, deep, dN);
   body += uSun * 0.05 * (1.0 - dN) * (1.0 - riverOn * 0.5);
-  // moving crest/trough shading — the surface LIVES even looking straight down
-  body *= 0.89 + 0.22 * ripple * (0.25 + dN);
-  body *= 1.0 - 0.34 * riverOn * abs(flowR) * (0.3 + 0.7 * dN);
-  body *= 1.0 + (0.18 + 0.26 * far) * riverOn * (streak - 0.5);
+  // moving crest/trough shading — the surface LIVES even looking straight
+  // down from a hill: strong banding between crests and troughs is what
+  // reads as RELIEF at high viewing angles, and it strengthens with
+  // distance so far water keeps its texture instead of flattening to paint
+  body *= max(0.18, 0.74 + ripple * (0.30 + 0.70 * dN) * (0.50 + 0.42 * far));
+  body *= 1.0 - 0.38 * riverOn * abs(flowR) * (0.3 + 0.7 * dN);
+  body *= 1.0 + (0.22 + 0.30 * far) * riverOn * (streak - 0.5);
+  // contact shadow: a DARK rim on the water hugging the bank, just inside
+  // the foam line — the inset read that makes water sit IN a channel rather
+  // than on the ground (Timberborn's bank shadow), scaled with the same
+  // distance-adaptive width as the edge band
+  float contactW = max(0.15, min(mix(0.25, 0.80, far), 0.70 * depth));
+  float contact = (1.0 - smoothstep(0.0, contactW, depth)) * (1.0 - edge * 0.80);
+  body = mix(body, body * 0.52, contact * (0.50 + 0.30 * far));
   // grazing sky mirror, CAPPED well under sky brightness
   body = mix(body, uSky * 0.55, fres * (0.34 - 0.20 * riverOn));
   body += uSun * glint * (0.4 + 0.6 * dN);
@@ -335,12 +356,9 @@ void waterLook(vec3 wpos, float depth, out vec3 col, out float alpha) {
   // never draws one solid white line along the polygonal waterline) + rapids
   // streaks and crest breaks, patchy (dark water with white streaks)
   float scallop = smoothstep(0.28, 0.62, streak2 + 0.18 * wNoise(p * 3.1));
-  // Timberborn waterline: a SOLID bright edge over the first ~10 cm of
-  // depth (reads as a line from any distance), breaking into scalloped
-  // patches on the fringe out to ~30 cm
-  float edge = (1.0 - smoothstep(0.012, 0.10, depth)) * smoothstep(0.0008, 0.005, depth);
-  float fringe = (1.0 - smoothstep(0.10, 0.30, depth)) * scallop;
-  float band = edge * 0.85 + fringe * 0.55;
+  // the scalloped fringe rides outboard of the solid edge declared above
+  float fringe = (1.0 - smoothstep(edgeW, edgeW + 0.34, depth)) * scallop;
+  float band = edge * 0.97 + fringe * 0.60;
   float rap = riverOn * smoothstep(0.35, 0.70, spd) * mix(0.45, 1.0, far);
   float foam = band;
   foam += rap * (0.55 * smoothstep(0.55, 0.85, streak) + 0.45 * smoothstep(0.62, 0.95, c3));
@@ -375,14 +393,18 @@ void waterLook(vec3 wpos, float depth, out vec3 col, out float alpha) {
  * shoreFade (0..1) kills the waves at the banks so they never poke through
  * the terrain.
  *
- * CALLER CONTRACT: uniform float uTime; uniform vec2 uWindDir; and the
- * VERTEX-STAGE TWIN sampler uFlowTexV — in this three build a sampler uniform
- * shared by both stages never gets its texture bound for the vertex stage
- * (see worldD's twin in world.ts), so the ribbon declares uFlowTexV and
- * points it at the same DataTexture as the fragment's uFlowTex.
+ * CALLER CONTRACT: uniform float uTime; uniform vec2 uWindDir; uniform
+ * vec3 uCamPos; and the VERTEX-STAGE TWIN sampler uFlowTexV — in this three
+ * build a sampler uniform shared by both stages never gets its texture bound
+ * for the vertex stage (see worldD's twin in world.ts), so the ribbon declares
+ * uFlowTexV and points it at the same DataTexture as the fragment's uFlowTex.
+ * uCamPos drives the amplitude LOD: waves GROW with camera distance (up to
+ * 2.4x beyond ~45 m) so the silhouette keeps undulating at range, where
+ * true-scale chop is sub-pixel and the surface reads as flat paint.
  */
 export const WATER_WAVE_GLSL = /* glsl */ `
 uniform sampler2D uFlowTexV;
+uniform vec3 uCamPos;
 float waterWaveY(vec2 p, float shoreFade) {
   vec4 flS = texture2D(uFlowTexV, (p + vec2(${(WORLD_SIZE / 2).toFixed(1)})) / ${WORLD_SIZE.toFixed(1)});
   vec2 fDir = flS.rg * 2.0 - 1.0;
@@ -392,11 +414,17 @@ float waterWaveY(vec2 p, float shoreFade) {
   float acrossC = dot(p, vec2(-fd.y, fd.x));
   float drift = uTime * (0.40 + 2.0 * spd);
   float warp = sin(acrossC * 0.21) * 1.6;
+  // amplitude floor: CALM water still breathes (a flat calm sheet reads as
+  // paint from a hill — vigour scales the rapids, the floor keeps the swell)
+  float vig = 0.30 + 0.70 * clamp(spd, 0.0, 1.0);
   float y = 0.0;
-  y += 0.085 * spd * sin(alongC * 2.05 + warp - drift * 0.85);
-  y += 0.054 * spd * sin(alongC * 4.6 - drift * 1.4 + acrossC * 0.6);
-  y += 0.032 * spd * sin(alongC * 7.3 - drift * 1.9 + acrossC * 1.2);
-  y += 0.016 * sin(dot(p, uWindDir) * 2.4 + uTime * 2.0) * cos(p.x * 1.7 - uTime * 1.4);
-  return y * shoreFade;
+  y += 0.110 * vig * sin(alongC * 2.05 + warp - drift * 0.85);
+  y += 0.062 * vig * sin(alongC * 4.6 - drift * 1.4 + acrossC * 0.6);
+  y += 0.034 * vig * sin(alongC * 7.3 - drift * 1.9 + acrossC * 1.2);
+  y += 0.030 * sin(dot(p, uWindDir) * 2.4 + uTime * 2.0) * cos(p.x * 1.7 - uTime * 1.4);
+  // amplitude LOD: enlarge the trains with camera distance so far water
+  // still undulates on screen (near-camera scale would vanish at 40 m+)
+  float lod = clamp(distance(uCamPos.xz, p) / 45.0, 0.0, 1.0);
+  return y * shoreFade * (1.0 + 2.2 * lod);
 }
 `;

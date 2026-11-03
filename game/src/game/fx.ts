@@ -580,7 +580,14 @@ export class StormFX {
       const fade = Math.max(0, Math.min(1, (p.s - 6) / 26));
       rowStart.push(verts.length / 3);
       for (let c = 0; c <= NA; c++) {
-        const off = -halfW + (2 * halfW * c) / NA;
+        // cross-section distribution CLUSTERED AT THE BANKS: the visible
+        // waterline is the depth iso-contour, and with uniform spacing its
+        // polyline runs on 0.5-1 m segments that read as stair-steps at
+        // distance. A power mapping (|s|^0.45) shrinks the near-bank
+        // segments to ~20 cm (smooth contour where the line lives) and
+        // spends the leftover vertices' width on the flat middle
+        const sc = (2 * c) / NA - 1; // -1..1 across the channel
+        const off = halfW * Math.sign(sc) * Math.pow(Math.abs(sc), 0.45);
         const sx = p.x + nx * off, sz = p.y + nz * off; // 0..WORLD_SIZE frame
         const terH = sampleHeight(this.terrain, sx, sz);
         const depth = Math.max(wl - terH, 0);
@@ -657,10 +664,12 @@ export class StormFX {
           vec3 col;
           float alpha;
           waterLook(vWorld, vDepth, col, alpha);
-          // shoreline: the opaque body runs to within ~2.5 cm of the
-          // waterline, and the SHARED foam edge band owns the visible line
-          // (the old 9 cm veil fade read as paint bleeding into the bank)
-          alpha *= smoothstep(0.0015, 0.025, vDepth) * vFade;
+          // shoreline: anti-aliased ramp over the depth field (continuous
+          // per-fragment) — the ramp WIDENS with camera distance so the
+          // waterline stays a smooth curve instead of an aliased polygon
+          // stair-step at any range; the foam edge band owns the bright line
+          float farR = smoothstep(3.0, 16.0, distance(uCamPos, vWorld));
+          alpha *= smoothstep(0.0, mix(0.04, 0.22, farR), vDepth) * vFade;
           if (alpha < 0.004) discard;
           float fogF = 1.0 - exp(-uFogDensity * uFogDensity * dot(uCamPos - vWorld, uCamPos - vWorld));
           col = mix(col, uFogColor, clamp(fogF, 0.0, 1.0));
