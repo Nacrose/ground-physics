@@ -404,10 +404,10 @@ export class StormFX {
           // the two weights sum to one
           float deepF = smoothstep(0.22, 0.30, vDepth);
           alpha *= mix(vWin, 1.0, deepF);
-          // wide shoreline feather: this sheet's waterline walks a 4 m
-          // lattice, so the veil must open over a deep-ish ramp or the
-          // polygonal cell edge shows as a hard shard line on the bank
-          alpha *= smoothstep(0.002, 0.10, vDepth);
+          // shoreline feather (needed on the 4 m lattice so cell edges never
+          // show as shard lines) — kept narrow: the foam edge band owns the
+          // visible waterline now, the volume runs close behind it
+          alpha *= smoothstep(0.002, 0.055, vDepth);
           if (alpha < 0.004) discard;
           float fogF = 1.0 - exp(-uFogDensity * uFogDensity * dot(uCamPos - vWorld, uCamPos - vWorld));
           col = mix(col, uFogColor, clamp(fogF, 0.0, 1.0));
@@ -657,9 +657,10 @@ export class StormFX {
           vec3 col;
           float alpha;
           waterLook(vWorld, vDepth, col, alpha);
-          // shoreline taper (wide: the last ~1 m of bank fades the veil out
-          // over shallowing water, not on one polygon edge) + tarn handoff
-          alpha *= smoothstep(0.005, 0.09, vDepth) * vFade;
+          // shoreline: the opaque body runs to within ~2.5 cm of the
+          // waterline, and the SHARED foam edge band owns the visible line
+          // (the old 9 cm veil fade read as paint bleeding into the bank)
+          alpha *= smoothstep(0.0015, 0.025, vDepth) * vFade;
           if (alpha < 0.004) discard;
           float fogF = 1.0 - exp(-uFogDensity * uFogDensity * dot(uCamPos - vWorld, uCamPos - vWorld));
           col = mix(col, uFogColor, clamp(fogF, 0.0, 1.0));

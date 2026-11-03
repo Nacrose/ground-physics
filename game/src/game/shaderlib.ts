@@ -335,13 +335,18 @@ void waterLook(vec3 wpos, float depth, out vec3 col, out float alpha) {
   // never draws one solid white line along the polygonal waterline) + rapids
   // streaks and crest breaks, patchy (dark water with white streaks)
   float scallop = smoothstep(0.28, 0.62, streak2 + 0.18 * wNoise(p * 3.1));
-  float band = (1.0 - smoothstep(0.02, 0.14, depth)) * smoothstep(0.0008, 0.006, depth) * scallop;
+  // Timberborn waterline: a SOLID bright edge over the first ~10 cm of
+  // depth (reads as a line from any distance), breaking into scalloped
+  // patches on the fringe out to ~30 cm
+  float edge = (1.0 - smoothstep(0.012, 0.10, depth)) * smoothstep(0.0008, 0.005, depth);
+  float fringe = (1.0 - smoothstep(0.10, 0.30, depth)) * scallop;
+  float band = edge * 0.85 + fringe * 0.55;
   float rap = riverOn * smoothstep(0.35, 0.70, spd) * mix(0.45, 1.0, far);
-  float foam = band * 0.55;
+  float foam = band;
   foam += rap * (0.55 * smoothstep(0.55, 0.85, streak) + 0.45 * smoothstep(0.62, 0.95, c3));
   foam += riverOn * (1.0 - dN) * 0.25 * smoothstep(0.45, 0.85, streak2); // scum lines
-  foam = clamp(foam, 0.0, 0.72);
-  vec3 foamC = mix(vec3(0.86, 0.90, 0.91), uSky, 0.25) * (0.55 + 0.45 * dN);
+  foam = clamp(foam, 0.0, 0.88);
+  vec3 foamC = mix(vec3(0.86, 0.90, 0.91), uSky, 0.25) * (0.72 + 0.28 * dN);
   // grain the foam — aerated water is speckled, not a flat paint fill
   foamC *= 0.82 + 0.30 * wNoise(p * 14.0 + vec2(uTime * 0.7, 0.0));
   foamC *= 0.55 + 0.50 * skyL;
@@ -350,12 +355,15 @@ void waterLook(vec3 wpos, float depth, out vec3 col, out float alpha) {
   // pinch where the film dies into ground, never a solid line
   float men = smoothstep(0.0006, 0.0016, depth) * (1.0 - smoothstep(0.003, 0.008, depth));
   col += uSky * 0.18 * men * (0.45 + 0.55 * wNoise(p * 5.3));
-  // opacity keyed to the SAME depth fraction as the colour: a film is a wet
-  // veil (0.2), a shallow river run stays half-open so the gravel/sand BED
-  // reads through it, deep water and foam claim their pixel. This is the
-  // clarity that makes the downstream fining visible from the bank
-  alpha = mix(0.20, 0.20 + 0.68 * dN, smoothstep(0.004, 0.06, depth));
-  alpha = min(alpha + foam * 0.35, 0.90);
+  // opacity: OPEN WATER CLAIMS ITS PIXEL (the Timberborn read). The river
+  // and any pond past ~8 cm render as one opaque body whose DEPTH reads as
+  // colour — translucent sheets stacked over wet-shaded terrain read as
+  // paint. The downstream bed fining now reads through the bright shallow
+  // gradient and the exposed gravel banks instead of through the water.
+  // Only genuine thin films (<4 cm sheet flow, no current) stay a wet veil.
+  float openVol = max(riverOn, smoothstep(0.045, 0.11, depth));
+  alpha = mix(0.22, 0.94, openVol);
+  alpha = min(alpha + foam * 0.30, 0.96);
 }
 `;
 
@@ -385,10 +393,10 @@ float waterWaveY(vec2 p, float shoreFade) {
   float drift = uTime * (0.40 + 2.0 * spd);
   float warp = sin(acrossC * 0.21) * 1.6;
   float y = 0.0;
-  y += 0.060 * spd * sin(alongC * 2.05 + warp - drift * 0.85);
-  y += 0.038 * spd * sin(alongC * 4.6 - drift * 1.4 + acrossC * 0.6);
-  y += 0.024 * spd * sin(alongC * 7.3 - drift * 1.9 + acrossC * 1.2);
-  y += 0.014 * sin(dot(p, uWindDir) * 2.4 + uTime * 2.0) * cos(p.x * 1.7 - uTime * 1.4);
+  y += 0.085 * spd * sin(alongC * 2.05 + warp - drift * 0.85);
+  y += 0.054 * spd * sin(alongC * 4.6 - drift * 1.4 + acrossC * 0.6);
+  y += 0.032 * spd * sin(alongC * 7.3 - drift * 1.9 + acrossC * 1.2);
+  y += 0.016 * sin(dot(p, uWindDir) * 2.4 + uTime * 2.0) * cos(p.x * 1.7 - uTime * 1.4);
   return y * shoreFade;
 }
 `;

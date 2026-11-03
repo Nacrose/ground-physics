@@ -14,7 +14,11 @@ import { Skeleton } from "./skeleton";
 import { buildSkin, buildSpade, buildLantern, Skin } from "./skin";
 import { Animator } from "./animator";
 import { SteampunkFleet } from "./steampunk";
-import { WaterSurface } from "./water";
+// water NOTE: ponds / rain film / the river are rendered by the fx pond
+// sheet + contact film sheet + river ribbon, all sharing ONE water look
+// (shaderlib WATER_SURFACE_GLSL). An extra player-following sheet was briefly
+// stacked on top — two translucent veils over wet terrain reads as PAINT, so
+// it was removed. One renderer, one look.
 
 export interface InputState {
   forward: number; // -1..1
@@ -56,7 +60,6 @@ export class Player {
   animator: Animator;
   /** steampunk bike/drone/bot fleet */
   steampunk: SteampunkFleet | null = null;
-  water: WaterSurface | null = null;
 
   camera: THREE.PerspectiveCamera;
   private camPitch = 0.18;
@@ -100,11 +103,7 @@ export class Player {
     this.animator = new Animator(this.skeleton);
     this.group.add(this.skeleton.group);
     scene.add(this.group);
-    this.water = new WaterSurface(scene, {
-      groundHeight: (x, z) => this.groundHeightAt(x, z),
-      pondDepth: (x, z) => Math.max(this.ground.sampleMud(x, z).pondM, this.micro.waterAt(x, z)),
-      mud: (x, z) => this.ground.sampleMud(x, z).mud,
-    });
+    // (no water sheet constructed here — see the water NOTE at top of file)
 
     // ---- steampunk fleet ---------------------------------------------------
     this.steampunk = new SteampunkFleet(
@@ -453,7 +452,6 @@ export class Player {
     const look = new THREE.Vector3(this.pos.x, this.pos.y + 1.35, this.pos.z);
     const side = new THREE.Vector3(Math.cos(input.yaw), 0, -Math.sin(input.yaw)).multiplyScalar(0.5);
     look.add(side);
-    if (this.water) { this.water.setCam(this.camera.position); this.water.update(this.pos, dt, elapsed); }
     this.camera.lookAt(look);
   }
 }
