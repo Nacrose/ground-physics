@@ -650,6 +650,8 @@ export class MicroTerrain {
         uniform sampler2D uWaterTex;
         uniform vec2 uMicroOrigin;
         uniform float uMicroEdge;
+        uniform float uTime;
+        uniform vec2 uWindDir;
         varying vec3 vWorld;
         varying float vDepth;
         varying float vEdge;
@@ -662,9 +664,13 @@ export class MicroTerrain {
           vec4 wInfo = texture2D(uWaterTex, mUv);
           vDepth = wInfo.g * ${WATER_DEPTH_ENCODE.toFixed(2)};
           vEdge = 1.0 - smoothstep(uMicroEdge, uMicroEdge + 0.45, max(abs(position.x), abs(position.z)));
-          vec3 wp = vec3(position.x + uMicroOrigin.x, aBaseH + surfOff(mUv) + 0.012, position.z + uMicroOrigin.y);
+          // subtle 3D physical surface ripples on local water
+          float wave = sin(dot(position.xz + uMicroOrigin, uWindDir) * 3.5 + uTime * 2.5) * 0.008;
+          wave *= smoothstep(0.005, 0.035, vDepth);
+          float yPos = aBaseH + surfOff(mUv) + 0.001 + wave;
+          vec3 wp = vec3(position.x + uMicroOrigin.x, yPos, position.z + uMicroOrigin.y);
           vWorld = wp;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position.x, aBaseH + surfOff(mUv) + 0.012, position.z, 1.0);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position.x, yPos, position.z, 1.0);
         }`,
       fragmentShader: `
         uniform float uTime, uRain, uFogDensity;
@@ -675,7 +681,7 @@ export class MicroTerrain {
         varying float vEdge;
         ${WATER_SURFACE_GLSL}
         void main(){
-          if (vDepth < 0.0006) discard;
+          if (vDepth < 0.020) discard;
           // the shared water look (identical constants to the fine-tier
           // puddle sheet — water reads the same on either side of the
           // contact-window edge)
@@ -687,10 +693,9 @@ export class MicroTerrain {
           // translucent layers stack into a bright double-sheen band)
           vec4 flS = texture2D(uFlowTex, (vWorld.xz + vec2(${WORLD_SIZE / 2}.0)) / ${WORLD_SIZE}.0);
           alpha *= 1.0 - smoothstep(0.04, 0.30, flS.b);
-          // deep water (the tarn, deep ponds): the fine-tier sheet owns the
-          // volume — the film fades out over the SAME 0.22..0.30 m band the
-          // pond sheet fades back in on, so the two weights sum to one
-          alpha *= 1.0 - smoothstep(0.22, 0.30, vDepth);
+          // Only genuine puddles (>2-5 cm) show volumetric water; thin rain films (<2 cm)
+          // are handled by the ground material sheen, never hovering sheets
+          alpha *= smoothstep(0.018, 0.045, vDepth);
           // window handoff: the film dissolves across the SAME band the fine
           // sheet fades in over (7.45 -> 7.90 m), so the two weights sum to
           // one — no thinned-water ring at the window edge
@@ -2356,7 +2361,7 @@ export class MicroTerrain {
     const n = NC;
     let any = false;
     for (let v = 0; v < n * n; v++) {
-      if (this.hWater[v] > 6e-4) { any = true; break; }
+      if (this.hWater[v] > 0.035) { any = true; break; }
     }
     if (!any) {
       this.waterMesh.visible = false;
@@ -2370,13 +2375,13 @@ export class MicroTerrain {
       const m = Math.min(Math.abs(off), WATER_ENCODE) / WATER_ENCODE;
       plane[v] = 128 + (off < 0 ? -1 : 1) * 127 * Math.sqrt(m);
     }
-    this.blurPlane(plane);
+    this.blurPlane(plane, 3);
     for (let v = 0; v < n * n; v++)
       t[v * 4] = Math.max(0, Math.min(255, Math.round(plane[v])));
     // G — depth, blurred (soft shoreline)
     for (let v = 0; v < n * n; v++)
       plane[v] = Math.min(this.hWater[v] / WATER_DEPTH_ENCODE, 1) * 255;
-    this.blurPlane(plane);
+    this.blurPlane(plane, 3);
     for (let v = 0; v < n * n; v++)
       t[v * 4 + 1] = Math.max(0, Math.min(255, Math.round(plane[v])));
     for (let v = 0; v < n * n; v++) {

@@ -365,22 +365,30 @@ export class StormFX {
         uWinOrigin: { value: new THREE.Vector2(0, 0) },
         uWinHalf: { value: MICRO_HALF - 0.55 },
         uFlowTex: { value: this.flowTex },
+        uFlowTexV: { value: this.flowTex },
       },
       vertexShader: `
         attribute float aDepth; // pond depth at this vertex [m]
         uniform vec2 uWinOrigin;
         uniform float uWinHalf;
+        uniform float uTime;
+        uniform vec2 uWindDir;
         varying vec3 vWorld;
         varying float vDepth;
         varying float vWin;
+        ${WATER_WAVE_GLSL}
         void main(){
-          vWorld = position;
           vDepth = aDepth;
           // 0 inside the micro window -> 1 across the same 0.45 m band the
           // contact film sheet fades OUT over (the weights sum to one)
           float wd = max(abs(position.x - uWinOrigin.x), abs(position.z - uWinOrigin.y));
           vWin = smoothstep(uWinHalf, uWinHalf + 0.45, wd);
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          vec3 wp = position;
+          // physical 3D waves on open water, gentle shore fade
+          float shoreFade = smoothstep(0.015, 0.18, aDepth);
+          wp.y += waterWaveY(position.xz, shoreFade);
+          vWorld = wp;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(wp, 1.0);
         }`,
       fragmentShader: `
         uniform float uTime, uRain, uFogDensity;
@@ -391,23 +399,14 @@ export class StormFX {
         varying float vWin;
         ${WATER_SURFACE_GLSL}
         void main(){
-          if (vDepth < 0.0006) discard;
+          if (vDepth < 0.020) discard;
           // the shared water look — identical constants to the contact film
           // sheet, so water reads the same on either side of the window edge
           vec3 col;
           float alpha;
           waterLook(vWorld, vDepth, col, alpha);
-          // window handoff, depth-aware: shallow films hand to the contact
-          // sheet inside the window as before, but DEEP water (tarn, ponds,
-          // drowned digs) keeps THIS sheet everywhere — it owns the volume,
-          // and the film sheet fades out over the SAME 0.22..0.30 m band so
-          // the two weights sum to one
-          float deepF = smoothstep(0.22, 0.30, vDepth);
-          alpha *= mix(vWin, 1.0, deepF);
-          // shoreline feather (needed on the 4 m lattice so cell edges never
-          // show as shard lines) — kept narrow: the foam edge band owns the
-          // visible waterline now, the volume runs close behind it
-          alpha *= smoothstep(0.002, 0.055, vDepth);
+          // Only genuine pooled water (>2-5 cm) shows volumetric body
+          alpha *= smoothstep(0.015, 0.045, vDepth);
           if (alpha < 0.004) discard;
           float fogF = 1.0 - exp(-uFogDensity * uFogDensity * dot(uCamPos - vWorld, uCamPos - vWorld));
           col = mix(col, uFogColor, clamp(fogF, 0.0, 1.0));
@@ -444,13 +443,24 @@ export class StormFX {
     // double-layer under it and print phantom water up the banks
     const wet = PUD_WET, surf = PUD_SURF, surfB = PUD_SURFB;
     const riverMask = this.terrain.river;
+    const pondCap = this.terrain.pondCap;
+    const H = this.terrain.height;
+    const G1 = GRID + 1;
     for (let k = 0; k < N; k++) {
-      const depth = hPond[k] + ruts[k] * 0.35;
+      const depth = hPond[k]; // ONLY actual liquid water from ponding (never dry wheel ruts!)
       const j = Math.floor(k / GRID), i = k - j * GRID;
       const cx = (i + 0.5) * cell, cz = (j + 0.5) * cell;
       surf[k] = sampleHeight(this.terrain, cx, cz)
         + this.ground.dynLiftBilerp(cx - HALF, cz - HALF) + depth;
-      wet[k] = depth >= 0.0009 && riverMask[k] <= 0.15 ? Math.min(depth / 0.05, 1) : 0;
+      // Slope check: standing water CANNOT form on slopes!
+      const c00 = j * G1 + i, c10 = c00 + 1, c01 = c00 + G1, c11 = c01 + 1;
+      const sx = Math.abs((H[c10] + H[c11]) - (H[c00] + H[c01])) / (2 * cell);
+      const sz = Math.abs((H[c01] + H[c11]) - (H[c00] + H[c10])) / (2 * cell);
+      const cellSlope = Math.hypot(sx, sz);
+      // ONLY allow standing water tables in genuine deep basins (tarn lake) or deep pools (>8 cm of water on flat ground)
+      const isLake = (this.terrain.riverIn && this.terrain.riverIn[k] > 0.5) || (pondCap && pondCap[k] > 0.9);
+      const canPond = isLake || (cellSlope < 0.035 && depth >= 0.08);
+      wet[k] = canPond && riverMask[k] <= 0.15 ? Math.min(depth / 0.20, 1) : 0;
     }
     // ---- pass 2: four wet-weighted 3×3 blur passes (effective ~5 m) —
     // flattens the table ACROSS a water body (the tarn's bowl-following
@@ -525,12 +535,15 @@ export class StormFX {
         const c01 = c00 + (GRID + 1), c11 = c01 + 1;
         const d00 = Math.max(cT[c00] - cG[c00], 0), d10 = Math.max(cT[c10] - cG[c10], 0);
         const d01 = Math.max(cT[c01] - cG[c01], 0), d11 = Math.max(cT[c11] - cG[c11], 0);
-        if (d00 < 0.0008 && d10 < 0.0008 && d01 < 0.0008 && d11 < 0.0008) continue;
+        // Only emit quads for genuine water bodies with liquid depth (never thin rain films on slopes)
+        if (d00 < 0.030 && d10 < 0.030 && d01 < 0.030 && d11 < 0.030) continue;
         const x0 = i * cell - HALF, x1 = x0 + cell;
         const z0 = j * cell - HALF, z1 = z0 + cell;
-        // per-corner surface = ground + table depth (+12 mm z-fight guard)
-        const y00 = cG[c00] + 0.012 + d00, y10 = cG[c10] + 0.012 + d10;
-        const y11 = cG[c11] + 0.012 + d11, y01 = cG[c01] + 0.012 + d01;
+        // per-corner surface = level water table, flush with ground at shorelines (never hovering in air)
+        const y00 = Math.min(cT[c00], cG[c00] + d00) + 0.001;
+        const y10 = Math.min(cT[c10], cG[c10] + d10) + 0.001;
+        const y11 = Math.min(cT[c11], cG[c11] + d11) + 0.001;
+        const y01 = Math.min(cT[c01], cG[c01] + d01) + 0.001;
         verts.push(x0, y00, z0, x1, y10, z0, x1, y11, z1, x0, y00, z0, x1, y11, z1, x0, y01, z1);
         depths.push(d00, d10, d11, d00, d11, d01);
       }
@@ -571,29 +584,20 @@ export class StormFX {
       const tl = Math.hypot(tx, ty) || 1;
       tx /= tl; ty /= tl; // downstream tangent
       const nx = -ty, nz = tx; // across-channel normal
-      // the water level: a shallow rushing gorge deepening to a calm lowland
-      // channel — bank-full-ish, so the waterline rides the carved banks and
-      // the bed fining reads through the clear upper reach
-      const wl = p.bed + 0.16 + 0.30 * (p.s / sMax);
-      const halfW = p.w + 1.9; // a touch past the bank crest for the waterline
+      // the water level: deeply nested inside the carved canyon (1.8m deep water, 1.2m below banks)
+      const wl = p.bed - 0.60 + 0.35 * (p.s / sMax);
+      const halfW = p.w * 0.85; // strictly inside the carved canyon channel
       // fade in past the tarn — the tarn's own pond sheet owns the lake
       const fade = Math.max(0, Math.min(1, (p.s - 6) / 26));
       rowStart.push(verts.length / 3);
       for (let c = 0; c <= NA; c++) {
-        // cross-section distribution CLUSTERED AT THE BANKS: the visible
-        // waterline is the depth iso-contour, and with uniform spacing its
-        // polyline runs on 0.5-1 m segments that read as stair-steps at
-        // distance. A power mapping (|s|^0.45) shrinks the near-bank
-        // segments to ~20 cm (smooth contour where the line lives) and
-        // spends the leftover vertices' width on the flat middle
         const sc = (2 * c) / NA - 1; // -1..1 across the channel
-        const off = halfW * Math.sign(sc) * Math.pow(Math.abs(sc), 0.45);
+        const off = halfW * Math.sign(sc) * Math.pow(Math.abs(sc), 0.65);
         const sx = p.x + nx * off, sz = p.y + nz * off; // 0..WORLD_SIZE frame
         const terH = sampleHeight(this.terrain, sx, sz);
         const depth = Math.max(wl - terH, 0);
-        // dive under the bank where terrain rises past the waterline (the
-        // sheet follows the ground there, hidden, and alpha dies on depth)
-        const y = Math.min(wl, terH + 0.02);
+        // Level horizontal water surface across the channel at height wl (Timberborn style)
+        const y = wl;
         verts.push(sx - HALF, y, sz - HALF);
         depths.push(depth);
         fades.push(fade);
@@ -604,7 +608,7 @@ export class StormFX {
       for (let c = 0; c < NA; c++) {
         const r0 = rowStart[i] + c, r1 = rowStart[i] + c + 1;
         const r2 = rowStart[i + 1] + c, r3 = rowStart[i + 1] + c + 1;
-        if (Math.max(depths[r0], depths[r1], depths[r2], depths[r3]) < 0.004) continue;
+        if (Math.max(depths[r0], depths[r1], depths[r2], depths[r3]) < 0.05) continue;
         idx.push(r0, r2, r1, r1, r2, r3);
       }
     }
@@ -669,7 +673,7 @@ export class StormFX {
           // waterline stays a smooth curve instead of an aliased polygon
           // stair-step at any range; the foam edge band owns the bright line
           float farR = smoothstep(3.0, 16.0, distance(uCamPos, vWorld));
-          alpha *= smoothstep(0.0, mix(0.04, 0.22, farR), vDepth) * vFade;
+          alpha *= smoothstep(0.0, mix(0.02, 0.12, farR), vDepth) * vFade;
           if (alpha < 0.004) discard;
           float fogF = 1.0 - exp(-uFogDensity * uFogDensity * dot(uCamPos - vWorld, uCamPos - vWorld));
           col = mix(col, uFogColor, clamp(fogF, 0.0, 1.0));

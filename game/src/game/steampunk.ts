@@ -192,10 +192,10 @@ function buildWorkerBot() {
 }
 
 export class SteampunkBike {
-  group: THREE.Group; pos = new THREE.Vector3(); yaw = 0; speed = 0;
+  group: THREE.Group; pos = new THREE.Vector3(); yaw = 0; speed = 0; lean = 0;
   private wheelFront: THREE.Group; private wheelRear: THREE.Group; private crank: THREE.Group;
-  private pistonL: THREE.Object3D; private pistonR: THREE.Object3D; private stack: THREE.Object3D; private lamp: THREE.Object3D;
-  private pistonBaseL = 0; private pistonBaseR = 0; private exhaustT = 0; private lean = 0;
+  private pistonL: THREE.Object3D; private pistonR: THREE.Object3D; private stack: THREE.Object3D; private lamp: THREE.Mesh;
+  private pistonBaseL = 0; private pistonBaseR = 0; private exhaustT = 0;
 
   constructor(private getHeight: (x: number, z: number) => number, spawn: THREE.Vector3, private fx?: any) {
     const parts = buildBike(); this.group = parts.group; this.wheelFront = parts.wheelFront; this.wheelRear = parts.wheelRear;
@@ -204,7 +204,13 @@ export class SteampunkBike {
     this.pos.copy(spawn); this.group.position.copy(this.pos);
   }
 
-  get riderPos() { this.group.updateMatrixWorld(true); return this.group.localToWorld(V(0, 0.96, -0.2)); }
+  get riderPos() {
+    this.group.updateMatrixWorld(true);
+    // Saddle is at y = 0.92, z = -0.28 in bike space.
+    // Character hips are at pos [0, 0.94, 0] relative to root.
+    // Placing root at (0, -0.02, -0.28) aligns hips directly onto the saddle.
+    return this.group.localToWorld(V(0, -0.02, -0.28));
+  }
 
   update(dt: number, elapsed: number, input: InputLike, playerPos: THREE.Vector3, playerYaw: number, mounted: boolean) {
     if (mounted) {
@@ -240,7 +246,7 @@ export class SteampunkBike {
 
 export class SteampunkDrone {
   group: THREE.Group; pos = new THREE.Vector3(); yaw = 0; inventory: DroneInventoryItem[] = [];
-  private rotors: THREE.Group[] = []; private lamp: THREE.Object3D; private arm: THREE.Object3D | null = null;
+  private rotors: THREE.Group[] = []; private lamp: THREE.Mesh; private arm: THREE.Object3D | null = null;
   private seed = Math.random() * 1000; private workTarget = new THREE.Vector3(); private workT = 0; private fxT = 0;
   constructor(public kind: SteampunkDroneKind, private getHeight: (x: number, z: number) => number, spawn: THREE.Vector3, private fx?: any, private trample?: TrampleLike) {
     const parts = buildDrone(kind); this.group = parts.group; this.rotors = parts.rotors; this.lamp = parts.lamp; this.arm = parts.arm;

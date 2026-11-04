@@ -325,129 +325,122 @@ void waterLook(vec3 wpos, float depth, out vec3 col, out float alpha) {
   vec2 fDir = flS.rg * 2.0 - 1.0;
   float spd = flS.b;
   float riverOn = smoothstep(0.04, 0.30, spd);
-  // depth-normalised body fraction: a river runs CLEAR (a pond's extinction
-  // would saturate the channel to an opaque plate and bury the bed fining)
-  float dN = 1.0 - exp(-depth * mix(6.0, 1.5, riverOn));
-  vec2 fd = normalize(fDir + uWindDir * 1e-4); // degenerate -> wind dir (riverOn ~ 0 anyway)
+
+  // depth-normalised body factor
+  float dN = 1.0 - exp(-depth * mix(4.0, 1.8, riverOn));
+
+  vec2 fd = normalize(fDir + uWindDir * 1e-4);
   float alongC = dot(p, fd);
   float acrossC = dot(p, vec2(-fd.y, fd.x));
   float drift = uTime * (0.40 + 2.0 * spd); // downstream pattern advection [m]
-  // sky luminance — the water BODY must ride the scene light like every
-  // other surface (a storm-dim world with a bright cyan plate reads as a
-  // glowing decal dropped on the ground)
+
+  // sky luminance for lighting response
   float skyL = clamp(dot(uSky, vec3(0.333)), 0.0, 1.0);
-  // flow-texture LOD: the streak field reads as DIRECTION at gameplay
-  // distance, but at your boots it collapses into brushed-metal noise — so
-  // it (and its foam) fades out over the last few metres to the camera and
-  // close water keeps the calm wind look instead
-  float far = smoothstep(3.0, 16.0, distance(uCamPos, wpos));
-  // distance-adaptive waterline widths, declared early: the solid foam
-  // edge widens from ~18 cm of depth near the camera to ~60 cm at range so
-  // the bright line always subtends several pixels (fixed-metre features go
-  // sub-pixel past ~30 m and the waterline collapses to a raw aliased cut)
-  // cap at ~55% of local depth: a shallow lowland run (0.3-0.5 m) must keep
-  // its water-coloured middle — the foam owns the band, never the whole bed
-  float edgeW = min(mix(0.16, 1.15, far), 0.55 * depth);
-  float edge = (1.0 - smoothstep(0.02, edgeW, depth)) * smoothstep(0.0008, 0.005, depth);
-  // wind capillary trains (a pond's look) + rain prickle
+
+  // distance from camera for adaptive LOD
+  float far = smoothstep(3.0, 18.0, distance(uCamPos, wpos));
+
+  // wind capillary trains + rain prickle
   float w1 = sin(dot(p, uWindDir) * 2.4 + uTime * 2.0) * cos(p.x * 1.7 - uTime * 1.4);
   float w2 = sin((p.x + p.y) * 3.1 + uTime * 2.8) * 0.5;
   float prickle = uRain * (sin(p.x * 21.0 + uTime * 11.0) * sin(p.y * 17.0 - uTime * 9.0));
-  // the current's trains: crest lines ACROSS the channel, phase travelling
-  // DOWNSTREAM (phase rides 'alongC'), a slow meander warp bending them,
-  // plus rapids chop — this advection is what makes the water FLOW
+
+  // current wave trains travelling downstream
   float warp = sin(acrossC * 0.21) * 1.6;
   float c1 = sin(alongC * 2.05 + warp - drift * 0.85);
   float c2 = sin(alongC * 4.6 - drift * 1.4 + acrossC * 0.6);
-  float c3 = sin(alongC * 3.1 - drift * 2.1) * sin(acrossC * 2.3 + drift * 0.9); // rapids chop
-  float c4 = sin(alongC * 7.3 - drift * 1.9 + acrossC * 1.2) * sin(acrossC * 5.1 + drift * 1.1); // short chop
-  // the long swell: a ~9 m train whose crests stay multi-pixel at 50 m —
-  // the chunky Timberborn-scale motion far water needs (near detail rides c1-c4)
+  float c3 = sin(alongC * 3.1 - drift * 2.1) * sin(acrossC * 2.3 + drift * 0.9);
+  float c4 = sin(alongC * 7.3 - drift * 1.9 + acrossC * 1.2) * sin(acrossC * 5.1 + drift * 1.1);
   float c0 = sin(alongC * 0.70 - drift * 0.45 + warp * 0.5);
   float flowR = (0.42 * c0 + 0.50 * c1 + 0.28 * c2 + 0.55 * c3 * spd + 0.45 * c4 * spd) * riverOn;
   float ripple = (w1 + w2) * (1.0 - 0.6 * riverOn) + flowR;
-  // anisotropic streaks: noise stretched ALONG the current and advected with
-  // it — the drifting flow-lines field real rivers show even without foam.
-  // Dense across, long along: the anisotropy is what makes a STILL frame
-  // read as flowing — direction is texture, motion is time
+
+  // anisotropic flow streaks
   float streak = wFbm(vec2(alongC * 0.45 - drift * 0.85, acrossC * 4.4));
   float streak2 = wFbm(vec2(alongC * 0.9 - drift * 1.2 + 37.2, acrossC * 5.2 + 11.7));
-  // surface normal — CALM and coherent. The old normal rode high-frequency
-  // noise under a broad glint lobe: scintillating white speckle patches that
-  // followed the player (the 'white reflections around user near water')
-  vec3 n = normalize(vec3(ripple * 0.14 + prickle * 0.03, 1.0,
-                          (w2 - w1 * 0.7 - flowR * 0.7) * 0.14 + prickle * 0.025));
+
+  // surface normal
+  vec3 n = normalize(vec3(ripple * 0.15 + prickle * 0.025, 1.0,
+                          (w2 - w1 * 0.7 - flowR * 0.7) * 0.15 + prickle * 0.025));
   vec3 v = normalize(uCamPos - wpos);
   float ndv = max(dot(v, n), 0.0);
-  float fres = pow(1.0 - ndv, 2.6);
-  // sun: ONE tight warm streak on the wave crests — capped, never a white
-  // plate however the camera swings. A rain FILM carries no glitter (a 2 mm
-  // sheet on the ground is not open water — glittering films around the
-  // player were half of the 'white reflections' report)
+  float fres = pow(1.0 - ndv, 2.8);
+
+  // --- TIMBERBORN 3D LIQUID WATER PALETTE ---
+  // Realistic optical absorption: submerged riverbed is darkened and tinted deep jewel teal/sapphire
+  vec3 shalColor = vec3(0.04, 0.28, 0.35); // clear shallows: deep aquatic teal tint
+  vec3 midColor  = vec3(0.02, 0.16, 0.25); // mid channel: rich Caribbean deep aquamarine
+  vec3 deepColor = vec3(0.01, 0.08, 0.15); // deep pools: dense sapphire navy
+
+  vec3 body = mix(shalColor, midColor, smoothstep(0.05, 0.60, depth));
+  body = mix(body, deepColor, smoothstep(0.40, 1.40, depth));
+
+  // Sun warmth in shallows
+  body += uSun * 0.06 * (1.0 - dN);
+
+  // Relief: crest highlights and trough depth
+  body *= max(0.40, 0.86 + ripple * 0.24 * (0.4 + 0.6 * dN));
+  body *= 1.0 + (0.18 + 0.25 * far) * riverOn * (streak - 0.5);
+
+  // Bank contact shadow (Timberborn's channel inset reading)
+  float contactW = max(0.12, min(mix(0.20, 0.65, far), 0.50 * depth));
+  float contact = (1.0 - smoothstep(0.0, contactW, depth));
+  body = mix(body, body * 0.62, contact * 0.45);
+
+  // Sky Fresnel reflection
+  body = mix(body, uSky * 0.90, fres * 0.48);
+
+  // Specular sun glint
   vec3 sd = normalize(uSunDir);
   float sp = max(dot(reflect(-v, n), sd), 0.0);
-  float glint = pow(sp, 80.0) * 0.16 * smoothstep(0.01, 0.06, depth);
-  // body: teal graded by depth — MULTIPLIED by the scene's sky luminance so
-  // it dims with the weather exactly like the ground around it, with a warm
-  // sun kiss on the shallows so it sits in the golden-hour light
-  vec3 shal = mix(vec3(0.30, 0.55, 0.52), uSky * vec3(0.40, 0.52, 0.50), 0.30);
-  vec3 deep = vec3(0.040, 0.140, 0.170);
-  vec3 body = mix(shal, deep, dN);
-  body += uSun * 0.05 * (1.0 - dN) * (1.0 - riverOn * 0.5);
-  // moving crest/trough shading — the surface LIVES even looking straight
-  // down from a hill: strong banding between crests and troughs is what
-  // reads as RELIEF at high viewing angles, and it strengthens with
-  // distance so far water keeps its texture instead of flattening to paint
-  body *= max(0.18, 0.74 + ripple * (0.30 + 0.70 * dN) * (0.50 + 0.42 * far));
-  body *= 1.0 - 0.38 * riverOn * abs(flowR) * (0.3 + 0.7 * dN);
-  body *= 1.0 + (0.22 + 0.30 * far) * riverOn * (streak - 0.5);
-  // contact shadow: a DARK rim on the water hugging the bank, just inside
-  // the foam line — the inset read that makes water sit IN a channel rather
-  // than on the ground (Timberborn's bank shadow), scaled with the same
-  // distance-adaptive width as the edge band
-  float contactW = max(0.15, min(mix(0.25, 0.80, far), 0.70 * depth));
-  float contact = (1.0 - smoothstep(0.0, contactW, depth)) * (1.0 - edge * 0.80);
-  body = mix(body, body * 0.52, contact * (0.50 + 0.30 * far));
-  // grazing sky mirror, CAPPED well under sky brightness
-  body = mix(body, uSky * 0.55, fres * (0.34 - 0.20 * riverOn));
-  body += uSun * glint * (0.4 + 0.6 * dN);
-  body *= 0.26 + 0.78 * skyL;
-  // ---- thin films (<4 cm) are WET GROUND: a dark translucent veil over the
-  // bed's own wet shading, not teal paint. The volume opens with depth, and
-  // the shallow margin (4..9 cm) keeps a LOW alpha so the bed owns most of
-  // the pixel — that is where the rocky/gravel/sand fining reads
-  float filmy = 1.0 - smoothstep(0.004, 0.05, depth);
-  body = mix(body, vec3(0.145, 0.16, 0.145), filmy);
-  // ---- foam: a SCALLOPED shoreline band (broken by the streak noise so it
-  // never draws one solid white line along the polygonal waterline) + rapids
-  // streaks and crest breaks, patchy (dark water with white streaks)
-  float scallop = smoothstep(0.28, 0.62, streak2 + 0.18 * wNoise(p * 3.1));
-  // the scalloped fringe rides outboard of the solid edge declared above
-  float fringe = (1.0 - smoothstep(edgeW, edgeW + 0.34, depth)) * scallop;
-  float band = edge * 0.97 + fringe * 0.60;
-  float rap = riverOn * smoothstep(0.35, 0.70, spd) * mix(0.45, 1.0, far);
-  float foam = band;
-  foam += rap * (0.55 * smoothstep(0.55, 0.85, streak) + 0.45 * smoothstep(0.62, 0.95, c3));
-  foam += riverOn * (1.0 - dN) * 0.25 * smoothstep(0.45, 0.85, streak2); // scum lines
-  foam = clamp(foam, 0.0, 0.88);
-  vec3 foamC = mix(vec3(0.86, 0.90, 0.91), uSky, 0.25) * (0.72 + 0.28 * dN);
-  // grain the foam — aerated water is speckled, not a flat paint fill
-  foamC *= 0.82 + 0.30 * wNoise(p * 14.0 + vec2(uTime * 0.7, 0.0));
-  foamC *= 0.55 + 0.50 * skyL;
-  col = mix(body, foamC, foam);
-  // meniscus waterline: thin, tinted, and noise-broken — a hint of the
-  // pinch where the film dies into ground, never a solid line
-  float men = smoothstep(0.0006, 0.0016, depth) * (1.0 - smoothstep(0.003, 0.008, depth));
-  col += uSky * 0.18 * men * (0.45 + 0.55 * wNoise(p * 5.3));
-  // opacity: OPEN WATER CLAIMS ITS PIXEL (the Timberborn read). The river
-  // and any pond past ~8 cm render as one opaque body whose DEPTH reads as
-  // colour — translucent sheets stacked over wet-shaded terrain read as
-  // paint. The downstream bed fining now reads through the bright shallow
-  // gradient and the exposed gravel banks instead of through the water.
-  // Only genuine thin films (<4 cm sheet flow, no current) stay a wet veil.
-  float openVol = max(riverOn, smoothstep(0.045, 0.11, depth));
-  alpha = mix(0.22, 0.94, openVol);
-  alpha = min(alpha + foam * 0.30, 0.96);
+  float glint = (pow(sp, 36.0) * 0.35 + pow(sp, 96.0) * 0.65) * smoothstep(0.01, 0.06, depth);
+  body += uSun * glint * 0.60;
+
+  // Scene ambient lighting response
+  body *= 0.55 + 0.45 * skyL;
+
+  // --- TIMBERBORN CRISP STYLIZED SHORELINE & RAPIDS FOAM ---
+  // Foam is ONLY generated on active river currents or at the banks of deep water bodies (>10 cm depth).
+  // Shallow rainwater sheet flow (<4 cm) and rain puddles are crystal-clear liquid, NOT white foam!
+  float deepWaterBody = smoothstep(0.08, 0.22, depth);
+  float foamEligible = max(riverOn, deepWaterBody);
+
+  // Shoreline foam is a narrow, delicate perimeter RIM (1–3 cm wide), NOT a solid volume fill
+  float edgeW = mix(0.035, 0.12, far);
+  float shoreRim = smoothstep(0.002, 0.015, depth) * (1.0 - smoothstep(0.02, edgeW, depth));
+
+  // Animated scalloped wavelets lapping against the shore/banks
+  float fn1 = wNoise(p * 2.8 + vec2(uTime * 0.45, -uTime * 0.35));
+  float fn2 = wNoise(p * 6.2 - vec2(uTime * 0.70, uTime * 0.20));
+  float scallop = (fn1 * 0.65 + fn2 * 0.35 - 0.5) * 0.40;
+  float shoreFoam = smoothstep(0.35, 0.75, shoreRim + scallop * shoreRim) * foamEligible;
+
+  // Rapids foam in fast current
+  float rapFoam = riverOn * smoothstep(0.28, 0.65, spd) * (
+    0.55 * smoothstep(0.55, 0.85, streak) +
+    0.45 * smoothstep(0.60, 0.92, c3)
+  );
+  rapFoam += riverOn * (1.0 - dN) * 0.25 * smoothstep(0.48, 0.85, streak2);
+
+  float totalFoam = clamp(shoreFoam + rapFoam, 0.0, 1.0);
+
+  // Brilliant stylized white/cream foam with fine aeration speckles
+  vec3 foamCol = mix(vec3(0.96, 0.98, 1.0), uSky, 0.12);
+  foamCol *= 0.92 + 0.16 * wNoise(p * 15.0 + vec2(uTime * 0.8, 0.0));
+  foamCol *= 0.65 + 0.40 * skyL;
+
+  col = mix(body, foamCol, totalFoam);
+
+  // --- VOLUMETRIC OPACITY (BEER-LAMBERT GRADUAL EXTINCTION) ---
+  // Physical gradual optical extinction:
+  // 0-10 cm: crystal-clear shallows (alpha 0.10-0.30), riverbed clearly visible
+  // 10-50 cm: rich transparent teal (alpha 0.35-0.70)
+  // > 80 cm: deep volumetric body (alpha 0.85-0.94)
+  float depthAlpha = clamp(1.0 - exp(-depth * 2.2), 0.0, 0.94);
+  alpha = max(depthAlpha, totalFoam * 0.90);
+
+  // Clean feather at the absolute geometric waterline to prevent polygon edge aliasing
+  alpha *= smoothstep(0.01, 0.05, depth);
 }
 `;
 

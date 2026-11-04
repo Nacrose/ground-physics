@@ -278,60 +278,9 @@ export class Player {
     // bone (gait + actions + secondary motion). We only read its gait phase
     // for footfall timing so steps and strides stay in sync with the rig.
     const spd = this.speed;
-    const a = this.animator;
-    a.gaitSpeed = spd / 4.1;               // 1.0 == brisk walk, ~1.75 sprint
-    a.sprint = input.sprint;
-    a.mudAmount = this.mud;
-    a.wetAmount = Math.min(1, this.pondM * 2.5 + (this.micro.waterAt(this.pos.x, this.pos.z) > 0.01 ? 0.3 : 0));
-    a.velY = this.jumpVel;
-    a.onGround = this.onGround;
-    a.sinkage = this.sinkage;
-    a.digPhase = this.digPhase;
-    // stamina: sprinting drains, standing recovers — feeds tired breathing
-    this.tired = Math.max(0, Math.min(1,
-      this.tired + dt * (input.sprint && spd > 3 ? 0.16 : -0.09)));
-    a.tired = this.tired;
-    // chill: soaked + moving slowly in rain => shiver layer
-    this.cold = Math.max(0, Math.min(1, this.cold
-      + dt * (a.wetAmount > 0.4 && spd < 1.5 ? 0.1 : -0.12)));
-    a.cold = this.cold;
-    a.yaw = this.yaw;
 
-    // --- NEW: Feed Physics Circumstances into the Procedural System ---
-    
-    // 1. Slope Normal (Already calculated as nrm above)
-    a.slopeNormal.set(nrm[0], nrm[1], nrm[2]);
-    
-    // 2. World Velocity (For momentum/inertia calculations)
-    a.worldVelocity.set(
-      move.x * this.speed, 
-      this.jumpVel, 
-      move.z * this.speed
-    );
-
-    // 3. Wind Velocity (Hook this up to your weather/storm engine)
-    // Using a placeholder to ensure the code runs; pass real wind data if available
-    a.windVelocity.set(0, 0, 0); 
-
-    // 4. Micro-Terrain Foot Heights (Crucial for IK foot planting)
-    // We calculate where the feet *would* be based on the current gait phase
-    const fwdVec = new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw));
-    const rightVec = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
-    
-    const lFootPos = this.pos.clone()
-      .addScaledVector(rightVec, 0.13)
-      .addScaledVector(fwdVec, Math.sin(a.gaitPhase) * 0.25);
-      
-    const rFootPos = this.pos.clone()
-      .sub(rightVec.clone().multiplyScalar(0.13))
-      .sub(fwdVec.clone().multiplyScalar(Math.sin(a.gaitPhase) * 0.25));
-
-    // Calculate how far the ground is below (or above) the hips
-    a.leftFootTerrainY = this.groundHeightAt(lFootPos.x, lFootPos.z) - this.pos.y;
-    a.rightFootTerrainY = this.groundHeightAt(rFootPos.x, rFootPos.z) - this.pos.y;
-
-    a.update(dt);
-
+    // ----- steampunk fleet & mount state -------------------------------------
+    const prevMounted = this.steampunk?.mounted ?? false;
     if (this.steampunk) {
       this.steampunk.update(
         dt,
@@ -342,6 +291,15 @@ export class Player {
         this.speed,
         this.onGround
       );
+
+      if (prevMounted && !this.steampunk.mounted) {
+        // Just dismounted: step cleanly to the side of the bike onto ground
+        const sideStep = new THREE.Vector3(-1.1, 0, 0).applyAxisAngle(new THREE.Vector3(0, 1, 0), this.steampunk.bike.yaw);
+        this.pos.add(sideStep);
+        this.pos.y = this.groundHeightAt(this.pos.x, this.pos.z);
+        this.jumpVel = 0;
+        this.onGround = true;
+      }
 
       if (this.steampunk.mounted) {
         const bike = this.steampunk.bike;
@@ -354,8 +312,38 @@ export class Player {
       }
     }
 
+    const isMounted = this.steampunk?.mounted ?? false;
+
+    const a = this.animator;
+    a.mounted = isMounted;
+    a.gaitSpeed = isMounted ? (this.speed / 12.5) : (spd / 4.1);
+    a.sprint = input.sprint;
+    a.mudAmount = isMounted ? 0 : this.mud;
+    a.wetAmount = Math.min(1, this.pondM * 2.5 + (this.micro.waterAt(this.pos.x, this.pos.z) > 0.01 ? 0.3 : 0));
+    a.velY = this.jumpVel;
+    a.onGround = this.onGround;
+    a.sinkage = this.sinkage;
+    a.digPhase = isMounted ? null : this.digPhase;
+    // stamina: sprinting drains, standing recovers — feeds tired breathing
+    this.tired = Math.max(0, Math.min(1,
+      this.tired + dt * (input.sprint && spd > 3 && !isMounted ? 0.16 : -0.09)));
+    a.tired = this.tired;
+    // chill: soaked + moving slowly in rain => shiver layer
+    this.cold = Math.max(0, Math.min(1, this.cold
+      + dt * (a.wetAmount > 0.4 && spd < 1.5 ? 0.1 : -0.12)));
+    a.cold = this.cold;
+    a.yaw = this.yaw;
+    a.slopeNormal.set(nrm[0], nrm[1], nrm[2]);
+    a.worldVelocity.set(move.x * this.speed, this.jumpVel, move.z * this.speed);
+
+    a.update(dt);
+
     this.group.position.set(this.pos.x, this.pos.y, this.pos.z);
-    this.group.rotation.y = this.yaw;
+    if (isMounted && this.steampunk) {
+      this.group.rotation.set(0, this.yaw, this.steampunk.bike.lean);
+    } else {
+      this.group.rotation.set(0, this.yaw, 0);
+    }
 
     // ----- muddy boots: jeans darken + boots cake brown and gloss -----------
     const stain = this.bootMud * 0.85;
@@ -372,7 +360,7 @@ export class Player {
       const off = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw)).multiplyScalar(0.13 * footSign);
       const fx0 = this.pos.x + off.x;
       const fz0 = this.pos.z + off.z;
-      if (spd > 0.6 && this.onGround) {
+      if (spd > 0.6 && this.onGround && !isMounted) {
         const fi = footSign > 0 ? 0 : 1;
         // the OTHER foot is peeling out of its print as this one lands:
         // suction, a toe-flung lump, and some mud stays on the sole

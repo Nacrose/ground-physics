@@ -179,10 +179,10 @@ function buildRiverPath(rng: () => number, height: Float32Array, cell: number): 
   for (let i = 0; i < raw.length; i++) {
     if (i > 0) s += Math.hypot(raw[i].x - raw[i - 1].x, raw[i].y - raw[i - 1].y);
     const u = Math.min(s / 900, 1);
-    const w = 4.2 + 6.5 * u; // half-width: 4.2 m mountain gorge -> 10.7 m lowland
-    // local terrain low in a disc of 1.6 channel widths
+    const w = 8.5 + 7.5 * u; // half-width: 8.5 m mountain gorge -> 16 m lowland
+    // local terrain low in a disc of 2.2 channel widths
     let localLow = Infinity;
-    const R = w * 1.6;
+    const R = w * 2.2;
     const i0 = Math.max(0, Math.floor((raw[i].x - R) / cell)), i1 = Math.min(GRID, Math.ceil((raw[i].x + R) / cell));
     const j0 = Math.max(0, Math.floor((raw[i].y - R) / cell)), j1 = Math.min(GRID, Math.ceil((raw[i].y + R) / cell));
     for (let j = j0; j <= j1; j++) {
@@ -191,7 +191,7 @@ function buildRiverPath(rng: () => number, height: Float32Array, cell: number): 
         if (dx * dx + dy * dy <= R * R) localLow = Math.min(localLow, height[j * (GRID + 1) + ii]);
       }
     }
-    let bed = Math.min(prevBed - 0.12, localLow - 0.45);
+    let bed = Math.min(prevBed - 0.16, localLow - 2.4);
     bed = Math.max(bed, -20); // absolute guard (pre-normalisation)
     prevBed = bed;
     pts.push({ x: raw[i].x, y: raw[i].y, s, bed, w });
@@ -259,26 +259,26 @@ export function buildTerrain(seed = 7): TerrainData {
     }
   }
 
-  // ---- 3) the river: adaptive profile, then carve channel + banks ----------
+  // ---- 3) the river: adaptive profile, then carve deep 3D gorge + banks ---
   const river = buildRiverPath(rng, height, cell);
   for (const p of river) {
     const w = p.w;
-    const i0 = Math.max(0, Math.floor((p.x - w * 3.4) / cell)), i1 = Math.min(GRID, Math.ceil((p.x + w * 3.4) / cell));
-    const j0 = Math.max(0, Math.floor((p.y - w * 3.4) / cell)), j1 = Math.min(GRID, Math.ceil((p.y + w * 3.4) / cell));
+    const i0 = Math.max(0, Math.floor((p.x - w * 2.6) / cell)), i1 = Math.min(GRID, Math.ceil((p.x + w * 2.6) / cell));
+    const j0 = Math.max(0, Math.floor((p.y - w * 2.6) / cell)), j1 = Math.min(GRID, Math.ceil((p.y + w * 2.6) / cell));
     for (let j = j0; j <= j1; j++) {
       for (let i = i0; i <= i1; i++) {
         const x = i * cell, y = j * cell;
         const d = Math.hypot(x - p.x, y - p.y);
-        if (d > w * 3.4) continue;
+        if (d > w * 2.6) continue;
         const k = j * (GRID + 1) + i;
         if (d < w) {
-          // parabolic bed: thalweg 0.5 m below the profile at centre
-          const bed = p.bed - 0.5 * (1 - (d / w) ** 2);
+          // Deep 3D riverbed: carved 2.4m below bank profile (thalweg)
+          const bed = p.bed - 2.4 * (1 - (d / w) ** 2);
           height[k] = Math.min(height[k], bed);
         } else {
-          // banks: pull down toward a shoulder line, feathering out
-          const t = (d - w) / (2.4 * w); // 0 at bank crest -> 1 at blend edge
-          const shoulder = p.bed + (d - w) * 0.62;
+          // Crisp steep canyon banks rising from riverbed up to surrounding terrain
+          const t = (d - w) / (1.6 * w);
+          const shoulder = p.bed + (d - w) * 0.90;
           height[k] = height[k] * t + Math.min(height[k], shoulder) * (1 - t);
         }
       }

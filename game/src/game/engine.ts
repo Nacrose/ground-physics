@@ -14,6 +14,7 @@ import { PRESETS, WeatherEntry, BUILD_TAG } from "./params";
 import { MicroTerrain } from "./contact";
 import { Tunnel } from "./tunnel";
 import { HUD, SettingDef, SettingValue } from "./hud";
+import { FluidSystem } from "./fluid";
 
 const HALF = WORLD_SIZE / 2;
 const TS_STEPS = [1, 4, 8, 16, 32, 64];
@@ -81,6 +82,7 @@ export class Game {
   private micro!: MicroTerrain;
   private world!: World;
   private fx!: StormFX;
+  fluid!: FluidSystem;
   private player!: Player;
   private hud!: HUD;
   /** the driven adit — station graph, portal cut, live Terzaghi FS */
@@ -153,7 +155,7 @@ export class Game {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.06;
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     this.renderer.domElement.className = "game-canvas";
     this.container.appendChild(this.renderer.domElement);
@@ -169,6 +171,7 @@ export class Game {
     this.micro = new MicroTerrain(this.scene, this.terrain, this.ground);
     this.world = new World(this.scene, this.terrain, this.ground, 52000, this.micro);
     this.fx = new StormFX(this.scene, this.terrain, this.ground, 5600, this.micro);
+    this.fluid = new FluidSystem(this.renderer, this.scene, this.terrain, this.ground);
     this.tunnel = new Tunnel(this.scene, this.terrain, this.ground);
     // spawn on the road near the wagon
     const spawnZ = roadCenterY(20);
@@ -430,6 +433,10 @@ export class Game {
     }
     if (code === "KeyB") this.tryBeginAdit();
     if (code === "KeyR") this.tryPlaceTimber();
+    if (code === "KeyQ") {
+      this.fluid.streamActive = !this.fluid.streamActive;
+      this.hud.toast(this.fluid.streamActive ? "3D WATER JET: ON (Q to toggle)" : "3D WATER JET: OFF");
+    }
     const presetKeys = ["Digit1", "Digit2", "Digit3", "Digit4", "Digit5"];
     const pi = presetKeys.indexOf(code);
     if (pi >= 0) {
@@ -444,6 +451,7 @@ export class Game {
     const w = this.container.clientWidth || window.innerWidth;
     const h = this.container.clientHeight || window.innerHeight;
     this.renderer.setSize(w, h);
+    this.fluid?.resize(w, h);
     if (this.player) {
       this.player.camera.aspect = w / h;
       this.player.camera.updateProjectionMatrix();
@@ -754,7 +762,7 @@ export class Game {
     const k = this.keys;
     const dials = this.hud?.isSettingsOpen() ?? false;
     this.input.forward = dials ? 0 : (k.has("KeyW") || k.has("ArrowUp") ? 1 : 0) - (k.has("KeyS") || k.has("ArrowDown") ? 1 : 0);
-    this.input.right = dials ? 0 : (k.has("KeyD") || k.has("ArrowRight") ? 1 : 0) - (k.has("KeyA") || k.has("ArrowLeft") ? 1 : 0);
+    this.input.right = dials ? 0 : (k.has("KeyA") || k.has("ArrowLeft") ? 1 : 0) - (k.has("KeyD") || k.has("ArrowRight") ? 1 : 0);
     this.input.sprint = !dials && (k.has("ShiftLeft") || k.has("ShiftRight"));
     this.input.jump = !dials && k.has("Space");
     this.input.dig = !dials && k.has("KeyF");
@@ -856,6 +864,13 @@ export class Game {
     this.fx.update(dtReal, this.elapsed, cam.position, this.player.pos,
       rainAtPlayer, wind, windDir, cloud,
       this.world.uniforms.sunDir.value, fog.color, fog.density);
+    this.fluid?.update(dtReal, this.elapsed, cam, this.player.pos, this.player.yaw,
+      this.world.uniforms.sunDir.value, fog.color, this.world.sun.color, rainAtPlayer);
+    if (this.player.steampunk?.mounted && this.player.steampunk.bike.speed > 2.5 && this.player.pondM > 0.005) {
+      const b = this.player.steampunk.bike;
+      const backDir = new THREE.Vector3(-Math.sin(b.yaw), 0.65, -Math.cos(b.yaw)).normalize();
+      this.fluid.spawnStream(b.pos.clone().add(new THREE.Vector3(0, 0.25, 0)), backDir, b.speed * 0.7, 0.22, 2);
+    }
     this.hud.setFlash(this.flash);
 
     // ---- HUD -------------------------------------------------------------------------
@@ -887,7 +902,11 @@ export class Game {
       }
     }
 
-    this.renderer.render(this.scene, cam);
+    if (this.fluid) {
+      this.fluid.render(cam);
+    } else {
+      this.renderer.render(this.scene, cam);
+    }
   };
 
   dispose() {
@@ -899,6 +918,7 @@ export class Game {
     this.world?.dispose();
     this.tunnel?.dispose();
     this.micro?.dispose();
+    this.fluid?.dispose();
     this.renderer?.dispose();
     if (this.renderer?.domElement.parentElement) {
       this.renderer.domElement.parentElement.removeChild(this.renderer.domElement);
