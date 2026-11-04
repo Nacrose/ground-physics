@@ -666,7 +666,7 @@ export class FluidSystem {
           if (this.pY[i] < floorY) {
             this.pY[i] = floorY;
             terrainNormal(this.terrain, wx, wz, this.tempNrm);
-            const nX = this.tempNrm[0], nZ = this.tempNrm[1];
+            const nX = this.tempNrm[0], nZ = this.tempNrm[2];
             // Zero vertical velocity on ground contact: water never bounces upward into the sky
             this.vY[i] = 0;
             // Slide downhill along slope with viscous friction

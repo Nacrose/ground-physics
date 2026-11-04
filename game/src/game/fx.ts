@@ -595,9 +595,9 @@ export class StormFX {
       let wl = bedH + (0.35 + 0.30 * (p.s / sMax));
       const maxWl = Math.min(bankL, bankR) - 0.02;
       if (wl > maxWl) wl = maxWl;
-      if (wl < bedH + 0.08) wl = bedH + 0.08;
+      if (wl < bedH + 0.12) wl = bedH + 0.12;
       // Monotonic downhill flow: water level must never flow uphill
-      wl = Math.min(prevWl - 0.002, wl);
+      if (wl > prevWl - 0.001) wl = Math.max(bedH + 0.08, prevWl - 0.001);
       prevWl = wl;
       wlStation[i] = wl;
     }

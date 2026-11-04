@@ -72,7 +72,7 @@ export function vertexTint(t: TerrainData, x: number, z: number, h: number, out:
   const rv = t.river ? t.river[k] : 0;
 
   terrainNormal(t, x + HALF, z + HALF, tempN);
-  const ny = tempN[2]; // vertical component: 1 = flat, ~0.7 = 45 deg, ~0.3 = steep cliff
+  const ny = tempN[1]; // vertical component: 1 = flat, ~0.7 = 45 deg, ~0.3 = steep cliff
   const steep = Math.max(0, Math.min(1, (0.92 - ny) / 0.32)); // 0 on flat, 1 on steep cliff
 
   // Geological rock strata: sedimentary/metamorphic bedding planes with angle tilt
@@ -84,18 +84,18 @@ export function vertexTint(t: TerrainData, x: number, z: number, h: number, out:
   }
 
   // Mountain & Rocky High Relief:
-  if (bm === B_MOUNTAIN || bm === B_ROCKY || h > 42 || rf > 0.3) {
+  if (bm === B_MOUNTAIN || bm === B_ROCKY || h > 38 || rf > 0.25) {
     const rockFactor = Math.max(rf, Math.min(1.0, 0.45 + steep * 0.55));
     // Blend rock tone onto surface: steep cliffs get dark granite, gentle slopes get scree
     const slopeRock = rockTone.clone().lerp(rockScree, 1.0 - steep);
     out.lerp(slopeRock, rockFactor);
 
-    // Alpine Snow: settles ONLY on gentle high ledges and plateau passes (h > 65m, ny > 0.80)
-    // Steep rock cliffs (ny < 0.78) shed snow completely!
-    if (h > 65) {
-      const snowProb = Math.min(Math.max((h - 65) / 28, 0), 1);
-      const ledge = Math.min(Math.max((ny - 0.76) / 0.16, 0), 1);
-      const snowMask = snowProb * ledge * (bm === B_ICE ? 0.96 : 0.85);
+    // Alpine Snow: settles ONLY on high summits (h > 84m), or in B_ICE
+    // Steep rock cliffs shed snow completely!
+    if (h > 84 || (bm === B_ICE && h > 52)) {
+      const snowProb = bm === B_ICE ? Math.min(Math.max((h - 52) / 24, 0), 1) : Math.min(Math.max((h - 84) / 18, 0), 1);
+      const ledge = Math.min(Math.max((ny - 0.78) / 0.16, 0), 1);
+      const snowMask = snowProb * ledge * 0.88;
       if (snowMask > 0.01) {
         out.lerp(alpineSnow, snowMask);
       }
@@ -103,14 +103,14 @@ export function vertexTint(t: TerrainData, x: number, z: number, h: number, out:
   }
 
   // River Corridor Scouring (4-6 m/s torrent strips all loose loam down to bedrock):
-  if (rv > 0.04) {
-    if (h > 24) {
+  if (rv > 0.02 || (rf > 0.6 && h > 18)) {
+    if (h > 18) {
       // Mountain & gorge reach: 100% dark scoured bedrock floor and wet canyon rock
-      const scour = Math.min(rv * 1.6, 1.0);
-      out.lerp(riverBedrock, scour * 0.88);
+      const scour = Math.min(Math.max(rv * 1.8, rf * 0.9), 1.0);
+      out.lerp(riverBedrock, scour * 0.92);
     } else {
       // Middle to lowland reach: cobbles fading into alluvium
-      const fining = Math.min(Math.max((h - 12) / 12, 0), 1);
+      const fining = Math.min(Math.max((h - 10) / 10, 0), 1);
       const bedCol = riverCobble.clone().lerp(bedSand, 1.0 - fining);
       out.lerp(bedCol, Math.min(rv * 1.2, 0.75));
     }

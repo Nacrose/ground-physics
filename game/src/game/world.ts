@@ -61,7 +61,9 @@ export class World {
   /** saguaro cacti (desert) */
   cacti: THREE.InstancedMesh;
   cactiArms: THREE.InstancedMesh;
-  rocks: THREE.InstancedMesh;
+  rocks!: THREE.InstancedMesh;
+  /** dedicated river boulders & rapids standing stones (wet granite/basalt) */
+  riverRocks!: THREE.InstancedMesh;
   wagon: THREE.Group;
   terrainMesh: THREE.Mesh;
   /** shared terrain-normal field (see NTEX) — sampled by BOTH ground meshes */
@@ -963,51 +965,143 @@ float liftAt(in vec2 wuv){
 
   // -------------------------------------------------------------------- rocks
   private buildRocks() {
-    // scree + boulder fields: rocky/mountain/ice get the dense scatter,
-    // desert edges and hills get a sprinkle
+    // 1) General Landscape Rocks & Mountain Scree / Crags:
+    // Rocky/mountain/ice get the dense scatter, desert edges, canyon slopes and hills get a sprinkle
     const spots: Array<{ x: number; y: number; z: number; biome: number }> = [];
     let seed = 313;
     const rnd = () => { seed = (seed * 48271) % 2147483647; return seed / 2147483647; };
     const cell = WORLD_SIZE / GRID;
-    const target = 380;
+    const target = 1600;
     let guard = 0;
     while (spots.length < target && guard < target * 60) {
       guard++;
       const i = Math.floor(rnd() * GRID), j = Math.floor(rnd() * GRID);
       const k = j * GRID + i;
-      if (this.terrain.road[k] > 0.25 || this.terrain.river[k] > 0.02 || this.terrain.riverIn[k]) continue;
+      if (this.terrain.road[k] > 0.35 || this.terrain.riverIn[k]) continue;
+      // Dedicated riverRocks handles in-stream channel boulders; keep landscape rocks out of deep channel
+      if (this.terrain.river[k] > 0.40) continue;
       const b = this.terrain.biome[k];
-      const p = b === B_ROCKY ? 0.85 : b === B_MOUNTAIN ? 0.5 : b === B_ICE ? 0.3
-        : b === B_DESERT ? 0.06 : b === B_HILLS ? 0.1 : 0.03;
+      const p = b === B_ROCKY ? 0.90 : b === B_MOUNTAIN ? 0.85 : b === B_ICE ? 0.45
+        : b === B_DESERT ? 0.12 : b === B_HILLS ? 0.25 : 0.08;
       if (rnd() > p) continue;
       const x = (i + rnd()) * cell - HALF, z = (j + rnd()) * cell - HALF;
       spots.push({ x, y: sampleHeight(this.terrain, x + HALF, z + HALF), z, biome: b });
     }
-    const geo = new THREE.DodecahedronGeometry(0.55, 0);
-    const mat = new THREE.MeshStandardMaterial({ color: 0x8a8177, roughness: 0.95, flatShading: true });
+    const geo = new THREE.DodecahedronGeometry(0.75, 0);
+    const mat = new THREE.MeshStandardMaterial({ color: 0x68645e, roughness: 0.92, flatShading: true });
     this.rocks = new THREE.InstancedMesh(geo, mat, spots.length);
     const m = new THREE.Matrix4(), q = new THREE.Quaternion(), scl = new THREE.Vector3(), p = new THREE.Vector3();
     let rseed = 313;
     const rrnd = () => { rseed = (rseed * 48271) % 2147483647; return rseed / 2147483647; };
     const rcol = new THREE.Color();
-    const gray = new THREE.Color(0x8a8177);
-    const highGray = new THREE.Color(0xa3a49e);
-    const desertRed = new THREE.Color(0xa07b5c);
+    const darkSlate = new THREE.Color(0x3a3c40);
+    const graniteGray = new THREE.Color(0x5c5d61);
+    const screeLight = new THREE.Color(0x787a7f);
+    const desertOchre = new THREE.Color(0x8a7058);
+
     spots.forEach((s, idx) => {
-      const big = s.biome === B_ROCKY || s.biome === B_MOUNTAIN;
-      const sc = (big ? 0.5 : 0.35) + rrnd() * (big ? 2.1 : 1.3);
-      p.set(s.x, s.y - 0.15 * sc, s.z);
-      q.setFromEuler(new THREE.Euler(rrnd() * 0.6, rrnd() * Math.PI * 2, rrnd() * 0.6));
-      scl.set(sc, sc * (0.5 + rrnd() * 0.5), sc);
+      const isMtn = s.biome === B_MOUNTAIN || s.biome === B_ROCKY;
+      const sc = isMtn ? (0.6 + rrnd() * 2.6) : (0.4 + rrnd() * 1.3);
+      p.set(s.x, s.y - 0.20 * sc, s.z);
+      q.setFromEuler(new THREE.Euler((rrnd() - 0.5) * 0.8, rrnd() * Math.PI * 2, (rrnd() - 0.5) * 0.8));
+      scl.set(sc * (0.8 + rrnd() * 0.5), sc * (0.5 + rrnd() * 0.8), sc * (0.7 + rrnd() * 0.6));
       m.compose(p, q, scl);
       this.rocks.setMatrixAt(idx, m);
-      rcol.copy(gray);
-      if (s.biome === B_MOUNTAIN || s.biome === B_ICE) rcol.lerp(highGray, rrnd() * 0.6);
-      else if (s.biome === B_DESERT) rcol.lerp(desertRed, 0.45 + rrnd() * 0.3);
+
+      rcol.copy(graniteGray);
+      if (isMtn) {
+        if (rrnd() < 0.45) rcol.lerp(darkSlate, 0.7);
+        else rcol.lerp(screeLight, rrnd() * 0.5);
+      } else if (s.biome === B_DESERT) {
+        rcol.lerp(desertOchre, 0.65 + rrnd() * 0.25);
+      }
       this.rocks.setColorAt(idx, rcol);
     });
     this.rocks.castShadow = true;
     this.scene.add(this.rocks);
+
+    // 2) Dedicated River Boulders & Rapids Standing Stones:
+    // Fast mountain river (4-6 m/s) scours all soil to bedrock and is armored
+    // with heavy rounded boulders, standing rocks poking out of the rapids, and boulder-lined banks!
+    const rPts = this.terrain.riverPts;
+    const rBoulders: Array<{ x: number; y: number; z: number; scX: number; scY: number; scZ: number; yaw: number; col: THREE.Color }> = [];
+    const sMax = rPts.length ? rPts[rPts.length - 1].s : 1;
+
+    for (let si = 1; si < rPts.length - 1; si++) {
+      const pt = rPts[si];
+      const f = pt.s / sMax;
+      if (f > 0.78) continue; // Upper gorge and middle reaches
+      
+      const prevPt = rPts[si - 1], nextPt = rPts[si + 1];
+      let tx = nextPt.x - prevPt.x, tz = nextPt.y - prevPt.y;
+      const tl = Math.hypot(tx, tz) || 1;
+      tx /= tl; tz /= tl;
+      const nx = -tz, nz = tx;
+      const halfW = pt.w * 0.90;
+
+      // 1 to 2 in-stream boulders partially submerged in the torrent
+      const inCount = rrnd() < 0.75 ? 2 : 1;
+      for (let b = 0; b < inCount; b++) {
+        const off = (rrnd() * 1.3 - 0.65) * halfW;
+        const bx = pt.x + nx * off - HALF, bz = pt.y + nz * off - HALF;
+        const by = sampleHeight(this.terrain, bx + HALF, bz + HALF);
+        const sc = 0.75 + rrnd() * 1.6;
+        const yaw = rrnd() * Math.PI * 2;
+        const c = new THREE.Color(0x282b30).lerp(new THREE.Color(0x3e4248), rrnd() * 0.7);
+        rBoulders.push({
+          x: bx,
+          y: by + sc * 0.22,
+          z: bz,
+          scX: sc * (0.8 + rrnd() * 0.4),
+          scY: sc * (0.5 + rrnd() * 0.4),
+          scZ: sc * (0.8 + rrnd() * 0.4),
+          yaw,
+          col: c
+        });
+      }
+
+      // 2 to 3 bank & rim boulders armoring the channel edges
+      const bankCount = 2 + (rrnd() < 0.5 ? 1 : 0);
+      for (let b = 0; b < bankCount; b++) {
+        const side = (b % 2 === 0 ? 1 : -1) * (0.80 + rrnd() * 0.75);
+        const off = side * halfW;
+        const bx = pt.x + nx * off - HALF, bz = pt.y + nz * off - HALF;
+        const by = sampleHeight(this.terrain, bx + HALF, bz + HALF);
+        const sc = 0.9 + rrnd() * 2.0;
+        const yaw = rrnd() * Math.PI * 2;
+        const c = new THREE.Color(0x2e3136).lerp(new THREE.Color(0x4a4d53), rrnd() * 0.6);
+        rBoulders.push({
+          x: bx,
+          y: by - sc * 0.12,
+          z: bz,
+          scX: sc * (0.8 + rrnd() * 0.5),
+          scY: sc * (0.6 + rrnd() * 0.5),
+          scZ: sc * (0.8 + rrnd() * 0.5),
+          yaw,
+          col: c
+        });
+      }
+    }
+
+    const rGeo = new THREE.DodecahedronGeometry(0.85, 1);
+    const rMat = new THREE.MeshStandardMaterial({
+      color: 0x35383d,
+      roughness: 0.38, // Wet river stone sheen
+      metalness: 0.10,
+      flatShading: true,
+    });
+    this.riverRocks = new THREE.InstancedMesh(rGeo, rMat, rBoulders.length);
+    rBoulders.forEach((rb, idx) => {
+      p.set(rb.x, rb.y, rb.z);
+      q.setFromEuler(new THREE.Euler((rrnd() - 0.5) * 0.35, rb.yaw, (rrnd() - 0.5) * 0.35));
+      scl.set(rb.scX, rb.scY, rb.scZ);
+      m.compose(p, q, scl);
+      this.riverRocks.setMatrixAt(idx, m);
+      this.riverRocks.setColorAt(idx, rb.col);
+    });
+    this.riverRocks.castShadow = true;
+    this.riverRocks.receiveShadow = true;
+    this.scene.add(this.riverRocks);
   }
 
   // -------------------------------------------------------------------- wagon

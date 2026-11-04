@@ -187,7 +187,7 @@ export class Player {
     terrainNormal(this.terrain, this.pos.x + 384, this.pos.z + 384, nrm);
     let slopeFactor = 1;
     if (moving) {
-      const uphill = -(nrm[0] * move.x + nrm[1] * 0 + nrm[2] * move.z);
+      const uphill = -(nrm[0] * move.x + nrm[2] * move.z);
       slopeFactor = Math.max(0.55, 1 - Math.max(uphill, 0) * 2.2);
     }
 

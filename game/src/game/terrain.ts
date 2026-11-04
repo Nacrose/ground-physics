@@ -616,14 +616,15 @@ export function buildTerrain(seed = 7): TerrainData {
     }
     if (gravelMask[k] > 0.6) r = Math.max(r, 0.40);
     // River scour: high velocity torrent (4-6 m/s) in the mountain gorge scours all loose soil to bedrock
-    if (riverMask[k] > 0.05 && riverS[k] >= 0) {
+    if (riverMask[k] > 0.02 || (riverDist[k] < 22 && riverS[k] >= 0)) {
       const f = riverS[k] / sMax;
-      if (f < 0.55) {
+      if (f < 0.62) {
         // Upper gorge reach: 100% scoured bedrock channel, 85% rocky canyon banks
-        r = Math.max(r, riverMask[k] > 0.15 ? 1.0 : 0.85);
-      } else if (f < 0.75) {
+        const bankFactor = Math.max(0, 1 - riverDist[k] / 22);
+        r = Math.max(r, riverMask[k] > 0.15 ? 1.0 : 0.85 * bankFactor);
+      } else if (f < 0.78) {
         // Middle reach: gravel & cobble armor
-        r = Math.max(r, 0.45 * (1.0 - (f - 0.55) / 0.20));
+        r = Math.max(r, 0.45 * (1.0 - (f - 0.62) / 0.16));
       }
     }
     rockFrac[k] = Math.min(r, 1);
@@ -695,12 +696,12 @@ export function sampleHeight(t: TerrainData, x: number, y: number): number {
   return h00 * (1 - u) * (1 - v) + h10 * u * (1 - v) + h01 * (1 - u) * v + h11 * u * v;
 }
 
-/** terrain normal via central differences */
+/** terrain normal via central differences: returns standard 3D [nX, nY, nZ] where Y is vertical UP */
 export function terrainNormal(t: TerrainData, x: number, y: number, out: [number, number, number]): void {
   const e = 1.5;
   const dx = sampleHeight(t, x + e, y) - sampleHeight(t, x - e, y);
   const dy = sampleHeight(t, x, y + e) - sampleHeight(t, x, y - e);
-  const nx = -dx, ny = -dy, nz = 2 * e;
+  const nx = -dx, ny = 2 * e, nz = -dy;
   const len = Math.hypot(nx, ny, nz) || 1;
   out[0] = nx / len; out[1] = ny / len; out[2] = nz / len;
 }
