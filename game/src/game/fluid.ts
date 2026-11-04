@@ -18,14 +18,14 @@ import { TerrainData, sampleHeight, terrainNormal, WORLD_SIZE } from "./terrain"
 import { Ground } from "./ground";
 
 const MAX_PARTICLES = 1200;
-const PARTICLE_RADIUS = 0.018; // [m] true marble-sized droplets (3.6 cm diameter)
-const SPH_H = 0.06; // [m] smoothing kernel radius for fine marble droplets
+const PARTICLE_RADIUS = 0.015; // [m] true marble-sized droplets (3.0 cm diameter)
+const SPH_H = 0.055; // [m] smoothing kernel radius for fine marble droplets
 const SPH_H2 = SPH_H * SPH_H;
-const SPH_MASS = 0.0012; // [kg] per marble droplet
+const SPH_MASS = 0.0010; // [kg] per marble droplet
 const SPH_REST_DENSITY = 28.0;
-const SPH_GAS_K = 24.0; // pressure stiffness
-const SPH_VISC = 0.35; // artificial viscosity
-const GRAVITY_ACCEL = -18.0; // [m/s^2] strong snappy gravitational acceleration (no floating!)
+const SPH_GAS_K = 2.5; // damped pressure stiffness so droplets do not explosively repel into the sky
+const SPH_VISC = 0.30; // artificial viscosity
+const GRAVITY_ACCEL = -19.6; // [m/s^2] strong snappy gravitational acceleration (no floating!)
 
 // SPH Kernel constants
 const POLY6 = 315.0 / (64.0 * Math.PI * Math.pow(SPH_H, 9));
@@ -33,7 +33,7 @@ const SPIKY_GRAD = -45.0 / (Math.PI * Math.pow(SPH_H, 6));
 const VISC_LAP = 45.0 / (Math.PI * Math.pow(SPH_H, 6));
 
 // Spatial Hash constants
-const HASH_CELL = 0.07;
+const HASH_CELL = 0.06;
 const HASH_SIZE = 2048;
 const HASH_MASK = HASH_SIZE - 1;
 
@@ -188,7 +188,7 @@ export class FluidSystem {
           vec4 viewCenter = modelViewMatrix * vec4(aInstancePos, 1.0);
           vViewCenter = viewCenter.xyz;
           // Camera-facing billboard quad in view space
-          vec3 viewPos = viewCenter.xyz + vec3((uv - 0.5) * (uRadius * 2.2), 0.0);
+          vec3 viewPos = viewCenter.xyz + vec3((uv - 0.5) * (uRadius * 2.0), 0.0);
           gl_Position = projectionMatrix * vec4(viewPos, 1.0);
         }
       `,
@@ -233,7 +233,7 @@ export class FluidSystem {
           vLife = aLife;
           vDensity = aDensity;
           vec4 viewCenter = modelViewMatrix * vec4(aInstancePos, 1.0);
-          vec3 viewPos = viewCenter.xyz + vec3((uv - 0.5) * (uRadius * 2.2), 0.0);
+          vec3 viewPos = viewCenter.xyz + vec3((uv - 0.5) * (uRadius * 2.0), 0.0);
           gl_Position = projectionMatrix * vec4(viewPos, 1.0);
         }
       `,
@@ -287,18 +287,18 @@ export class FluidSystem {
 
           float sum = 0.0;
           float totalW = 0.0;
-          // 2D bilateral kernel (radius 4)
-          const int R = 4;
+          // 2D bilateral kernel (radius 2 for crisp marble-sized droplets)
+          const int R = 2;
           for (int y = -R; y <= R; y++) {
             for (int x = -R; x <= R; x++) {
               vec2 off = vec2(float(x), float(y)) * uTexelSize;
               float sampleZ = texture2D(uDepthTex, vUv + off).r;
               if (sampleZ > 0.001) {
                 float r2 = float(x * x + y * y);
-                float spatialW = exp(-r2 / 10.0);
+                float spatialW = exp(-r2 / 3.0);
                 float depthDiff = abs(sampleZ - centerZ);
-                // Depth preservation: strictly avoid blurring across silhouette jumps (> 0.28m)
-                float depthW = exp(-depthDiff * depthDiff / 0.045);
+                // Depth preservation: strictly avoid blurring across silhouette jumps (> 0.12m)
+                float depthW = exp(-depthDiff * depthDiff / 0.02);
                 float w = spatialW * depthW;
                 sum += sampleZ * w;
                 totalW += w;
@@ -524,12 +524,12 @@ export class FluidSystem {
     // Emitter 1: Continuous Mountain Waterfall at the Tarn Source (245, 58, 236)
     this.waterfallTimer += dt;
     const tarnDist = Math.hypot(playerPos.x - (245 - WORLD_SIZE / 2), playerPos.z - (236 - WORLD_SIZE / 2));
-    if (this.waterfallTimer > 0.03 && tarnDist < 140) {
+    if (this.waterfallTimer > 0.04 && tarnDist < 120) {
       this.waterfallTimer = 0;
-      const tX = 245 - WORLD_SIZE / 2 + (Math.random() - 0.5) * 0.8;
-      const tZ = 236 - WORLD_SIZE / 2 + (Math.random() - 0.5) * 0.8;
-      const tY = sampleHeight(this.terrain, tX + WORLD_SIZE / 2, tZ + WORLD_SIZE / 2) + 0.12;
-      this.spawnParticle(tX, tY, tZ, 0.8 + (Math.random() - 0.5) * 0.3, -3.2, 1.2 + (Math.random() - 0.5) * 0.3, 1.4);
+      const tX = 245 - WORLD_SIZE / 2 + (Math.random() - 0.5) * 0.6;
+      const tZ = 236 - WORLD_SIZE / 2 + (Math.random() - 0.5) * 0.6;
+      const tY = sampleHeight(this.terrain, tX + WORLD_SIZE / 2, tZ + WORLD_SIZE / 2) + 0.10;
+      this.spawnParticle(tX, tY, tZ, 0.4 + (Math.random() - 0.5) * 0.2, -4.5, 0.6 + (Math.random() - 0.5) * 0.2, 1.2);
     }
 
     // Emitter 2: Interactive Player Water Jet / Stream
@@ -537,9 +537,9 @@ export class FluidSystem {
       this.streamTimer += dt;
       if (this.streamTimer > 0.035) {
         this.streamTimer = 0;
-        const forward = new THREE.Vector3(Math.sin(playerYaw), 0.22, Math.cos(playerYaw)).normalize();
-        const origin = playerPos.clone().add(new THREE.Vector3(0, 1.2, 0)).addScaledVector(forward, 0.4);
-        this.spawnStream(origin, forward, 9.5, 0.08, 2);
+        const forward = new THREE.Vector3(Math.sin(playerYaw), -0.42, Math.cos(playerYaw)).normalize();
+        const origin = playerPos.clone().add(new THREE.Vector3(0, 0.85, 0)).addScaledVector(forward, 0.45);
+        this.spawnStream(origin, forward, 7.5, 0.04, 2);
       }
     }
 
@@ -639,12 +639,16 @@ export class FluidSystem {
 
         // Integrate Velocity with realistic downward gravitational acceleration
         const invRho = 1.0 / rhoI;
-        this.vX[i] += (fX * invRho) * subDt;
-        this.vY[i] += (fY * invRho + GRAVITY_ACCEL) * subDt;
-        this.vZ[i] += (fZ * invRho) * subDt;
+        const aMax = 10.0; // [m/s^2] clamp SPH repulsion so droplets never explode upward
+        const ax = Math.max(-aMax, Math.min(aMax, fX * invRho));
+        const ay = Math.max(-aMax, Math.min(aMax, fY * invRho));
+        const az = Math.max(-aMax, Math.min(aMax, fZ * invRho));
+        this.vX[i] += ax * subDt;
+        this.vY[i] += (ay + GRAVITY_ACCEL) * subDt;
+        this.vZ[i] += az * subDt;
 
         // Mild air resistance on fine droplets
-        const drag = Math.max(0, 1.0 - 0.45 * subDt);
+        const drag = Math.max(0, 1.0 - 0.35 * subDt);
         this.vX[i] *= drag;
         this.vZ[i] *= drag;
 
@@ -653,7 +657,7 @@ export class FluidSystem {
         this.pY[i] += this.vY[i] * subDt;
         this.pZ[i] += this.vZ[i] * subDt;
 
-        // Terrain Collision & Flow Friction
+        // Terrain Collision & Downhill Flow Friction
         const wx = this.pX[i] + WORLD_SIZE / 2;
         const wz = this.pZ[i] + WORLD_SIZE / 2;
         if (wx >= 0 && wx <= WORLD_SIZE && wz >= 0 && wz <= WORLD_SIZE) {
@@ -662,18 +666,12 @@ export class FluidSystem {
           if (this.pY[i] < floorY) {
             this.pY[i] = floorY;
             terrainNormal(this.terrain, wx, wz, this.tempNrm);
-            const nX = this.tempNrm[0], nY = this.tempNrm[2], nZ = this.tempNrm[1];
-            const vn = this.vX[i] * nX + this.vY[i] * nY + this.vZ[i] * nZ;
-            if (vn < 0) {
-              // Separate normal and tangent velocity
-              this.vX[i] -= vn * nX;
-              this.vY[i] -= vn * nY;
-              this.vZ[i] -= vn * nZ;
-              // Slide downhill along slope with viscous friction
-              this.vX[i] = this.vX[i] * 0.88 - nX * vn * 0.12;
-              this.vY[i] = this.vY[i] * 0.88 - nY * vn * 0.12;
-              this.vZ[i] = this.vZ[i] * 0.88 - nZ * vn * 0.12;
-            }
+            const nX = this.tempNrm[0], nZ = this.tempNrm[1];
+            // Zero vertical velocity on ground contact: water never bounces upward into the sky
+            this.vY[i] = 0;
+            // Slide downhill along slope with viscous friction
+            this.vX[i] = this.vX[i] * 0.78 + nX * 5.0 * subDt;
+            this.vZ[i] = this.vZ[i] * 0.78 + nZ * 5.0 * subDt;
           }
         }
       }

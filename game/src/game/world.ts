@@ -827,7 +827,7 @@ float liftAt(in vec2 wuv){
       guard++;
       const i = Math.floor(rnd() * GRID), j = Math.floor(rnd() * GRID);
       const k = j * GRID + i;
-      if (this.terrain.road[k] > 0.25) continue;
+      if (this.terrain.road[k] > 0.25 || this.terrain.river[k] > 0.02 || this.terrain.riverIn[k]) continue;
       const b = this.terrain.biome[k];
       const bd = BIOMES[b];
       const p = kind === "tree" ? bd.treeP : kind === "conifer" ? bd.coniferP : bd.cactusP;
@@ -835,6 +835,8 @@ float liftAt(in vec2 wuv){
       const n = p >= 0.9 ? 2 : 1; // rainforest packs doubles
       for (let c = 0; c < n && out.length < target; c++) {
         const x = (i + rnd()) * cell - HALF, z = (j + rnd()) * cell - HALF;
+        const ck = Math.max(0, Math.min(GRID - 1, Math.floor((z + HALF) / cell))) * GRID + Math.max(0, Math.min(GRID - 1, Math.floor((x + HALF) / cell)));
+        if (this.terrain.river[ck] > 0.02 || this.terrain.riverIn[ck]) continue;
         const h = sampleHeight(this.terrain, x + HALF, z + HALF);
         out.push({ x, y: h, z, biome: b, h });
       }
@@ -973,7 +975,7 @@ float liftAt(in vec2 wuv){
       guard++;
       const i = Math.floor(rnd() * GRID), j = Math.floor(rnd() * GRID);
       const k = j * GRID + i;
-      if (this.terrain.road[k] > 0.25) continue;
+      if (this.terrain.road[k] > 0.25 || this.terrain.river[k] > 0.02 || this.terrain.riverIn[k]) continue;
       const b = this.terrain.biome[k];
       const p = b === B_ROCKY ? 0.85 : b === B_MOUNTAIN ? 0.5 : b === B_ICE ? 0.3
         : b === B_DESERT ? 0.06 : b === B_HILLS ? 0.1 : 0.03;

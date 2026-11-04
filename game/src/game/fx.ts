@@ -592,14 +592,12 @@ export class StormFX {
       const bankL = sampleHeight(this.terrain, p.x - nx * halfW, p.y - nz * halfW);
       const bankR = sampleHeight(this.terrain, p.x + nx * halfW, p.y + nz * halfW);
       const bedH = sampleHeight(this.terrain, p.x, p.y);
-      const targetDepth = 0.50 + 0.30 * (p.s / sMax); // 0.50m in gorge, 0.80m in lowland
-      let wl = bedH + targetDepth;
-      // Cap strictly below banks so water is nested inside canyon walls
-      wl = Math.min(wl, Math.min(bankL, bankR) - 0.05);
+      let wl = bedH + (0.35 + 0.30 * (p.s / sMax));
+      const maxWl = Math.min(bankL, bankR) - 0.02;
+      if (wl > maxWl) wl = maxWl;
+      if (wl < bedH + 0.08) wl = bedH + 0.08;
       // Monotonic downhill flow: water level must never flow uphill
-      wl = Math.min(prevWl - 0.005, wl);
-      // Ensure water is always at least 0.15m above the carved thalweg bed
-      wl = Math.max(wl, bedH + 0.15);
+      wl = Math.min(prevWl - 0.002, wl);
       prevWl = wl;
       wlStation[i] = wl;
     }
@@ -644,8 +642,8 @@ export class StormFX {
       for (let c = 0; c < NA; c++) {
         const r0 = rowStart[i] + c, r1 = rowStart[i] + c + 1;
         const r2 = rowStart[i + 1] + c, r3 = rowStart[i + 1] + c + 1;
-        if (Math.max(depths[r0], depths[r1], depths[r2], depths[r3]) < 0.02) continue;
-        idx.push(r0, r2, r1, r1, r2, r3);
+        if (Math.max(depths[r0], depths[r1], depths[r2], depths[r3]) < 0.005) continue;
+        idx.push(r0, r1, r2, r1, r3, r2);
       }
     }
     const geo = new THREE.BufferGeometry();
@@ -655,7 +653,7 @@ export class StormFX {
     geo.setIndex(idx);
     geo.computeBoundingSphere();
     const mat = new THREE.ShaderMaterial({
-      transparent: true, depthWrite: false, side: THREE.FrontSide,
+      transparent: true, depthWrite: false, side: THREE.DoubleSide,
       uniforms: {
         uTime: { value: 0 },
         uRain: { value: 0 },
