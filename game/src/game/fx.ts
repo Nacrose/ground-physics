@@ -577,6 +577,23 @@ export class StormFX {
     const idx: number[] = [];
     const rowStart: number[] = [];
     const sMax = pts.length ? pts[pts.length - 1].s : 1;
+
+    // Precalculate water level per station directly anchored to the real carved riverbed!
+    const wlStation = new Float32Array(pts.length);
+    let prevWl = Infinity;
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      const bedH = sampleHeight(this.terrain, p.x, p.y);
+      const targetDepth = 0.55 + 0.35 * (p.s / sMax); // 0.55m in gorge, 0.90m in lowland
+      let wl = bedH + targetDepth;
+      // Monotonic downhill flow: water level must never flow uphill
+      wl = Math.min(prevWl - 0.005, wl);
+      // Ensure water is always at least 0.20m above the carved thalweg bed
+      wl = Math.max(wl, bedH + 0.20);
+      prevWl = wl;
+      wlStation[i] = wl;
+    }
+
     for (let i = 0; i < pts.length; i++) {
       const p = pts[i];
       const a = pts[Math.max(0, i - 1)], b2 = pts[Math.min(pts.length - 1, i + 1)];
@@ -584,31 +601,39 @@ export class StormFX {
       const tl = Math.hypot(tx, ty) || 1;
       tx /= tl; ty /= tl; // downstream tangent
       const nx = -ty, nz = tx; // across-channel normal
-      // the water level: deeply nested inside the carved canyon (1.8m deep water, 1.2m below banks)
-      const wl = p.bed - 0.60 + 0.35 * (p.s / sMax);
-      const halfW = p.w * 0.85; // strictly inside the carved canyon channel
+      
+      const wl = wlStation[i];
+      const halfW = p.w * 0.90; // across the carved canyon channel
       // fade in past the tarn — the tarn's own pond sheet owns the lake
       const fade = Math.max(0, Math.min(1, (p.s - 6) / 26));
       rowStart.push(verts.length / 3);
       for (let c = 0; c <= NA; c++) {
         const sc = (2 * c) / NA - 1; // -1..1 across the channel
-        const off = halfW * Math.sign(sc) * Math.pow(Math.abs(sc), 0.65);
+        const off = halfW * Math.sign(sc) * Math.pow(Math.abs(sc), 0.70);
         const sx = p.x + nx * off, sz = p.y + nz * off; // 0..WORLD_SIZE frame
         const terH = sampleHeight(this.terrain, sx, sz);
         const depth = Math.max(wl - terH, 0);
-        // Level horizontal water surface across the channel at height wl (Timberborn style)
-        const y = wl;
+        
+        // 3D Water Volume Shaping:
+        // Inside the channel where water has depth (wl > terH):
+        //   the water surface sits at the horizontal water table wl.
+        // At the banks where terrain rises above water (terH >= wl):
+        //   the vertex seamlessly pins flush to the terrain bank (terH + 0.002m), depth = 0.
+        // This ensures the river is a true 3D volumetric water body nestled between canyon walls,
+        // with ZERO floating paper edges and realistic bank shoreline feathering.
+        const y = depth > 0 ? wl : terH + 0.002;
+        
         verts.push(sx - HALF, y, sz - HALF);
         depths.push(depth);
         fades.push(fade);
       }
     }
-    // indices — skip quads fully buried under the banks (no fill wasted)
+    // indices — skip quads where all 4 corners are on dry banks
     for (let i = 0; i < pts.length - 1; i++) {
       for (let c = 0; c < NA; c++) {
         const r0 = rowStart[i] + c, r1 = rowStart[i] + c + 1;
         const r2 = rowStart[i + 1] + c, r3 = rowStart[i + 1] + c + 1;
-        if (Math.max(depths[r0], depths[r1], depths[r2], depths[r3]) < 0.05) continue;
+        if (Math.max(depths[r0], depths[r1], depths[r2], depths[r3]) < 0.02) continue;
         idx.push(r0, r2, r1, r1, r2, r3);
       }
     }
@@ -619,7 +644,7 @@ export class StormFX {
     geo.setIndex(idx);
     geo.computeBoundingSphere();
     const mat = new THREE.ShaderMaterial({
-      transparent: true, depthWrite: false, side: THREE.DoubleSide,
+      transparent: true, depthWrite: false, side: THREE.FrontSide,
       uniforms: {
         uTime: { value: 0 },
         uRain: { value: 0 },

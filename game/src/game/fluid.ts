@@ -531,8 +531,8 @@ export class FluidSystem {
       this.waterfallTimer = 0;
       const tX = 245 - WORLD_SIZE / 2 + (Math.random() - 0.5) * 1.8;
       const tZ = 236 - WORLD_SIZE / 2 + (Math.random() - 0.5) * 1.8;
-      const tY = sampleHeight(this.terrain, tX + WORLD_SIZE / 2, tZ + WORLD_SIZE / 2) + 0.6;
-      this.spawnParticle(tX, tY, tZ, 1.2 + (Math.random() - 0.5) * 0.4, 0.4, 1.8 + (Math.random() - 0.5) * 0.4, 6.0);
+      const tY = sampleHeight(this.terrain, tX + WORLD_SIZE / 2, tZ + WORLD_SIZE / 2) + 0.4;
+      this.spawnParticle(tX, tY, tZ, 1.4 + (Math.random() - 0.5) * 0.4, -0.6, 2.0 + (Math.random() - 0.5) * 0.4, 3.5);
     }
 
     // Emitter 2: Interactive Player Water Jet / Stream

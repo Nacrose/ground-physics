@@ -326,9 +326,11 @@ export function buildTerrain(seed = 7): TerrainData {
   for (const z of height) { mn = Math.min(mn, z); mx = Math.max(mx, z); }
   for (let k = 0; k < height.length; k++) height[k] -= mn;
   const maxY = mx - mn;
-  // station beds were sampled PRE-normalisation — bring them into the final
-  // world frame so the water ribbon can skin its surface from them directly
-  for (const p of river) p.bed -= mn;
+  // station beds: update with the actual ground height at (p.x, p.y) after all carving,
+  // roads, floodplain, and normalisation so river stations are 100% anchored to the real terrain
+  for (const p of river) {
+    p.bed = sampleHeight({ height, minY: 0, maxY } as any, p.x, p.y);
+  }
 
   // ---- 5) per-cell fields: elevation, slope, river mask, distance ---------
   const cellH = new Float32Array(GRID * GRID);
