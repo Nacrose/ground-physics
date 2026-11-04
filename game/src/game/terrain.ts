@@ -53,10 +53,10 @@ export const BIOMES: BiomeDef[] = [
   { key: "rainforest", label: "RAINFOREST", color: 0x3f5e30, grassColor: 0x2f5c26, grassP: 0.95, grassH: 1.55, treeP: 1.0, coniferP: 0.0, cactusP: 0.0 },
   { key: "desert", label: "DESERT", color: 0xd9b57c, grassColor: 0xc7b06a, grassP: 0.05, grassH: 0.45, treeP: 0.0, coniferP: 0.0, cactusP: 0.35 },
   { key: "swamp", label: "SWAMP", color: 0x555237, grassColor: 0x7c8a4e, grassP: 0.62, grassH: 1.85, treeP: 0.12, coniferP: 0.0, cactusP: 0.0 },
-  { key: "rocky", label: "ROCKY", color: 0x8d8478, grassColor: 0x9a9160, grassP: 0.16, grassH: 0.6, treeP: 0.02, coniferP: 0.05, cactusP: 0.0 },
-  { key: "mountain", label: "MOUNTAIN", color: 0x7d7a74, grassColor: 0x8c8a6c, grassP: 0.05, grassH: 0.5, treeP: 0.0, coniferP: 0.1, cactusP: 0.0 },
-  { key: "ice", label: "ICE", color: 0xedf1f4, grassColor: 0xffffff, grassP: 0.0, grassH: 0.3, treeP: 0.0, coniferP: 0.0, cactusP: 0.0 },
-  { key: "river", label: "RIVER", color: 0x6b5b44, grassColor: 0x7c8a4e, grassP: 0.0, grassH: 0.8, treeP: 0.0, coniferP: 0.0, cactusP: 0.0 },
+  { key: "rocky", label: "ROCKY", color: 0x4e4c48, grassColor: 0x6e6b5d, grassP: 0.08, grassH: 0.5, treeP: 0.01, coniferP: 0.04, cactusP: 0.0 },
+  { key: "mountain", label: "MOUNTAIN", color: 0x3e4045, grassColor: 0x585a5e, grassP: 0.02, grassH: 0.4, treeP: 0.0, coniferP: 0.06, cactusP: 0.0 },
+  { key: "ice", label: "ICE", color: 0xe5eaf0, grassColor: 0xffffff, grassP: 0.0, grassH: 0.3, treeP: 0.0, coniferP: 0.0, cactusP: 0.0 },
+  { key: "river", label: "RIVER", color: 0x2e3034, grassColor: 0x484b4e, grassP: 0.0, grassH: 0.8, treeP: 0.0, coniferP: 0.0, cactusP: 0.0 },
 ];
 export const B_GRASSLAND = 0, B_FOREST = 1, B_HILLS = 2, B_RAINFOREST = 3,
   B_DESERT = 4, B_SWAMP = 5, B_ROCKY = 6, B_MOUNTAIN = 7, B_ICE = 8, B_RIVER = 9;
@@ -554,12 +554,13 @@ export function buildTerrain(seed = 7): TerrainData {
         case B_ICE: soil[k] = 0; break;
         default: soil[k] = 1; break; // river bed: alluvial loam
       }
-      // river banks get loam alluvium regardless of biome; the upper-middle
-      // reaches carry gravel bars and banks instead — stone in and around the
-      // river itself. Order matters: the alluvium cap below runs first, the
-      // bed-fining override AFTER it (a min(soil,1) cap would otherwise
-      // flatten the gravel back to loam)
-      if (riverMask[k] > 0.05 || (riverDist[k] < 12 && b !== B_ICE)) soil[k] = Math.min(soil[k], 1);
+      // river corridor: in the mountain & gorge reach (f < 0.55), high flow velocity (4-6 m/s)
+      // scours every grain of loose soil down to pure gravel and bedrock.
+      // Only in the lowland reaches (f >= 0.55) does loam and sand alluvium settle.
+      if (riverMask[k] > 0.05 || (riverDist[k] < 12 && b !== B_ICE)) {
+        const f = riverS[k] >= 0 ? riverS[k] / sMax : 0;
+        soil[k] = f < 0.55 ? 5 : Math.min(soil[k], 1); // 5 = gravel/rock in gorge, loam in lowlands
+      }
       if (gravelMask[k] > 0.12) soil[k] = 5;
       // scree fans at the foot of the steep dry slopes — gravelly colluvium
       // (patches wide enough that their interiors stay PURE gravel past the
@@ -598,22 +599,32 @@ export function buildTerrain(seed = 7): TerrainData {
     if (tarnMask[k] > 0.35) { pondCap[k] = 1.6; riverIn[k] = 1; }
   }
 
-  // ---- 10) bare-rock fraction: the crags finally have stone IN the ground -
-  // rocky scree steepens into bare rock; the massif goes bare with height;
-  // the ice cap rides on rock. Everything else keeps its soil mantle.
+  // ---- 10) bare-rock fraction: the crags and mountains have stone IN the ground -
+  // rocky scree steepens into bare rock; the massif is uplifted bedrock;
+  // the gorge is scoured clean by the rushing 4-6 m/s current.
   const rockFrac = new Float32Array(GRID * GRID);
   for (let k = 0; k < GRID * GRID; k++) {
     const b = biome[k], h = cellH[k], sl = slope[k];
     let r = 0;
-    if (b === B_ROCKY) r = 0.45 + 0.55 * Math.min(Math.max((sl - 0.5) / 0.45, 0), 1);
-    else if (b === B_MOUNTAIN) r = Math.min(Math.max((sl - 0.35) / 0.35, 0), 1) * Math.min(Math.max((h - 45) / 30, 0), 1);
-    else if (b === B_ICE) r = 0.8 * Math.min(Math.max((sl - 0.3) / 0.3, 0), 1) + 0.2;
-    // the gorge channel keeps some gravel-on-rock honesty too — and the
-    // UPPER reach (first 30% of the path, right below the tarn) runs rocky:
-    // bedrock shoals glare through the clear rushing water
-    if (gravelMask[k] > 0.6) r = Math.max(r, 0.25);
-    if (riverMask[k] > 0.3 && riverS[k] >= 0 && riverS[k] < sMax * 0.3) {
-      r = Math.max(r, 0.28 + 0.27 * (1 - (riverS[k] / (sMax * 0.3))));
+    if (b === B_ROCKY) {
+      r = Math.min(1.0, 0.65 + sl * 0.70);
+    } else if (b === B_MOUNTAIN) {
+      // Mountains are uplifted bedrock: steep slopes are pure rock cliffs, gentle slopes are scree/talus
+      r = Math.min(1.0, 0.45 + sl * 1.10 + Math.max(0, (h - 45) / 50) * 0.45);
+    } else if (b === B_ICE) {
+      r = 0.85 * Math.min(Math.max((sl - 0.25) / 0.35, 0), 1) + 0.25;
+    }
+    if (gravelMask[k] > 0.6) r = Math.max(r, 0.40);
+    // River scour: high velocity torrent (4-6 m/s) in the mountain gorge scours all loose soil to bedrock
+    if (riverMask[k] > 0.05 && riverS[k] >= 0) {
+      const f = riverS[k] / sMax;
+      if (f < 0.55) {
+        // Upper gorge reach: 100% scoured bedrock channel, 85% rocky canyon banks
+        r = Math.max(r, riverMask[k] > 0.15 ? 1.0 : 0.85);
+      } else if (f < 0.75) {
+        // Middle reach: gravel & cobble armor
+        r = Math.max(r, 0.45 * (1.0 - (f - 0.55) / 0.20));
+      }
     }
     rockFrac[k] = Math.min(r, 1);
   }
