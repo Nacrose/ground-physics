@@ -232,7 +232,7 @@ export class Player {
           for (let i = 0; i < 6; i++) {
             this.fx.spawnSplash(
               this.pos.x + (Math.random() - 0.5) * 0.8,
-              groundH + 0.05,
+              groundH + 0.005,
               this.pos.z + (Math.random() - 0.5) * 0.8);
           }
         } else if (s.wetness < 0.4) {
@@ -391,7 +391,7 @@ export class Player {
           this.fx.spawnDust(fx0, groundH + 0.05, fz0);
         }
         if (this.pondM > 0.015 || this.mud > 0.5) {
-          this.fx.spawnSplash(this.pos.x, groundH + 0.04, this.pos.z);
+          this.fx.spawnSplash(this.pos.x, groundH + 0.005, this.pos.z, 0.6);
           // each footfall churns brown droplets out of soft mud
           this.fx.spawnMudChurn(fx0, groundH + 0.06, fz0, input.sprint ? 1.1 : 0.7);
           // sprinting through soft clay churns ruts

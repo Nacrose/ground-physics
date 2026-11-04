@@ -583,13 +583,23 @@ export class StormFX {
     let prevWl = Infinity;
     for (let i = 0; i < pts.length; i++) {
       const p = pts[i];
+      const a = pts[Math.max(0, i - 1)], b2 = pts[Math.min(pts.length - 1, i + 1)];
+      let tx = b2.x - a.x, ty = b2.y - a.y;
+      const tl = Math.hypot(tx, ty) || 1;
+      tx /= tl; ty /= tl;
+      const nx = -ty, nz = tx;
+      const halfW = p.w * 0.90;
+      const bankL = sampleHeight(this.terrain, p.x - nx * halfW, p.y - nz * halfW);
+      const bankR = sampleHeight(this.terrain, p.x + nx * halfW, p.y + nz * halfW);
       const bedH = sampleHeight(this.terrain, p.x, p.y);
-      const targetDepth = 0.55 + 0.35 * (p.s / sMax); // 0.55m in gorge, 0.90m in lowland
+      const targetDepth = 0.50 + 0.30 * (p.s / sMax); // 0.50m in gorge, 0.80m in lowland
       let wl = bedH + targetDepth;
+      // Cap strictly below banks so water is nested inside canyon walls
+      wl = Math.min(wl, Math.min(bankL, bankR) - 0.05);
       // Monotonic downhill flow: water level must never flow uphill
       wl = Math.min(prevWl - 0.005, wl);
-      // Ensure water is always at least 0.20m above the carved thalweg bed
-      wl = Math.max(wl, bedH + 0.20);
+      // Ensure water is always at least 0.15m above the carved thalweg bed
+      wl = Math.max(wl, bedH + 0.15);
       prevWl = wl;
       wlStation[i] = wl;
     }
@@ -612,16 +622,17 @@ export class StormFX {
         const off = halfW * Math.sign(sc) * Math.pow(Math.abs(sc), 0.70);
         const sx = p.x + nx * off, sz = p.y + nz * off; // 0..WORLD_SIZE frame
         const terH = sampleHeight(this.terrain, sx, sz);
-        const depth = Math.max(wl - terH, 0);
+        let depth = Math.max(wl - terH, 0);
+        if (c === 0 || c === NA) depth = 0;
         
         // 3D Water Volume Shaping:
         // Inside the channel where water has depth (wl > terH):
         //   the water surface sits at the horizontal water table wl.
         // At the banks where terrain rises above water (terH >= wl):
-        //   the vertex seamlessly pins flush to the terrain bank (terH + 0.002m), depth = 0.
+        //   the vertex seamlessly pins flush to the terrain bank (terH + 0.001m), depth = 0.
         // This ensures the river is a true 3D volumetric water body nestled between canyon walls,
         // with ZERO floating paper edges and realistic bank shoreline feathering.
-        const y = depth > 0 ? wl : terH + 0.002;
+        const y = depth > 0 ? wl : terH + 0.001;
         
         verts.push(sx - HALF, y, sz - HALF);
         depths.push(depth);
@@ -978,9 +989,9 @@ export class StormFX {
       if (this.dropPos[i3 + 1] <= gy + 0.03) {
         const ddx = this.dropPos[i3] - playerPos.x, ddz = this.dropPos[i3 + 2] - playerPos.z;
         if (ddx * ddx + ddz * ddz < 81 && Math.random() < 0.22) {
-          // rings read larger on standing water
+          // rings read larger on standing water (fine marble/coin ripples)
           const onPond = this.ground.hPond[cellIndex(this.dropPos[i3], this.dropPos[i3 + 2])] > 0.002;
-          this.spawnSplash(this.dropPos[i3], gy + 0.03, this.dropPos[i3 + 2], onPond ? 1.5 : 0.95);
+          this.spawnSplash(this.dropPos[i3], gy + 0.005, this.dropPos[i3 + 2], onPond ? 0.85 : 0.50);
         }
         this.respawnDrop(i, camPos, fall, windX, windZ);
       }
@@ -1002,8 +1013,8 @@ export class StormFX {
         continue;
       }
       const age = life;
-      const scale = this.splashScale[i] * (0.09 + age * 0.55);
-      const alpha = Math.max(0, 1 - age / 0.4);
+      const scale = this.splashScale[i] * (0.025 + age * 0.08);
+      const alpha = Math.max(0, 1 - age / 0.28);
       sp.set(this.splashPos[i * 3], this.splashPos[i * 3 + 1], this.splashPos[i * 3 + 2]);
       sq.identity();
       ss.set(scale, 1, scale);
@@ -1011,7 +1022,7 @@ export class StormFX {
       ss.multiplyScalar(alpha * 0.75 + 0.25);
       sm.compose(sp, sq, ss);
       this.splash.setMatrixAt(i, sm);
-      this.splashLife[i] = age + dt >= 0.4 ? -1 : age + dt;
+      this.splashLife[i] = age + dt >= 0.28 ? -1 : age + dt;
     }
     this.splash.instanceMatrix.needsUpdate = true;
 

@@ -18,14 +18,14 @@ import { TerrainData, sampleHeight, terrainNormal, WORLD_SIZE } from "./terrain"
 import { Ground } from "./ground";
 
 const MAX_PARTICLES = 1200;
-const PARTICLE_RADIUS = 0.09; // [m] reduced so droplets form tight cohesive streams
-const SPH_H = 0.32; // [m] smoothing kernel radius
+const PARTICLE_RADIUS = 0.018; // [m] true marble-sized droplets (3.6 cm diameter)
+const SPH_H = 0.06; // [m] smoothing kernel radius for fine marble droplets
 const SPH_H2 = SPH_H * SPH_H;
-const SPH_MASS = 0.045; // [kg] per particle
-const SPH_REST_DENSITY = 32.0;
-const SPH_GAS_K = 18.0; // pressure stiffness
-const SPH_VISC = 0.45; // artificial viscosity
-const GRAVITY = -11.5;
+const SPH_MASS = 0.0012; // [kg] per marble droplet
+const SPH_REST_DENSITY = 28.0;
+const SPH_GAS_K = 24.0; // pressure stiffness
+const SPH_VISC = 0.35; // artificial viscosity
+const GRAVITY_ACCEL = -18.0; // [m/s^2] strong snappy gravitational acceleration (no floating!)
 
 // SPH Kernel constants
 const POLY6 = 315.0 / (64.0 * Math.PI * Math.pow(SPH_H, 9));
@@ -33,7 +33,7 @@ const SPIKY_GRAD = -45.0 / (Math.PI * Math.pow(SPH_H, 6));
 const VISC_LAP = 45.0 / (Math.PI * Math.pow(SPH_H, 6));
 
 // Spatial Hash constants
-const HASH_CELL = 0.40;
+const HASH_CELL = 0.07;
 const HASH_SIZE = 2048;
 const HASH_MASK = HASH_SIZE - 1;
 
@@ -200,9 +200,7 @@ export class FluidSystem {
         varying float vDensity;
 
         void main() {
-          // Strictly discard dead particles and isolated single particles (rest density ~32, isolated self-density ~1.3)
-          // Only cohesive fluid clusters/streams are rendered; isolated particles never render as bubbles!
-          if (vLife <= 0.0 || vDensity < 14.0) discard;
+          if (vLife <= 0.0) discard;
           vec2 n = vUv * 2.0 - 1.0;
           float r2 = dot(n, n);
           if (r2 > 1.0) discard;
@@ -246,7 +244,7 @@ export class FluidSystem {
         varying float vDensity;
 
         void main() {
-          if (vLife <= 0.0 || vDensity < 14.0) discard;
+          if (vLife <= 0.0) discard;
           vec2 n = vUv * 2.0 - 1.0;
           float r2 = dot(n, n);
           if (r2 > 1.0) discard;
@@ -387,9 +385,8 @@ export class FluidSystem {
 
           float thickness = texture2D(uThickness, vUv).r;
 
-          // Fluid volume cutoff: require at least 8 cm of continuous liquid thickness
-          // Isolated single droplets or noise are strictly discarded and never rendered as bubbles!
-          if (thickness < 0.08) {
+          // Fine liquid droplet volume cutoff
+          if (thickness < 0.005) {
             gl_FragColor = bgCol;
             return;
           }
@@ -416,8 +413,8 @@ export class FluidSystem {
           vec3 N = normalize(cross(dX, dY));
           if (N.z < 0.0) N = -N;
 
-          // Screen-space optical refraction
-          vec2 refrOffset = N.xy * 0.038 * clamp(thickness * 1.8, 0.0, 1.0);
+          // Screen-space optical refraction for fine droplets
+          vec2 refrOffset = N.xy * 0.012 * clamp(thickness * 6.0, 0.0, 1.0);
           vec2 refrUv = vUv + refrOffset;
           float refrSceneD = texture2D(uSceneDepth, refrUv).r;
           float refrSceneZ = linearizeDepth(refrSceneD);
@@ -427,14 +424,14 @@ export class FluidSystem {
 
           // Beer-Lambert Optical Absorption (Red light absorbs first -> Caribbean teal)
           vec3 absorption = vec3(1.35, 0.45, 0.16);
-          vec3 transmission = exp(-absorption * thickness * 2.4);
+          vec3 transmission = exp(-absorption * thickness * 8.0);
           vec3 waterCol = sceneSample * transmission;
 
           // Timberborn 3D Water Palette (turquoise shallows -> deep sapphire)
           vec3 shalCol = vec3(0.20, 0.78, 0.82);
           vec3 deepCol = vec3(0.03, 0.22, 0.38);
-          vec3 waterTint = mix(shalCol, deepCol, smoothstep(0.04, 0.55, thickness));
-          waterCol = mix(waterCol, waterTint, clamp(thickness * 0.80, 0.0, 0.86));
+          vec3 waterTint = mix(shalCol, deepCol, smoothstep(0.01, 0.12, thickness));
+          waterCol = mix(waterCol, waterTint, clamp(thickness * 3.5, 0.0, 0.86));
 
           // Fresnel Sky Reflection
           vec3 viewDir = normalize(-posC);
@@ -448,11 +445,11 @@ export class FluidSystem {
           waterCol += uSunColor * spec * 0.75;
 
           // Stylized aeration and splash crest foam (modulated by ambient scene lighting)
-          float foamMask = smoothstep(0.14, 0.09, thickness) * smoothstep(0.06, 0.09, thickness);
+          float foamMask = smoothstep(0.035, 0.018, thickness) * smoothstep(0.005, 0.018, thickness);
           vec3 ambientL = mix(uSkyColor, uSunColor, 0.3);
           float lightInt = clamp(length(ambientL) * 1.2, 0.05, 1.0);
           vec3 foamCol = mix(vec3(0.92, 0.96, 1.0), uSkyColor, 0.35) * lightInt;
-          waterCol = mix(waterCol, foamCol, foamMask * 0.40);
+          waterCol = mix(waterCol, foamCol, foamMask * 0.35);
 
           gl_FragColor = vec4(waterCol, 1.0);
           #include <tonemapping_fragment>
@@ -489,7 +486,7 @@ export class FluidSystem {
     origin: THREE.Vector3,
     direction: THREE.Vector3,
     speed: number,
-    spread = 0.05,
+    spread = 0.04,
     count = 3
   ) {
     for (let i = 0; i < count; i++) {
@@ -505,7 +502,7 @@ export class FluidSystem {
         dir.x * spd,
         dir.y * spd,
         dir.z * spd,
-        5.0
+        2.2
       );
     }
   }
@@ -527,12 +524,12 @@ export class FluidSystem {
     // Emitter 1: Continuous Mountain Waterfall at the Tarn Source (245, 58, 236)
     this.waterfallTimer += dt;
     const tarnDist = Math.hypot(playerPos.x - (245 - WORLD_SIZE / 2), playerPos.z - (236 - WORLD_SIZE / 2));
-    if (this.waterfallTimer > 0.06 && tarnDist < 140) {
+    if (this.waterfallTimer > 0.03 && tarnDist < 140) {
       this.waterfallTimer = 0;
-      const tX = 245 - WORLD_SIZE / 2 + (Math.random() - 0.5) * 1.8;
-      const tZ = 236 - WORLD_SIZE / 2 + (Math.random() - 0.5) * 1.8;
-      const tY = sampleHeight(this.terrain, tX + WORLD_SIZE / 2, tZ + WORLD_SIZE / 2) + 0.4;
-      this.spawnParticle(tX, tY, tZ, 1.4 + (Math.random() - 0.5) * 0.4, -0.6, 2.0 + (Math.random() - 0.5) * 0.4, 3.5);
+      const tX = 245 - WORLD_SIZE / 2 + (Math.random() - 0.5) * 0.8;
+      const tZ = 236 - WORLD_SIZE / 2 + (Math.random() - 0.5) * 0.8;
+      const tY = sampleHeight(this.terrain, tX + WORLD_SIZE / 2, tZ + WORLD_SIZE / 2) + 0.12;
+      this.spawnParticle(tX, tY, tZ, 0.8 + (Math.random() - 0.5) * 0.3, -3.2, 1.2 + (Math.random() - 0.5) * 0.3, 1.4);
     }
 
     // Emitter 2: Interactive Player Water Jet / Stream
@@ -596,7 +593,7 @@ export class FluidSystem {
 
       // 3. Compute Forces & Integrate
       for (let i = 0; i < this.activeCount; i++) {
-        let fX = 0, fY = GRAVITY * SPH_MASS, fZ = 0;
+        let fX = 0, fY = 0, fZ = 0;
         const xi = this.pX[i], yi = this.pY[i], zi = this.pZ[i];
         const vxi = this.vX[i], vyi = this.vY[i], vzi = this.vZ[i];
         const rhoI = this.density[i];
@@ -640,11 +637,16 @@ export class FluidSystem {
           }
         }
 
-        // Integrate Velocity
+        // Integrate Velocity with realistic downward gravitational acceleration
         const invRho = 1.0 / rhoI;
         this.vX[i] += (fX * invRho) * subDt;
-        this.vY[i] += (fY * invRho) * subDt;
+        this.vY[i] += (fY * invRho + GRAVITY_ACCEL) * subDt;
         this.vZ[i] += (fZ * invRho) * subDt;
+
+        // Mild air resistance on fine droplets
+        const drag = Math.max(0, 1.0 - 0.45 * subDt);
+        this.vX[i] *= drag;
+        this.vZ[i] *= drag;
 
         // Integrate Position
         this.pX[i] += this.vX[i] * subDt;
