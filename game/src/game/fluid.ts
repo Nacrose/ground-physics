@@ -18,8 +18,8 @@ import { TerrainData, sampleHeight, terrainNormal, WORLD_SIZE } from "./terrain"
 import { Ground } from "./ground";
 
 const MAX_PARTICLES = 1200;
-const PARTICLE_RADIUS = 0.18; // [m]
-const SPH_H = 0.38; // [m] smoothing kernel radius
+const PARTICLE_RADIUS = 0.09; // [m] reduced so droplets form tight cohesive streams
+const SPH_H = 0.32; // [m] smoothing kernel radius
 const SPH_H2 = SPH_H * SPH_H;
 const SPH_MASS = 0.045; // [kg] per particle
 const SPH_REST_DENSITY = 32.0;
@@ -59,8 +59,6 @@ export class FluidSystem {
   streamActive = false;
   private streamTimer = 0;
   private waterfallTimer = 0;
-  private rainRunoffTimer = 0;
-  private riverFlowTimer = 0;
   private tempNrm: [number, number, number] = [0, 0, 1];
 
   // --- Three.js SSFR Pipeline Components ---
@@ -79,6 +77,7 @@ export class FluidSystem {
   private particleGeo: THREE.InstancedBufferGeometry;
   private posAttr: THREE.InstancedBufferAttribute;
   private lifeAttr: THREE.InstancedBufferAttribute;
+  private densityAttr: THREE.InstancedBufferAttribute;
   private particleDepthMat: THREE.ShaderMaterial;
   private particleThicknessMat: THREE.ShaderMaterial;
   private particleMesh: THREE.Mesh;
@@ -159,8 +158,10 @@ export class FluidSystem {
 
     this.posAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_PARTICLES * 3), 3);
     this.lifeAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_PARTICLES), 1);
+    this.densityAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_PARTICLES), 1);
     this.particleGeo.setAttribute("aInstancePos", this.posAttr);
     this.particleGeo.setAttribute("aLife", this.lifeAttr);
+    this.particleGeo.setAttribute("aDensity", this.densityAttr);
 
     // --- Particle Depth Shader ---
     this.particleDepthMat = new THREE.ShaderMaterial({
@@ -173,14 +174,17 @@ export class FluidSystem {
       vertexShader: /* glsl */ `
         attribute vec3 aInstancePos;
         attribute float aLife;
+        attribute float aDensity;
         uniform float uRadius;
         varying vec2 vUv;
         varying vec3 vViewCenter;
         varying float vLife;
+        varying float vDensity;
 
         void main() {
           vUv = uv;
           vLife = aLife;
+          vDensity = aDensity;
           vec4 viewCenter = modelViewMatrix * vec4(aInstancePos, 1.0);
           vViewCenter = viewCenter.xyz;
           // Camera-facing billboard quad in view space
@@ -193,9 +197,12 @@ export class FluidSystem {
         varying vec2 vUv;
         varying vec3 vViewCenter;
         varying float vLife;
+        varying float vDensity;
 
         void main() {
-          if (vLife <= 0.0) discard;
+          // Strictly discard dead particles and isolated single particles (rest density ~32, isolated self-density ~1.3)
+          // Only cohesive fluid clusters/streams are rendered; isolated particles never render as bubbles!
+          if (vLife <= 0.0 || vDensity < 14.0) discard;
           vec2 n = vUv * 2.0 - 1.0;
           float r2 = dot(n, n);
           if (r2 > 1.0) discard;
@@ -217,13 +224,16 @@ export class FluidSystem {
       vertexShader: /* glsl */ `
         attribute vec3 aInstancePos;
         attribute float aLife;
+        attribute float aDensity;
         uniform float uRadius;
         varying vec2 vUv;
         varying float vLife;
+        varying float vDensity;
 
         void main() {
           vUv = uv;
           vLife = aLife;
+          vDensity = aDensity;
           vec4 viewCenter = modelViewMatrix * vec4(aInstancePos, 1.0);
           vec3 viewPos = viewCenter.xyz + vec3((uv - 0.5) * (uRadius * 2.2), 0.0);
           gl_Position = projectionMatrix * vec4(viewPos, 1.0);
@@ -233,9 +243,10 @@ export class FluidSystem {
         uniform float uRadius;
         varying vec2 vUv;
         varying float vLife;
+        varying float vDensity;
 
         void main() {
-          if (vLife <= 0.0) discard;
+          if (vLife <= 0.0 || vDensity < 14.0) discard;
           vec2 n = vUv * 2.0 - 1.0;
           float r2 = dot(n, n);
           if (r2 > 1.0) discard;
@@ -376,6 +387,13 @@ export class FluidSystem {
 
           float thickness = texture2D(uThickness, vUv).r;
 
+          // Fluid volume cutoff: require at least 8 cm of continuous liquid thickness
+          // Isolated single droplets or noise are strictly discarded and never rendered as bubbles!
+          if (thickness < 0.08) {
+            gl_FragColor = bgCol;
+            return;
+          }
+
           // Reconstruct normal via screen-space depth finite differences
           vec3 posC = reconstructViewPos(vUv, fluidZ);
           float zR = texture2D(uSmoothedDepth, vUv + vec2(uTexelSize.x, 0.0)).r;
@@ -429,10 +447,12 @@ export class FluidSystem {
           float spec = pow(max(dot(N, halfVec), 0.0), 48.0);
           waterCol += uSunColor * spec * 0.75;
 
-          // Stylized aeration and splash crest foam
-          float foamMask = smoothstep(0.045, 0.012, thickness) * smoothstep(0.002, 0.016, thickness);
-          vec3 foamCol = mix(vec3(0.96, 0.98, 1.0), uSkyColor, 0.15);
-          waterCol = mix(waterCol, foamCol, foamMask * 0.45);
+          // Stylized aeration and splash crest foam (modulated by ambient scene lighting)
+          float foamMask = smoothstep(0.14, 0.09, thickness) * smoothstep(0.06, 0.09, thickness);
+          vec3 ambientL = mix(uSkyColor, uSunColor, 0.3);
+          float lightInt = clamp(length(ambientL) * 1.2, 0.05, 1.0);
+          vec3 foamCol = mix(vec3(0.92, 0.96, 1.0), uSkyColor, 0.35) * lightInt;
+          waterCol = mix(waterCol, foamCol, foamMask * 0.40);
 
           gl_FragColor = vec4(waterCol, 1.0);
           #include <tonemapping_fragment>
@@ -523,64 +543,6 @@ export class FluidSystem {
         const forward = new THREE.Vector3(Math.sin(playerYaw), 0.22, Math.cos(playerYaw)).normalize();
         const origin = playerPos.clone().add(new THREE.Vector3(0, 1.2, 0)).addScaledVector(forward, 0.4);
         this.spawnStream(origin, forward, 9.5, 0.08, 2);
-      }
-    }
-
-    // Emitter 3: Rain Runoff Cascades on Nearby Slopes
-    if (rainIntensity > 5) {
-      this.rainRunoffTimer += dt;
-      const rate = rainIntensity > 40 ? 0.06 : 0.14;
-      if (this.rainRunoffTimer > rate && this.activeCount < MAX_PARTICLES - 30) {
-        this.rainRunoffTimer = 0;
-        const ang = Math.random() * Math.PI * 2;
-        const dist = 5 + Math.random() * 18;
-        const rx = playerPos.x + Math.cos(ang) * dist;
-        const rz = playerPos.z + Math.sin(ang) * dist;
-        const wx = rx + WORLD_SIZE / 2;
-        const wz = rz + WORLD_SIZE / 2;
-        if (wx >= 4 && wx <= WORLD_SIZE - 4 && wz >= 4 && wz <= WORLD_SIZE - 4) {
-          terrainNormal(this.terrain, wx, wz, this.tempNrm);
-          const nX = this.tempNrm[0], nY = this.tempNrm[2], nZ = this.tempNrm[1];
-          if (nY < 0.95 && nY > 0.3) {
-            const gy = sampleHeight(this.terrain, wx, wz) + 0.12;
-            const spd = 0.8 + Math.random() * 1.2;
-            this.spawnParticle(rx, gy, rz, -nX * spd, -0.15, -nZ * spd, 3.5);
-          }
-        }
-      }
-    }
-
-    // Emitter 4: Continuous 3D River Rapids Flow & Spray (Timberborn 3D water style)
-    this.riverFlowTimer += dt;
-    if (this.riverFlowTimer > 0.05 && this.activeCount < MAX_PARTICLES - 30) {
-      this.riverFlowTimer = 0;
-      const pts = this.terrain.riverPts;
-      if (pts && pts.length > 0) {
-        for (let i = 0; i < pts.length; i += 2) {
-          const rp = pts[i];
-          const rwx = rp.x - WORLD_SIZE / 2;
-          const rwz = rp.y - WORLD_SIZE / 2;
-          const d2 = (playerPos.x - rwx) ** 2 + (playerPos.z - rwz) ** 2;
-          if (d2 < 65 * 65) {
-            const nextIdx = Math.min(pts.length - 1, i + 1);
-            const pNext = pts[nextIdx];
-            let dirX = pNext.x - rp.x;
-            let dirZ = pNext.y - rp.y;
-            const len = Math.hypot(dirX, dirZ) || 1;
-            dirX /= len; dirZ /= len;
-            const crossX = -dirZ, crossZ = dirX;
-            const off = (Math.random() - 0.5) * (rp.w * 0.75);
-            const sx = rwx - dirX * 3.5 + crossX * off;
-            const sz = rwz - dirZ * 3.5 + crossZ * off;
-            const wx = sx + WORLD_SIZE / 2, wz = sz + WORLD_SIZE / 2;
-            if (wx >= 4 && wx <= WORLD_SIZE - 4 && wz >= 4 && wz <= WORLD_SIZE - 4) {
-              const gy = sampleHeight(this.terrain, wx, wz) + 0.35;
-              const spd = 2.4 + Math.random() * 1.8;
-              this.spawnParticle(sx, gy, sz, dirX * spd + crossX * (Math.random() - 0.5) * 0.4, -0.2, dirZ * spd + crossZ * (Math.random() - 0.5) * 0.4, 5.0);
-            }
-            break;
-          }
-        }
       }
     }
 
@@ -738,14 +700,17 @@ export class FluidSystem {
     // Update Three.js Instanced Attributes
     const pArr = this.posAttr.array as Float32Array;
     const lArr = this.lifeAttr.array as Float32Array;
+    const dArr = this.densityAttr.array as Float32Array;
     for (let i = 0; i < this.activeCount; i++) {
       pArr[i * 3] = this.pX[i];
       pArr[i * 3 + 1] = this.pY[i];
       pArr[i * 3 + 2] = this.pZ[i];
       lArr[i] = this.life[i];
+      dArr[i] = this.density[i];
     }
     this.posAttr.needsUpdate = true;
     this.lifeAttr.needsUpdate = true;
+    this.densityAttr.needsUpdate = true;
     this.particleGeo.instanceCount = this.activeCount;
 
     // Update Composite Material Uniforms

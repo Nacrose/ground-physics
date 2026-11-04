@@ -866,11 +866,6 @@ export class Game {
       this.world.uniforms.sunDir.value, fog.color, fog.density);
     this.fluid?.update(dtReal, this.elapsed, cam, this.player.pos, this.player.yaw,
       this.world.uniforms.sunDir.value, fog.color, this.world.sun.color, rainAtPlayer);
-    if (this.player.steampunk?.mounted && this.player.steampunk.bike.speed > 2.5 && this.player.pondM > 0.005) {
-      const b = this.player.steampunk.bike;
-      const backDir = new THREE.Vector3(-Math.sin(b.yaw), 0.65, -Math.cos(b.yaw)).normalize();
-      this.fluid.spawnStream(b.pos.clone().add(new THREE.Vector3(0, 0.25, 0)), backDir, b.speed * 0.7, 0.22, 2);
-    }
     this.hud.setFlash(this.flash);
 
     // ---- HUD -------------------------------------------------------------------------
