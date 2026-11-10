@@ -80,68 +80,35 @@ function generateWaterNormalMap(size = 512): THREE.DataTexture {
 function generateFoamTexture(size = 256): THREE.DataTexture {
   const numPixels = size * size;
   const data = new Uint8Array(numPixels * 4);
-  const gridSize = 12;
-  const seeds: [number, number][] = [];
-  let seed = 42;
-  const rand = () => {
-    seed = (seed * 16807) % 2147483647;
-    return (seed - 1) / 2147483646;
-  };
-
-  for (let gy = 0; gy < gridSize; gy++) {
-    for (let gx = 0; gx < gridSize; gx++) {
-      seeds.push([
-        (gx + 0.15 + 0.7 * rand()) / gridSize,
-        (gy + 0.15 + 0.7 * rand()) / gridSize,
-      ]);
-    }
-  }
 
   for (let y = 0; y < size; y++) {
     const v = y / size;
-    const gy = Math.floor(v * gridSize);
     for (let x = 0; x < size; x++) {
       const u = x / size;
-      const gx = Math.floor(u * gridSize);
       const idx = (y * size + x) * 4;
 
-      let f1 = 999;
-      let f2 = 999;
+      // 1. Fine multi-octave micro-bubble aeration (millimeter-scale bubbles, zero hexagon polygons)
+      const a1 = Math.sin(u * 72.0 + Math.sin(v * 54.0) * 1.8) * 0.5 + 0.5;
+      const a2 = Math.cos(v * 96.0 + Math.cos(u * 72.0) * 2.2) * 0.5 + 0.5;
+      const a3 = Math.sin((u + v) * 140.0) * 0.5 + 0.5;
+      const micro = Math.pow(a1 * 0.45 + a2 * 0.35 + a3 * 0.20, 1.3);
 
-      for (let dy = -1; dy <= 1; dy++) {
-        const cy = (gy + dy + gridSize) % gridSize;
-        for (let dx = -1; dx <= 1; dx++) {
-          const cx = (gx + dx + gridSize) % gridSize;
-          const s = seeds[cy * gridSize + cx];
+      // 2. Filamentary lace strings (stretched organic filaments trailing downstream)
+      const f1 = Math.sin(u * 28.0 + Math.sin(v * 40.0) * 2.8);
+      const f2 = Math.cos(v * 56.0 - Math.sin(u * 42.0) * 2.2);
+      const lace = Math.pow(Math.max(0.0, f1 * f2), 0.70);
 
-          let du = Math.abs(u - s[0]);
-          if (du > 0.5) du = 1.0 - du;
-          let dv = Math.abs(v - s[1]);
-          if (dv > 0.5) dv = 1.0 - dv;
+      // 3. Flocculent foam clumps (soft natural clustering)
+      const c1 = Math.sin(u * 14.0) * Math.cos(v * 14.0) * 0.5 + 0.5;
+      const c2 = Math.sin(u * 24.0 + v * 20.0) * 0.5 + 0.5;
+      const clump = c1 * 0.60 + c2 * 0.40;
 
-          const dist = Math.hypot(du, dv) * gridSize;
-          if (dist < f1) {
-            f2 = f1;
-            f1 = dist;
-          } else if (dist < f2) {
-            f2 = dist;
-          }
-        }
-      }
+      // 4. Height relief for grazing sunlight shading
+      const height = Math.min(1.0, micro * 0.65 + lace * 0.35);
 
-      const diff = f2 - f1;
-      // Channel R: Bubble Lace - sharp bright boundaries where F2 - F1 is small
-      const lace = Math.max(0, Math.min(1, 1.0 - diff * 3.8));
-      // Channel G: Bubble interior aeration
-      const core = Math.max(0, Math.min(1, f1 * 1.6));
-      // Channel B: Micro turbulence
-      const micro = (Math.sin(u * 48.0) * Math.sin(v * 48.0) + Math.cos(u * 96.0 + v * 72.0)) * 0.25 + 0.5;
-      // Channel A: 3D Height / relief
-      const height = Math.max(0, Math.min(1, lace * 0.65 + (1.0 - core) * 0.35));
-
-      data[idx] = Math.round(lace * 255);
-      data[idx + 1] = Math.round(core * 255);
-      data[idx + 2] = Math.round(micro * 255);
+      data[idx] = Math.round(micro * 255);
+      data[idx + 1] = Math.round(lace * 255);
+      data[idx + 2] = Math.round(clump * 255);
       data[idx + 3] = Math.round(height * 255);
     }
   }
@@ -502,43 +469,43 @@ export class RiverWater {
             float hydFoam = max(froudeFoam, max(speedFoam, cascadeFoam));
             float rapidTrigger = clamp(hydFoam + wakeFoam * 1.45, 0.0, 1.8);
 
-            // Multi-scale Voronoi bubble texture sampling (downstream curvilinear advection):
-            vec2 fUv1 = vec2(crossDist * 0.85, flowDist1 * 0.85);
-            vec2 fUv2 = mat2(0.966, -0.259, 0.259, 0.966) * (vec2(crossDist * 2.4, flowDist2 * 2.4));
+            // Multi-scale high-frequency aerated froth sampling (downstream advection with lateral drift):
+            vec2 fUv1 = vec2(latDrift1 * 2.5, flowDist1 * 2.2);
+            vec2 fUv2 = mat2(0.966, -0.259, 0.259, 0.966) * vec2(latDrift2 * 4.8, flowDist2 * 4.4);
 
             vec4 foam1 = texture2D(uFoamTex, fUv1);
             vec4 foam2 = texture2D(uFoamTex, fUv2);
 
-            // True Voronoi bubble lace (F2 - F1 cell walls) + micro bubble cores:
-            float bubbleLace = foam1.r * 0.58 + foam2.r * 0.42;
-            float aeration = foam1.g * 0.50 + foam2.b * 0.50;
-            float foamComposite = bubbleLace * 0.55 + aeration * 0.45;
+            // Fine micro-bubble aeration + trailing filamentary lace:
+            float microFroth = foam1.r * 0.55 + foam2.r * 0.45;
+            float filamentLace = foam1.g * 0.60 + foam2.b * 0.40;
 
-            // 1. Lacy Dissipation Drift (thin trailing foam lines & drifting bubble rafts):
-            float sDist = (streamDist - uTime * uFlowSpeed * 1.10);
-            float s1 = sin(crossDist * 2.8 + sin(sDist * 0.35) * 1.2);
-            float s2 = sin(crossDist * 6.2 - sin(sDist * 0.70) * 1.5);
-            float streak = smoothstep(0.65, 0.98, sin(s1 * 1.4 + s2 * 1.1));
-            float lacyDrift = streak * 0.38 * bubbleLace * smoothstep(0.04, 0.45, depth);
+            // Churning rapid whitecaps (smooth, non-blocky aeration density)
+            float rapidFroth = smoothstep(0.42, 0.92, microFroth * (0.55 + rapidTrigger * 0.85)) * smoothstep(0.12, 0.65, rapidTrigger);
 
-            // 2. Churning Supercritical Whitecaps & Boulder Wakes:
-            float rapidCutoff = 1.02 - rapidTrigger * 0.65;
-            float rapidFroth = smoothstep(rapidCutoff, rapidCutoff + 0.38, foamComposite + rapidTrigger * 0.45) * min(rapidTrigger, 1.0);
+            // Trailing wake filaments behind boulders & rapid crests
+            float trailingStreamers = filamentLace * smoothstep(0.08, 0.55, wakeFoam) * smoothstep(0.04, 0.35, depth);
 
-            float totalFoam = clamp((rapidFroth * 0.92 + lacyDrift) * uFoamScale, 0.0, 1.0);
+            float totalFoam = clamp((rapidFroth * 0.82 + trailingStreamers * 0.48) * uFoamScale, 0.0, 1.0);
 
             if (totalFoam > 0.01) {
-              // 3D Normal Perturbation for Foam Volume (bubbles have real 3D relief & shadows!):
-              vec3 foamN = normalize(N + vec3((foam1.a - 0.5) * 0.25, 0.0, (foam2.a - 0.5) * 0.25) * totalFoam);
+              // 3D micro-relief normal perturbation
+              vec3 foamN = normalize(N + vec3((foam1.a - 0.5) * 0.22, 0.0, (foam2.a - 0.5) * 0.22) * totalFoam);
               float foamNdotL = max(dot(foamN, L), 0.0);
+              float foamNdotH = max(dot(foamN, H), 0.0);
 
-              // Sunlit warm white vs ambient alpine sky shadow:
-              vec3 sunlitFoam = vec3(0.98, 0.99, 1.0) * (0.85 + 0.18 * foamNdotL);
-              vec3 shadowFoam = vec3(0.72, 0.84, 0.94);
-              vec3 litFoam = mix(shadowFoam, sunlitFoam, max(foamNdotL, 0.15));
+              // Soft forward-scattered sunlight & ambient alpine sky fill:
+              vec3 ambientSky = mix(vec3(0.50, 0.68, 0.82), vec3(0.85, 0.92, 0.98), max(foamN.y, 0.0));
+              vec3 directSun = uSunColor * (0.80 + 0.28 * foamNdotL);
+              vec3 litFoam = ambientSky * 0.50 + directSun * 0.60;
 
-              // Translucent subsurface blending: thin foam reveals vibrant turquoise water beneath
-              float foamOpacity = smoothstep(0.02, 0.85, totalFoam) * 0.88;
+              // Sparkling sun glints on aerated bubble crests:
+              float foamGlint = pow(foamNdotH, 32.0) * 1.6 * fresnel * NdotL;
+              litFoam += uSunColor * foamGlint;
+
+              // Translucent subsurface blending (max 76% opacity):
+              // Preserves the luminous turquoise river body beneath the foam!
+              float foamOpacity = smoothstep(0.03, 0.75, totalFoam) * 0.76;
               finalColor = mix(finalColor, litFoam, foamOpacity);
             }
           }
