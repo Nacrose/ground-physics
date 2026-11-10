@@ -278,23 +278,32 @@ export class RiverWater {
           vHydraulics = hyd;
 
           float bedY = getBedHeight(wp.x, wp.z);
-          float localDepth = max(0.0, hyd.g - bedY);
-
-          // Hydraulic standing waves (traveling smoothly downstream with uniform advection phase):
-          // Damped smoothly to 0 at the shoreline boundary layer so waves never oscillate into rocks
-          float waveDamping = smoothstep(0.04, 0.40, localDepth);
-          float waveAmp = clamp(hyd.a * 0.22, 0.02, 0.35) * waveDamping;
-          // Downstream distance along river corridor in meters (0.0 at upstream summit z=-40 -> 80.0 at valley base z=+40)
           float streamDist = (1.0 - uv.y) * 80.0;
-          float wave = sin(streamDist * 0.65 - uTime * (uFlowSpeed * 0.85)) * waveAmp;
-          wave += sin(streamDist * 1.40 - uTime * (uFlowSpeed * 1.20)) * (waveAmp * 0.45);
+          float xc = getRiverCenter(wp.z);
+          float crossDist = wp.x - xc;
+          float absCross = abs(crossDist);
 
-          // Seamless ground conforming: on dry banks, conform directly to terrain
-          if (bedY > hyd.g) {
-            wp.y = bedY;
-          } else {
-            wp.y = max(bedY, hyd.g + wave);
-          }
+          // Physical hydraulic wave amplitude based on velocity head (Hv = v^2 / 2g):
+          float baseAmp = clamp(hyd.a * 0.22, 0.035, 0.36);
+
+          // Multi-directional open-channel wave dynamics:
+          // 1. Primary downstream standing swell
+          float wDown = sin(streamDist * 0.65 - uTime * (uFlowSpeed * 0.85)) * 0.40;
+          // 2. Chevron wake waves radiating diagonally outward toward banks (moves in x as flow travels in z)
+          float wChevron = sin(streamDist * 1.15 - absCross * 1.10 - uTime * (uFlowSpeed * 0.95)) * 0.35;
+          // 3. Cross-channel transverse surging (dynamic widthwise slosh across river corridor)
+          float wCross = sin(crossDist * 0.75 + sin(streamDist * 0.30) * 1.2 - uTime * (uFlowSpeed * 0.60)) * 0.25;
+          // 4. Edge lapping swash pulsing against the shoreline gravel
+          float wLap = sin(streamDist * 1.95 + crossDist * 1.35 - uTime * (uFlowSpeed * 1.10)) * 0.15;
+
+          float wave = (wDown + wChevron + wCross + wLap) * baseAmp;
+
+          // Instantaneous water surface elevation:
+          float waterSurf = hyd.g + wave;
+
+          // Dynamic shoreline swash: water surges freely up sloping banks during wave crests,
+          // and conforms cleanly to terrain when the wave retreats (zero dipping under ground).
+          wp.y = max(bedY, waterSurf);
 
           float eps = 0.5;
           float x0 = getRiverCenter(wp.z - eps);
@@ -407,18 +416,24 @@ export class RiverWater {
           float flowDist2 = streamDist - uTime * (uFlowSpeed * 1.35);
           float flowDist3 = streamDist - uTime * (uFlowSpeed * 1.70);
 
-          // Three-tier multi-scale waves (isotropic circular metric scale):
-          vec2 uvSwell = vec2(crossDist, flowDist1) * 0.30;
+          // Dynamic widthwise drift & lateral expansion:
+          // Ripples actively drift and expand diagonally outward toward the banks as water rushes downstream
+          float latDrift1 = crossDist - sign(crossDist) * (uTime * (uFlowSpeed * 0.16));
+          float latDrift2 = crossDist + sin(streamDist * 0.45 - uTime * 2.2) * 0.35;
+          float latDrift3 = crossDist - sign(crossDist) * (uTime * (uFlowSpeed * 0.26));
+
+          // Three-tier multi-scale waves (moving downstream AND widthwise):
+          vec2 uvSwell = vec2(latDrift1, flowDist1) * 0.30;
           vec3 nSwell = texture2D(uWaterNormalMap, uvSwell).rgb * 2.0 - 1.0;
 
-          vec2 uvRipple = mat2(0.978, -0.208, 0.208, 0.978) * (vec2(crossDist, flowDist2) * 0.72);
+          vec2 uvRipple = mat2(0.978, -0.208, 0.208, 0.978) * (vec2(latDrift2, flowDist2) * 0.72);
           vec3 nRipple = texture2D(uWaterNormalMap, uvRipple).rgb * 2.0 - 1.0;
 
-          vec2 uvChop = mat2(0.927, 0.375, -0.375, 0.927) * (vec2(crossDist, flowDist3) * 1.50);
+          vec2 uvChop = mat2(0.927, 0.375, -0.375, 0.927) * (vec2(latDrift3, flowDist3) * 1.50);
           vec3 nChop = texture2D(uWaterNormalMap, uvChop).rgb * 2.0 - 1.0;
 
-          // Ripple normal perturbation smoothly calms to a glassy boundary layer at the shore:
-          float rippleDamping = smoothstep(0.01, 0.16, depth);
+          // Ripples stay alive right up to the water edge (calming only in final 2.5 mm):
+          float rippleDamping = smoothstep(0.001, 0.025, depth);
           vec3 normalPerturb = (nSwell.xzy * 0.48 + nRipple.xzy * 0.36 + nChop.xzy * 0.16) * rippleDamping;
           vec3 N = normalize(vec3(vNormal.x + normalPerturb.x * 0.092, 1.0, vNormal.z + normalPerturb.z * 0.092));
 
@@ -437,8 +452,8 @@ export class RiverWater {
 
           // Screen-space refraction with visible pebble shimmer:
           vec2 screenUv = (vScreenPos.xy / vScreenPos.w) * 0.5 + 0.5;
-          // Refraction distortion strictly fades to zero at the shoreline to prevent halo tearing
-          float refrDistort = 0.045 * smoothstep(0.02, 0.35, depth);
+          // Refraction distortion softly scales down only in the final centimeter so dry banks are never distorted
+          float refrDistort = 0.040 * smoothstep(0.006, 0.16, depth);
           vec2 refrUv = clamp(screenUv + normalPerturb.xz * refrDistort, 0.001, 0.999);
 
           vec3 bedCol;
@@ -528,7 +543,7 @@ export class RiverWater {
             }
           }
 
-          float shoreAlpha = smoothstep(0.0005, 0.055, depth);
+          float shoreAlpha = smoothstep(0.0005, 0.035, depth);
           gl_FragColor = vec4(finalColor, shoreAlpha);
         }
       `,

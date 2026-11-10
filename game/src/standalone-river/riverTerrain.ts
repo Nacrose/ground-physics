@@ -118,8 +118,8 @@ export class RiverTerrain {
           vec3 albedo = mix(bankCol, pebbleCol, channelMask);
           vec3 arm = mix(bankArm, pebbleArm, channelMask);
 
-          // Dynamic wetness darkening where under water or near shoreline
-          float submerged = smoothstep(waterY + 0.12, waterY - 0.04, vWorldPos.y);
+          // Dynamic wetness darkening where under water or near surging swash shoreline
+          float submerged = smoothstep(waterY + 0.16, waterY - 0.04, vWorldPos.y);
           albedo *= mix(1.0, 0.45, submerged);
           float roughness = mix(arm.g, 0.08, submerged);
 
