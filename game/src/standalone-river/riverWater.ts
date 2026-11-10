@@ -1,10 +1,12 @@
 import * as THREE from "three";
 import { RiverTerrain } from "./riverTerrain";
 import { RiverHydraulics } from "./riverHydraulics";
+import { RiverRocks } from "./riverRocks";
 
 export class RiverWater {
   readonly terrain: RiverTerrain;
   readonly hydraulics: RiverHydraulics;
+  readonly rocks: RiverRocks;
   mesh: THREE.Mesh;
   material: THREE.ShaderMaterial;
 
@@ -13,10 +15,12 @@ export class RiverWater {
     sunDir: THREE.Vector3,
     sunColor: THREE.Color,
     screenTarget: THREE.WebGLRenderTarget,
-    hydraulics: RiverHydraulics
+    hydraulics: RiverHydraulics,
+    rocks: RiverRocks
   ) {
     this.terrain = terrain;
     this.hydraulics = hydraulics;
+    this.rocks = rocks;
 
     // Curved ribbon geometry following river path - wide enough to span across the bank slopes
     const segsZ = 320;
@@ -38,10 +42,22 @@ export class RiverWater {
     }
     geo.computeVertexNormals();
 
+    // Prepare boulder coordinates for boundary layer collision & separation wake
+    const boulderUniforms: THREE.Vector4[] = [];
+    for (let i = 0; i < 10; i++) {
+      if (rocks.boulders[i]) {
+        const b = rocks.boulders[i];
+        boulderUniforms.push(new THREE.Vector4(b.center.x, b.center.y, b.center.z, b.radius));
+      } else {
+        boulderUniforms.push(new THREE.Vector4(0, -999, 0, 0));
+      }
+    }
+
     this.material = new THREE.ShaderMaterial({
       uniforms: {
         uHydraulicsTex: { value: hydraulics.texture },
         uScreenTex: { value: screenTarget.texture },
+        uBoulders: { value: boulderUniforms },
         uSunDir: { value: sunDir },
         uSunColor: { value: sunColor },
         uTime: { value: 0.0 },
@@ -126,6 +142,7 @@ export class RiverWater {
         precision highp float;
         uniform sampler2D uHydraulicsTex;
         uniform sampler2D uScreenTex;
+        uniform vec4 uBoulders[10];
         uniform vec3 uSunDir;
         uniform vec3 uSunColor;
         uniform float uTime;
@@ -179,15 +196,65 @@ export class RiverWater {
             discard;
           }
 
-          // Dual-Phase Flow-Mapped Ripples driven by local physical velocity
+          // BOUNDARY LAYER FLUID DYNAMICS:
+          // 1. Bed & Shoreline Viscous Shear (Prandtl Turbulent Law of the Wall / 1/7th Power Law):
+          // Water touching the banks and riverbed adheres to solid rock (no-slip condition v = 0)
+          float delta = 0.45; // boundary layer thickness (meters)
+          float wallDist = clamp(depth / delta, 0.0, 1.0);
+          float wallShear = pow(wallDist, 0.22); // 1/7th power law drops to 0 at wall
+
+          // 2. Bluff-Body Boulder Boundary Layers & Separation Wakes:
+          float boulderShear = 1.0;
+          vec2 wakeDrift = vec2(0.0);
+          float wakeFoam = 0.0;
+
+          for (int i = 0; i < 10; i++) {
+            vec3 bPos = uBoulders[i].xyz;
+            float bR = uBoulders[i].w;
+            if (bR <= 0.05) continue;
+
+            vec2 dXZ = vWorldPos.xz - bPos.xz;
+            float dist = length(dXZ);
+
+            // Viscous boundary layer adhering to boulder skin
+            if (dist < bR * 2.4) {
+              float skinDist = clamp((dist - bR * 0.95) / (bR * 1.2), 0.0, 1.0);
+              boulderShear *= pow(skinDist, 0.35);
+
+              // Boundary Layer Separation: Adverse pressure gradient on leeward face
+              // creates an eddy separation bubble where flow detaches and recirculates
+              float downstreamDist = vWorldPos.z - bPos.z;
+              float crossDist = abs(dXZ.x);
+              if (downstreamDist > 0.0 && downstreamDist < bR * 3.8 && crossDist < bR * 1.15) {
+                float zFactor = 1.0 - downstreamDist / (bR * 3.8);
+                float xFactor = 1.0 - crossDist / (bR * 1.15);
+                float wakeIntensity = zFactor * xFactor;
+
+                // Inside the separation bubble, mainstream speed drops by ~85%
+                boulderShear = mix(boulderShear, 0.15, wakeIntensity);
+
+                // Recirculating wake vortex spin
+                wakeDrift += vec2(-sign(dXZ.x) * 0.25, -0.30) * wakeIntensity;
+
+                // Foam naturally traps and swirls in the quiet leeward eddy
+                wakeFoam += wakeIntensity * 0.65;
+              }
+            }
+          }
+
+          // Effective local velocity incorporating boundary layer friction
+          float effectiveSpeed = localVelocity * wallShear * boulderShear;
+          vec2 flowVector = normalize(vFlowDir + wakeDrift);
+
+          // Dual-Phase Flow-Mapped Ripples driven by boundary-layer velocity field
           float tau = 0.8;
           float t0 = mod(uTime * 0.9, tau);
           float t1 = mod(uTime * 0.9 + tau * 0.5, tau);
           float w0 = sin((t0 / tau) * 3.14159265);
           float w1 = sin((t1 / tau) * 3.14159265);
 
-          vec2 uv0 = vWorldPos.xz * 4.5 + vFlowDir * (t0 * localVelocity * 0.6);
-          vec2 uv1 = vWorldPos.xz * 4.5 + vFlowDir * (t1 * localVelocity * 0.6);
+          vec2 uv0 = vWorldPos.xz * 4.5 + flowVector * (t0 * effectiveSpeed * 0.6);
+          vec2 uv1 = vWorldPos.xz * 4.5 + flowVector * (t1 * effectiveSpeed * 0.6);
 
           float rip0 = sin(uv0.x * 6.0 + uv0.y * 8.0) * cos(uv0.x * 4.0);
           float rip1 = sin(uv1.x * 6.0 + uv1.y * 8.0) * cos(uv1.x * 4.0);
@@ -223,15 +290,16 @@ export class RiverWater {
           vec3 skyRefl = mix(vec3(0.20, 0.32, 0.42), vec3(0.75, 0.85, 0.98), NdotV);
           vec3 finalColor = mix(waterBody, skyRefl, fresnel) + uSunColor * spec * NdotL;
 
-          // Aerated foam in shallow cascades, high Froude supercritical rapids & wave crests
+          // Aerated foam in shallow cascades, high Froude supercritical rapids, and leeward eddy wakes
           float cascade = smoothstep(0.30, 0.06, depth);
           float froudeFoam = smoothstep(0.85, 1.35, localFroude);
-          float foamWave = sin(vWorldPos.z * 3.5 - uTime * localVelocity * 1.8);
-          float foam = max(cascade * 0.5, froudeFoam * 0.85) * smoothstep(0.25, 0.8, foamWave + rip0 * 0.5 + localHead * 0.3);
+          float foamWave = sin(vWorldPos.z * 3.5 - uTime * effectiveSpeed * 1.8);
+          float dynamicFoam = max(cascade * 0.5, froudeFoam * 0.85) * smoothstep(0.25, 0.8, foamWave + rip0 * 0.5 + localHead * 0.3);
+          float totalFoam = max(dynamicFoam, wakeFoam);
 
-          if (foam > 0.04) {
+          if (totalFoam > 0.04) {
             vec3 foamCol = vec3(0.95, 0.98, 1.0) * (0.8 + 0.2 * NdotL);
-            finalColor = mix(finalColor, foamCol, foam * 0.90);
+            finalColor = mix(finalColor, foamCol, totalFoam * 0.90);
           }
 
           // Hydrostatic sub-millimeter waterline fade:

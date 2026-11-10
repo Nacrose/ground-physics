@@ -106,7 +106,7 @@ export class StandaloneRiverLab {
     this.scene.add(this.rocks.group);
 
     // 8. Dynamic Flowing Water Ribbon
-    this.water = new RiverWater(this.terrain, this.sunDir, this.sunColor, this.screenTarget, this.hydraulics);
+    this.water = new RiverWater(this.terrain, this.sunDir, this.sunColor, this.screenTarget, this.hydraulics, this.rocks);
     this.scene.add(this.water.mesh);
 
     // 9. 3D Spray Particle System
