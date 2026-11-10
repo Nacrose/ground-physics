@@ -132,11 +132,12 @@ export class RiverTerrain {
           vec3 ambient = vec3(0.18, 0.22, 0.26) * arm.r;
           vec3 direct = uSunColor * NdotL;
 
-          // Simulated caustics dancing on the submerged bed
+          // Dynamic sunlight caustics dancing on submerged riverbed (moving downstream +z)
           if (submerged > 0.1 && channelMask > 0.2) {
-            float c1 = sin(vWorldPos.x * 6.0 + uTime * 3.5) * cos(vWorldPos.z * 6.0 - uTime * 4.0);
-            float c2 = sin(vWorldPos.x * 12.0 - uTime * 5.0) * cos(vWorldPos.z * 12.0 + uTime * 4.5);
-            float caust = pow(max(c1 + c2, 0.0), 3.0) * 1.8;
+            float sDist = (vWorldPos.z + 40.0);
+            float c1 = sin(vWorldPos.x * 5.0 + sin(sDist * 0.4) * 1.5) * cos(sDist * 4.5 - uTime * 4.2);
+            float c2 = sin(vWorldPos.x * 9.0 - sin(sDist * 0.8) * 1.2) * cos(sDist * 8.5 - uTime * 5.8);
+            float caust = pow(max(c1 + c2, 0.0), 2.5) * 1.5;
             direct += uSunColor * caust * submerged;
           }
 

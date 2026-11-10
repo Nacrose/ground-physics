@@ -200,7 +200,8 @@ export class RiverWater {
 
           // Hydraulic standing waves (traveling smoothly downstream with uniform advection phase):
           float waveAmp = clamp(hyd.a * 0.25, 0.03, 0.50) * smoothstep(0.05, 0.40, depth);
-          float streamDist = uv.y * 80.0;
+          // Downstream distance along river corridor in meters (0.0 at upstream summit z=-40 -> 80.0 at valley base z=+40)
+          float streamDist = (1.0 - uv.y) * 80.0;
           float wave = sin(streamDist * 0.65 - uTime * (uFlowSpeed * 0.85)) * waveAmp;
           wave += sin(streamDist * 1.40 - uTime * (uFlowSpeed * 1.20)) * (waveAmp * 0.45);
 
@@ -326,8 +327,8 @@ export class RiverWater {
             }
           }
 
-          // Curvilinear coordinate along river:
-          float streamDist = vRiverUv.y * 80.0;
+          // Curvilinear downstream coordinate (0.0 at upstream summit z=-40 -> 80.0 at valley base z=+40):
+          float streamDist = (1.0 - vRiverUv.y) * 80.0;
           float xc = getRiverCenter(vWorldPos.z);
           float crossDist = vWorldPos.x - xc;
 
