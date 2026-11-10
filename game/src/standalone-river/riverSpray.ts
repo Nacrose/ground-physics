@@ -3,9 +3,9 @@ import { RiverRocks } from "./riverRocks";
 import { RiverHydraulics } from "./riverHydraulics";
 
 export class RiverSpray {
-  readonly maxParticles = 600;
+  readonly maxParticles = 900;
   private geo: THREE.SphereGeometry;
-  private mat: THREE.MeshPhysicalMaterial;
+  private mat: THREE.MeshBasicMaterial;
   readonly mesh: THREE.InstancedMesh;
 
   private pos: Float32Array;
@@ -20,18 +20,18 @@ export class RiverSpray {
     this.rocks = rocks;
     this.hydraulics = hydraulics;
 
-    this.geo = new THREE.SphereGeometry(0.06, 6, 6);
-    this.mat = new THREE.MeshPhysicalMaterial({
+    // Glistening white-water droplet particles (visible kinetic spray)
+    this.geo = new THREE.SphereGeometry(0.08, 6, 6);
+    this.mat = new THREE.MeshBasicMaterial({
       color: 0xffffff,
-      roughness: 0.1,
-      metalness: 0.0,
-      transmission: 0.85,
       transparent: true,
-      opacity: 0.9,
+      opacity: 0.88,
+      depthWrite: false,
     });
 
     this.mesh = new THREE.InstancedMesh(this.geo, this.mat, this.maxParticles);
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.mesh.renderOrder = 12;
 
     this.pos = new Float32Array(this.maxParticles * 3);
     this.vel = new Float32Array(this.maxParticles * 3);
@@ -54,24 +54,24 @@ export class RiverSpray {
           const b = boulders[Math.floor(Math.random() * boulders.length)];
           const st = this.hydraulics.getStationAtZ(b.center.z);
 
-          // Spawn threshold directly governed by local dynamic head and Froude number
-          const spawnThreshold = Math.min(0.65, 0.10 + st.head * 0.22 + (st.froude > 1.0 ? 0.20 : 0.0));
+          // Kinetic energy threshold: scales aggressively with velocity head Hv = v^2 / 2g
+          const spawnThreshold = Math.min(0.85, 0.15 + st.head * 0.35 + (st.froude > 1.0 ? 0.30 : 0.0));
 
           if (Math.random() < spawnThreshold) {
             const i3 = i * 3;
             const localV = st.velocity;
 
-            // Spawn at upstream face of boulder collision
-            this.pos[i3] = b.center.x + (Math.random() - 0.5) * b.radius;
-            this.pos[i3 + 1] = st.waterY + 0.1 + Math.random() * 0.2;
-            this.pos[i3 + 2] = b.center.z - b.radius * 0.75;
+            // Spawn at upstream impact prow of boulder
+            this.pos[i3] = b.center.x + (Math.random() - 0.5) * (b.radius * 0.9);
+            this.pos[i3 + 1] = st.waterY + 0.08 + Math.random() * 0.15;
+            this.pos[i3 + 2] = b.center.z - b.radius * 0.85;
 
-            // Blast upwards and downstream proportional to fluid velocity
-            this.vel[i3] = (Math.random() - 0.5) * (localV * 1.0);
-            this.vel[i3 + 1] = localV * (0.80 + Math.random() * 0.90);
-            this.vel[i3 + 2] = localV * (1.10 + Math.random() * 1.20);
+            // Blast upwards and downstream proportional to kinetic energy
+            this.vel[i3] = (Math.random() - 0.5) * (localV * 1.1);
+            this.vel[i3 + 1] = localV * (0.85 + Math.random() * 0.95);
+            this.vel[i3 + 2] = localV * (1.15 + Math.random() * 1.25);
 
-            this.life[i] = 0.65 + Math.random() * 0.65;
+            this.life[i] = 0.55 + Math.random() * 0.60;
           }
         }
       } else {
@@ -85,8 +85,14 @@ export class RiverSpray {
         this.pos[i3 + 1] += this.vel[i3 + 1] * dt;
         this.pos[i3 + 2] += this.vel[i3 + 2] * dt;
 
+        // Kill droplet if it plunges back into river surface
+        const st = this.hydraulics.getStationAtZ(this.pos[i3 + 2]);
+        if (this.pos[i3 + 1] < st.waterY - 0.05 && this.vel[i3 + 1] < 0) {
+          this.life[i] = -1.0;
+        }
+
         this.dummy.position.set(this.pos[i3], this.pos[i3 + 1], this.pos[i3 + 2]);
-        const s = Math.max(this.life[i] * 1.5, 0.2);
+        const s = Math.max(this.life[i] * 1.6, 0.25);
         this.dummy.scale.set(s, s, s);
         this.dummy.updateMatrix();
 
