@@ -11,6 +11,7 @@ export default function RiverLab() {
   const [dischargeQ, setDischargeQ] = useState(22.0);
   const [clarity, setClarity] = useState(3.5);
   const [sprayEnabled, setSprayEnabled] = useState(true);
+  const [foamDriftEnabled, setFoamDriftEnabled] = useState(true);
   const [pebblesEnabled, setPebblesEnabled] = useState(true);
   const [followRiver, setFollowRiver] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -60,6 +61,11 @@ export default function RiverLab() {
   const handleSprayToggle = (val: boolean) => {
     setSprayEnabled(val);
     if (labRef.current) labRef.current.setSpray(val);
+  };
+
+  const handleFoamDriftToggle = (val: boolean) => {
+    setFoamDriftEnabled(val);
+    if (labRef.current) labRef.current.setFoamDrift(val);
   };
 
   const handlePebblesToggle = (val: boolean) => {
@@ -411,6 +417,15 @@ export default function RiverLab() {
               style={{ accentColor: "#38bdf8" }}
             />
             <span>3D Physical Spray Particles (Kinetic boulder impacts)</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12 }}>
+            <input
+              type="checkbox"
+              checked={foamDriftEnabled}
+              onChange={(e) => handleFoamDriftToggle(e.target.checked)}
+              style={{ accentColor: "#38bdf8" }}
+            />
+            <span>1,200 Surface Foam Rafts & Bubble Drift (High-speed motion)</span>
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12 }}>
             <input

@@ -67,11 +67,11 @@ export class RiverSpray {
             this.pos[i3 + 2] = b.center.z - b.radius * 0.75;
 
             // Blast upwards and downstream proportional to fluid velocity
-            this.vel[i3] = (Math.random() - 0.5) * (localV * 0.75);
-            this.vel[i3 + 1] = localV * (0.55 + Math.random() * 0.65);
-            this.vel[i3 + 2] = localV * (0.60 + Math.random() * 0.70);
+            this.vel[i3] = (Math.random() - 0.5) * (localV * 1.0);
+            this.vel[i3 + 1] = localV * (0.80 + Math.random() * 0.90);
+            this.vel[i3 + 2] = localV * (1.10 + Math.random() * 1.20);
 
-            this.life[i] = 0.5 + Math.random() * 0.5;
+            this.life[i] = 0.65 + Math.random() * 0.65;
           }
         }
       } else {

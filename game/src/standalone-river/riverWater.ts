@@ -182,9 +182,11 @@ export class RiverWater {
           float bedY = getBedHeight(wp.x, wp.z);
           float depth = max(0.0, hyd.g - bedY);
 
-          float waveAmp = clamp(hyd.a * 0.08, 0.01, 0.16) * smoothstep(0.05, 0.40, depth);
-          float wave = sin(wp.z * 1.8 - uTime * hyd.r * 1.2) * waveAmp;
-          wave += sin(wp.z * 3.6 - uTime * hyd.r * 2.2) * (waveAmp * 0.4);
+          // Physical standing waves scaled by velocity head (Hv = v^2 / 2g):
+          // At 45 m³/s, Hv reaches 2.5m, generating powerful 0.35m - 0.55m surging hydraulic waves
+          float waveAmp = clamp(hyd.a * 0.20, 0.02, 0.50) * smoothstep(0.05, 0.40, depth);
+          float wave = sin(wp.z * 1.5 - uTime * hyd.r * 1.6) * waveAmp;
+          wave += sin(wp.z * 3.2 - uTime * hyd.r * 2.6) * (waveAmp * 0.45);
 
           wp.y = hyd.g + wave;
 
@@ -302,24 +304,25 @@ export class RiverWater {
           vec2 flowVector = normalize(vFlowDir + wakeDrift);
 
           // 3. Dual-Phase Flow Mapping with 16-Harmonic Kolmogorov Fourier Normal Map
-          float tau = 0.8;
-          float t0 = mod(uTime * 0.85, tau);
-          float t1 = mod(uTime * 0.85 + tau * 0.5, tau);
+          // tau is extended to 2.2s so the human eye can track translational velocity
+          float tau = 2.2;
+          float t0 = mod(uTime * 1.0, tau);
+          float t1 = mod(uTime * 1.0 + tau * 0.5, tau);
           float w0 = sin((t0 / tau) * 3.14159265);
           float w1 = sin((t1 / tau) * 3.14159265);
 
-          vec2 uv0 = vWorldPos.xz * 1.6 + flowVector * (t0 * effectiveSpeed * 0.30);
-          vec2 uv1 = vWorldPos.xz * 1.6 + flowVector * (t1 * effectiveSpeed * 0.30);
+          vec2 uv0 = vWorldPos.xz * 1.4 + flowVector * (t0 * effectiveSpeed * 0.85);
+          vec2 uv1 = vWorldPos.xz * 1.4 + flowVector * (t1 * effectiveSpeed * 0.85);
 
           vec3 n0 = texture2D(uWaterNormalMap, uv0).rgb * 2.0 - 1.0;
           vec3 n1 = texture2D(uWaterNormalMap, uv1).rgb * 2.0 - 1.0;
           vec3 microNorm = normalize(n0 * w0 + n1 * w1);
 
-          vec2 uvLarge = vWorldPos.xz * 0.4 + flowVector * (uTime * effectiveSpeed * 0.12);
+          vec2 uvLarge = vWorldPos.xz * 0.35 + flowVector * (uTime * effectiveSpeed * 0.50);
           vec3 nLarge = texture2D(uWaterNormalMap, uvLarge).rgb * 2.0 - 1.0;
 
           vec3 normalPerturb = microNorm.xzy * 0.65 + nLarge.xzy * 0.35;
-          vec3 N = normalize(vec3(vNormal.x + normalPerturb.x * 0.075, 1.0, vNormal.z + normalPerturb.z * 0.075));
+          vec3 N = normalize(vec3(vNormal.x + normalPerturb.x * 0.085, 1.0, vNormal.z + normalPerturb.z * 0.085));
 
           vec3 V = normalize(cameraPosition - vWorldPos);
           vec3 L = normalize(uSunDir);
@@ -368,16 +371,27 @@ export class RiverWater {
           float sunGlint = pow(NdotH, 190.0) * 3.2 * fresnel * NdotL;
           finalColor += uSunColor * sunGlint;
 
-          // 9. Cellular Bubbly White-Water Foam
-          vec2 fUv = vWorldPos.xz * 3.2 - flowVector * (uTime * effectiveSpeed * 0.5);
+          // 9. Continuous Downstream Foam Streaks (racing at true velocity v = 6-8 m/s):
+          float xc = getRiverCenter(vWorldPos.z);
+          float flowX = vWorldPos.x - xc;
+          float flowDist = vWorldPos.z - uTime * effectiveSpeed * 1.35;
+
+          // High-speed foam streaks along the current
+          float streak1 = sin(flowDist * 3.8) * cos(flowX * 6.5);
+          float streak2 = sin(flowDist * 8.2 + 1.2) * cos(flowX * 13.0);
+          float streak3 = sin(flowDist * 16.5 - 0.7) * cos(flowX * 26.0);
+          float streak = smoothstep(0.18, 0.75, streak1 * 0.5 + streak2 * 0.35 + streak3 * 0.25);
+
+          // Cellular bubbly foam
+          vec2 fUv = vec2(flowX * 3.2, flowDist * 2.2);
           float fbm = sin(fUv.x * 4.0 + fUv.y * 3.0) * 0.5 +
                       sin(fUv.x * 9.0 - fUv.y * 8.0) * 0.3 +
                       sin(fUv.x * 19.0 + fUv.y * 18.0) * 0.2;
           float foamCell = smoothstep(-0.25, 0.45, fbm);
 
-          float cascade = smoothstep(0.28, 0.06, depth);
+          float cascade = smoothstep(0.32, 0.05, depth);
           float froudeFoam = smoothstep(0.85, 1.35, localFroude);
-          float dynamicFoam = max(cascade * 0.6, froudeFoam * 0.9) * foamCell;
+          float dynamicFoam = max(cascade * 0.7, froudeFoam * 1.0) * max(foamCell, streak * 1.2);
           float totalFoam = max(dynamicFoam, wakeFoam * foamCell);
 
           if (totalFoam > 0.04) {
