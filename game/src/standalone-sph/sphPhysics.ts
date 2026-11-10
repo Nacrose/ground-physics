@@ -1,0 +1,466 @@
+import * as THREE from "three";
+import { SphTerrain } from "./terrain";
+
+export interface SphParams {
+  particleCount: number;
+  particleRadius: number;
+  smoothingRadius: number; // H
+  restDensity: number;     // rho0
+  stiffness: number;       // k in P = k * (rho - rho0)
+  viscosity: number;       // mu
+  gravity: number;         // g = 9.81
+  restitution: number;     // collision energy keep (0.3)
+}
+
+export type SimPreset = "wave" | "rain" | "crater" | "jet";
+
+export class SphPhysics {
+  readonly maxParticles: number;
+  activeParticles = 0;
+
+  // Particle Attributes (SOA format for cache efficiency)
+  pos: Float32Array;      // [x, y, z] * N
+  vel: Float32Array;      // [vx, vy, vz] * N
+  acc: Float32Array;      // [ax, ay, az] * N
+  density: Float32Array;  // [rho] * N
+  pressure: Float32Array; // [P] * N
+
+  // Particle mass
+  readonly mass = 1.0;
+
+  // Parameters
+  params: SphParams;
+
+  // Spatial Hash Grid for O(N) neighbor lookup
+  private cellSize: number;
+  private gridW = 36;
+  private gridH = 36;
+  private gridD = 36;
+  private gridCount: number;
+  private gridHead: Int32Array;
+  private gridNext: Int32Array;
+  private gridOrigin = new THREE.Vector3(-18, -10, -18);
+
+  // Kernel Coefficients
+  private poly6Factor = 0;
+  private spikyGradFactor = 0;
+  private viscLapFactor = 0;
+  private h2 = 0;
+
+  terrain: SphTerrain;
+
+  private rainTimer = 0;
+  private jetTimer = 0;
+  currentPreset: SimPreset = "wave";
+
+  constructor(terrain: SphTerrain, maxParticles = 16000, options: Partial<SphParams> = {}) {
+    this.terrain = terrain;
+    this.maxParticles = maxParticles;
+
+    this.params = {
+      particleCount: Math.min(6000, maxParticles),
+      particleRadius: 0.18,
+      smoothingRadius: 0.72,
+      restDensity: 12.0,
+      stiffness: 85.0,
+      viscosity: 0.18,
+      gravity: 9.81,
+      restitution: 0.30,
+      ...options,
+    };
+
+    this.pos = new Float32Array(maxParticles * 3);
+    this.vel = new Float32Array(maxParticles * 3);
+    this.acc = new Float32Array(maxParticles * 3);
+    this.density = new Float32Array(maxParticles);
+    this.pressure = new Float32Array(maxParticles);
+
+    this.cellSize = this.params.smoothingRadius;
+    this.gridCount = this.gridW * this.gridH * this.gridD;
+    this.gridHead = new Int32Array(this.gridCount);
+    this.gridNext = new Int32Array(maxParticles);
+
+    this.updateKernelCoefficients();
+    this.applyPreset(this.currentPreset);
+  }
+
+  updateKernelCoefficients() {
+    const h = this.params.smoothingRadius;
+    this.h2 = h * h;
+    this.cellSize = h;
+
+    // Poly6 kernel: 315 / (64 * pi * h^9)
+    this.poly6Factor = 315.0 / (64.0 * Math.PI * Math.pow(h, 9));
+    // Spiky gradient: -45 / (pi * h^6)
+    this.spikyGradFactor = -45.0 / (Math.PI * Math.pow(h, 6));
+    // Viscosity Laplacian: 45 / (pi * h^6)
+    this.viscLapFactor = 45.0 / (Math.PI * Math.pow(h, 6));
+  }
+
+  applyPreset(preset: SimPreset) {
+    this.currentPreset = preset;
+    this.activeParticles = 0;
+
+    switch (preset) {
+      case "wave": {
+        this.terrain.holeEnabled = false;
+        // Spawn a rectangular block of water on the upper slope (X: -11 to -6)
+        const count = Math.min(this.params.particleCount, 5500);
+        let idx = 0;
+        const spacing = this.params.particleRadius * 1.85;
+
+        for (let x = -11.0; x <= -6.0 && idx < count; x += spacing) {
+          for (let y = 3.5; y <= 9.0 && idx < count; y += spacing) {
+            for (let z = -3.5; z <= 3.5 && idx < count; z += spacing) {
+              const i3 = idx * 3;
+              this.pos[i3] = x + (Math.random() - 0.5) * 0.05;
+              this.pos[i3 + 1] = y;
+              this.pos[i3 + 2] = z + (Math.random() - 0.5) * 0.05;
+              // Initial forward momentum down the ramp
+              this.vel[i3] = 4.5;
+              this.vel[i3 + 1] = -1.0;
+              this.vel[i3 + 2] = (Math.random() - 0.5) * 0.5;
+              idx++;
+            }
+          }
+        }
+        this.activeParticles = idx;
+        break;
+      }
+
+      case "rain": {
+        this.terrain.holeEnabled = false;
+        // Start with empty or small pool and let rain accumulate
+        this.activeParticles = 0;
+        break;
+      }
+
+      case "crater": {
+        // Fill the crater basin with water, ready for hole drain
+        const count = Math.min(this.params.particleCount, 6000);
+        let idx = 0;
+        const spacing = this.params.particleRadius * 1.8;
+        const radius = this.terrain.craterRadius * 0.75;
+
+        for (let y = -4.2; y <= 0.0 && idx < count; y += spacing) {
+          for (let x = -radius; x <= radius && idx < count; x += spacing) {
+            for (let z = -radius; z <= radius && idx < count; z += spacing) {
+              if (Math.hypot(x, z) < radius) {
+                const tY = this.terrain.getHeight(x, z);
+                if (y > tY + 0.1) {
+                  const i3 = idx * 3;
+                  this.pos[i3] = x + (Math.random() - 0.5) * 0.04;
+                  this.pos[i3 + 1] = y;
+                  this.pos[i3 + 2] = z + (Math.random() - 0.5) * 0.04;
+                  this.vel[i3] = 0;
+                  this.vel[i3 + 1] = 0;
+                  this.vel[i3 + 2] = 0;
+                  idx++;
+                }
+              }
+            }
+          }
+        }
+        this.activeParticles = idx;
+        break;
+      }
+
+      case "jet": {
+        this.terrain.holeEnabled = false;
+        this.activeParticles = 0;
+        break;
+      }
+    }
+  }
+
+  // Fast cell indexing for spatial hashing
+  private getCellCoord(x: number, y: number, z: number): [number, number, number] {
+    const gx = Math.floor((x - this.gridOrigin.x) / this.cellSize);
+    const gy = Math.floor((y - this.gridOrigin.y) / this.cellSize);
+    const gz = Math.floor((z - this.gridOrigin.z) / this.cellSize);
+    return [
+      Math.max(0, Math.min(this.gridW - 1, gx)),
+      Math.max(0, Math.min(this.gridH - 1, gy)),
+      Math.max(0, Math.min(this.gridD - 1, gz)),
+    ];
+  }
+
+  private getCellIndex(gx: number, gy: number, gz: number): number {
+    return gx + gz * this.gridW + gy * (this.gridW * this.gridD);
+  }
+
+  private buildSpatialGrid() {
+    this.gridHead.fill(-1);
+
+    for (let i = 0; i < this.activeParticles; i++) {
+      const i3 = i * 3;
+      const [gx, gy, gz] = this.getCellCoord(this.pos[i3], this.pos[i3 + 1], this.pos[i3 + 2]);
+      const cellIdx = this.getCellIndex(gx, gy, gz);
+
+      this.gridNext[i] = this.gridHead[cellIdx];
+      this.gridHead[cellIdx] = i;
+    }
+  }
+
+  private computeDensityAndPressure() {
+    const h = this.params.smoothingRadius;
+    const h2 = this.h2;
+    const poly6 = this.poly6Factor;
+    const rho0 = this.params.restDensity;
+    const k = this.params.stiffness;
+    const mass = this.mass;
+
+    for (let i = 0; i < this.activeParticles; i++) {
+      const i3 = i * 3;
+      const px = this.pos[i3];
+      const py = this.pos[i3 + 1];
+      const pz = this.pos[i3 + 2];
+
+      const [cgx, cgy, cgz] = this.getCellCoord(px, py, pz);
+      let rho = 0;
+
+      // Iterate 27 neighboring cells
+      for (let dx = -1; dx <= 1; dx++) {
+        const gx = cgx + dx;
+        if (gx < 0 || gx >= this.gridW) continue;
+
+        for (let dy = -1; dy <= 1; dy++) {
+          const gy = cgy + dy;
+          if (gy < 0 || gy >= this.gridH) continue;
+
+          for (let dz = -1; dz <= 1; dz++) {
+            const gz = cgz + dz;
+            if (gz < 0 || gz >= this.gridD) continue;
+
+            const cellIdx = this.getCellIndex(gx, gy, gz);
+            let j = this.gridHead[cellIdx];
+
+            while (j !== -1) {
+              const j3 = j * 3;
+              const rx = px - this.pos[j3];
+              const ry = py - this.pos[j3 + 1];
+              const rz = pz - this.pos[j3 + 2];
+              const dist2 = rx * rx + ry * ry + rz * rz;
+
+              if (dist2 < h2) {
+                const diff = h2 - dist2;
+                rho += mass * poly6 * diff * diff * diff;
+              }
+              j = this.gridNext[j];
+            }
+          }
+        }
+      }
+
+      this.density[i] = Math.max(rho, rho0 * 0.5);
+      // Tait / linear equation of state
+      this.pressure[i] = Math.max(k * (this.density[i] - rho0), 0.0);
+    }
+  }
+
+  private computeForces() {
+    const h = this.params.smoothingRadius;
+    const spiky = this.spikyGradFactor;
+    const viscLap = this.viscLapFactor;
+    const mu = this.params.viscosity;
+    const mass = this.mass;
+    const g = this.params.gravity;
+
+    for (let i = 0; i < this.activeParticles; i++) {
+      const i3 = i * 3;
+      const px = this.pos[i3];
+      const py = this.pos[i3 + 1];
+      const pz = this.pos[i3 + 2];
+      const vx = this.vel[i3];
+      const vy = this.vel[i3 + 1];
+      const vz = this.vel[i3 + 2];
+
+      const rho_i = this.density[i];
+      const P_i = this.pressure[i];
+
+      let fpx = 0, fpy = 0, fpz = 0;
+      let fvx = 0, fvy = 0, fvz = 0;
+
+      const [cgx, cgy, cgz] = this.getCellCoord(px, py, pz);
+
+      for (let dx = -1; dx <= 1; dx++) {
+        const gx = cgx + dx;
+        if (gx < 0 || gx >= this.gridW) continue;
+
+        for (let dy = -1; dy <= 1; dy++) {
+          const gy = cgy + dy;
+          if (gy < 0 || gy >= this.gridH) continue;
+
+          for (let dz = -1; dz <= 1; dz++) {
+            const gz = cgz + dz;
+            if (gz < 0 || gz >= this.gridD) continue;
+
+            const cellIdx = this.getCellIndex(gx, gy, gz);
+            let j = this.gridHead[cellIdx];
+
+            while (j !== -1) {
+              if (i !== j) {
+                const j3 = j * 3;
+                const rx = px - this.pos[j3];
+                const ry = py - this.pos[j3 + 1];
+                const rz = pz - this.pos[j3 + 2];
+                const dist = Math.hypot(rx, ry, rz);
+
+                if (dist > 1e-4 && dist < h) {
+                  const invDist = 1.0 / dist;
+                  const dirX = rx * invDist;
+                  const dirY = ry * invDist;
+                  const dirZ = rz * invDist;
+
+                  const rho_j = this.density[j];
+                  const P_j = this.pressure[j];
+
+                  // Symmetric Pressure Force
+                  const pKernel = spiky * Math.pow(h - dist, 2);
+                  const pTerm = mass * (P_i / (rho_i * rho_i) + P_j / (rho_j * rho_j)) * pKernel;
+                  fpx -= pTerm * dirX;
+                  fpy -= pTerm * dirY;
+                  fpz -= pTerm * dirZ;
+
+                  // Viscosity Force (Laplacian)
+                  const vKernel = viscLap * (h - dist);
+                  const vTerm = (mu * mass / rho_j) * vKernel;
+                  fvx += vTerm * (this.vel[j3] - vx);
+                  fvy += vTerm * (this.vel[j3 + 1] - vy);
+                  fvz += vTerm * (this.vel[j3 + 2] - vz);
+                }
+              }
+              j = this.gridNext[j];
+            }
+          }
+        }
+      }
+
+      // External Force: Gravity downwards along Y
+      this.acc[i3] = fpx + fvx;
+      this.acc[i3 + 1] = fpy + fvy - g;
+      this.acc[i3 + 2] = fpz + fvz;
+    }
+  }
+
+  private integrateAndCollide(dt: number) {
+    const bound = 13.5;
+    const r = this.params.particleRadius;
+    const cr = this.params.restitution;
+
+    for (let i = 0; i < this.activeParticles; i++) {
+      const i3 = i * 3;
+
+      // Symplectic Euler integration
+      this.vel[i3] += this.acc[i3] * dt;
+      this.vel[i3 + 1] += this.acc[i3 + 1] * dt;
+      this.vel[i3 + 2] += this.acc[i3 + 2] * dt;
+
+      this.pos[i3] += this.vel[i3] * dt;
+      this.pos[i3 + 1] += this.vel[i3 + 1] * dt;
+      this.pos[i3 + 2] += this.vel[i3 + 2] * dt;
+
+      let px = this.pos[i3];
+      let py = this.pos[i3 + 1];
+      let pz = this.pos[i3 + 2];
+
+      // Terrain Collision Check
+      const col = this.terrain.checkCollision(px, py, pz, r);
+
+      if (col.isInHole) {
+        // Particle entered drain hole: accelerate downwards and recycle if fell below -10
+        if (py < -9.5) {
+          // Recycle to top or remove
+          this.pos[i3] = (Math.random() - 0.5) * 8.0;
+          this.pos[i3 + 1] = 7.0 + Math.random() * 2.0;
+          this.pos[i3 + 2] = (Math.random() - 0.5) * 8.0;
+          this.vel[i3] = 0;
+          this.vel[i3 + 1] = -2.0;
+          this.vel[i3 + 2] = 0;
+        }
+      } else if (col.isColliding) {
+        // Project above terrain surface
+        this.pos[i3 + 1] = col.terrainY + r;
+
+        // Normal and tangential velocity decomposition
+        const nx = col.normal.x;
+        const ny = col.normal.y;
+        const nz = col.normal.z;
+
+        const vDotN = this.vel[i3] * nx + this.vel[i3 + 1] * ny + this.vel[i3 + 2] * nz;
+
+        if (vDotN < 0) {
+          // Rebound normal velocity with restitution
+          this.vel[i3] -= (1.0 + cr) * vDotN * nx;
+          this.vel[i3 + 1] -= (1.0 + cr) * vDotN * ny;
+          this.vel[i3 + 2] -= (1.0 + cr) * vDotN * nz;
+
+          // Tangential friction
+          this.vel[i3] *= 0.94;
+          this.vel[i3 + 2] *= 0.94;
+        }
+      }
+
+      // Outer domain bounding box
+      if (this.pos[i3] < -bound) { this.pos[i3] = -bound; this.vel[i3] *= -cr; }
+      if (this.pos[i3] > bound)  { this.pos[i3] = bound;  this.vel[i3] *= -cr; }
+      if (this.pos[i3 + 2] < -bound) { this.pos[i3 + 2] = -bound; this.vel[i3 + 2] *= -cr; }
+      if (this.pos[i3 + 2] > bound)  { this.pos[i3 + 2] = bound;  this.vel[i3 + 2] *= -cr; }
+    }
+  }
+
+  // Dynamic emitters for Rain and Jet modes
+  private updateEmitters(dt: number) {
+    if (this.currentPreset === "rain") {
+      this.rainTimer += dt;
+      if (this.rainTimer >= 0.05 && this.activeParticles < this.params.particleCount) {
+        this.rainTimer = 0;
+        const drops = 12;
+        for (let k = 0; k < drops && this.activeParticles < this.params.particleCount; k++) {
+          const idx = this.activeParticles++;
+          const i3 = idx * 3;
+          const ang = Math.random() * Math.PI * 2;
+          const rad = Math.random() * this.terrain.craterRadius * 1.1;
+          this.pos[i3] = Math.cos(ang) * rad;
+          this.pos[i3 + 1] = 8.5 + Math.random() * 2.0;
+          this.pos[i3 + 2] = Math.sin(ang) * rad;
+          this.vel[i3] = (Math.random() - 0.5) * 0.4;
+          this.vel[i3 + 1] = -12.0 - Math.random() * 4.0;
+          this.vel[i3 + 2] = (Math.random() - 0.5) * 0.4;
+        }
+      }
+    } else if (this.currentPreset === "jet") {
+      this.jetTimer += dt;
+      if (this.jetTimer >= 0.02 && this.activeParticles < this.params.particleCount) {
+        this.jetTimer = 0;
+        const jetCount = 8;
+        for (let k = 0; k < jetCount && this.activeParticles < this.params.particleCount; k++) {
+          const idx = this.activeParticles++;
+          const i3 = idx * 3;
+          this.pos[i3] = -9.0 + (Math.random() - 0.5) * 0.3;
+          this.pos[i3 + 1] = 5.5 + (Math.random() - 0.5) * 0.3;
+          this.pos[i3 + 2] = (Math.random() - 0.5) * 0.3;
+          this.vel[i3] = 18.0 + Math.random() * 4.0;
+          this.vel[i3 + 1] = 4.0 + (Math.random() - 0.5) * 2.0;
+          this.vel[i3 + 2] = (Math.random() - 0.5) * 3.0;
+        }
+      }
+    }
+  }
+
+  step(dt: number) {
+    const clampedDt = Math.min(dt, 0.033);
+    const subSteps = 3;
+    const subDt = clampedDt / subSteps;
+
+    for (let s = 0; s < subSteps; s++) {
+      this.updateEmitters(subDt);
+      if (this.activeParticles === 0) continue;
+
+      this.buildSpatialGrid();
+      this.computeDensityAndPressure();
+      this.computeForces();
+      this.integrateAndCollide(subDt);
+    }
+  }
+}
