@@ -425,7 +425,7 @@ export default function RiverLab() {
               onChange={(e) => handleFoamDriftToggle(e.target.checked)}
               style={{ accentColor: "#38bdf8" }}
             />
-            <span>1,200 Surface Foam Rafts & Bubble Drift (High-speed motion)</span>
+            <span>Aerated Rapid Foam & Turbulent Froth (Hydrodynamic)</span>
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12 }}>
             <input

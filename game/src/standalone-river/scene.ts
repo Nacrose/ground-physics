@@ -6,7 +6,6 @@ import { RiverTerrain } from "./riverTerrain";
 import { RiverRocks } from "./riverRocks";
 import { RiverWater } from "./riverWater";
 import { RiverSpray } from "./riverSpray";
-import { RiverFoamDrift } from "./riverFoamDrift";
 
 export class StandaloneRiverLab {
   readonly container: HTMLElement;
@@ -20,7 +19,6 @@ export class StandaloneRiverLab {
   rocks: RiverRocks;
   water: RiverWater;
   spray: RiverSpray;
-  foamDrift: RiverFoamDrift;
 
   sunLight: THREE.DirectionalLight;
   sunDir = new THREE.Vector3(0.55, 0.75, 0.35).normalize();
@@ -118,10 +116,6 @@ export class StandaloneRiverLab {
     this.spray = new RiverSpray(this.rocks, this.hydraulics);
     this.scene.add(this.spray.mesh);
 
-    // 10. 1,200 High-Speed Floating Foam Clumps & Bubble Trails
-    this.foamDrift = new RiverFoamDrift(this.hydraulics, this.rocks);
-    this.scene.add(this.foamDrift.mesh);
-
     window.addEventListener("resize", this.onResize);
 
     this.lastTime = performance.now();
@@ -148,7 +142,6 @@ export class StandaloneRiverLab {
       this.terrain.material.uniforms.uTime.value = this.simTime;
       this.water.update(this.simTime);
       this.spray.update(delta);
-      this.foamDrift.update(delta);
 
       if (this.cameraFollowRiver) {
         this.cameraProgress = (this.cameraProgress + delta * 0.022) % 1.0;
@@ -166,13 +159,11 @@ export class StandaloneRiverLab {
     // Two-pass rendering for screen refraction:
     // Pass 1: Render terrain, rocks, and spray into screenTarget
     this.water.mesh.visible = false;
-    this.foamDrift.mesh.visible = false;
     this.renderer.setRenderTarget(this.screenTarget);
     this.renderer.render(this.scene, this.camera);
 
-    // Pass 2: Show water mesh and surface foam, render complete scene to canvas
+    // Pass 2: Show water mesh with organic aerated froth, render complete scene to canvas
     this.water.mesh.visible = true;
-    this.foamDrift.mesh.visible = true;
     this.renderer.setRenderTarget(null);
     this.renderer.render(this.scene, this.camera);
   };
@@ -190,7 +181,11 @@ export class StandaloneRiverLab {
   }
 
   setFoamDrift(enabled: boolean) {
-    this.foamDrift.mesh.visible = enabled;
+    this.water.setFoamEnabled(enabled);
+  }
+
+  setFoam(enabled: boolean) {
+    this.water.setFoamEnabled(enabled);
   }
 
   setPebbles(enabled: boolean) {
