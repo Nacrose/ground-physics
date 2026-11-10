@@ -113,7 +113,7 @@ export class StandaloneRiverLab {
     this.scene.add(this.water.mesh);
 
     // 9. 3D Spray & Atomized Mist Particle System
-    this.spray = new RiverSpray(this.rocks, this.hydraulics, this.sunDir);
+    this.spray = new RiverSpray(this.rocks, this.hydraulics, this.sunDir, this.terrain);
     this.scene.add(this.spray.mesh);
 
     window.addEventListener("resize", this.onResize);

@@ -4,7 +4,7 @@ import { RiverHydraulics } from "./riverHydraulics";
 export class RiverTerrain {
   readonly length = 80.0; // Z from -40 to +40
   readonly width = 32.0;  // X from -16 to +16
-  readonly channelHalfWidth = 4.5;
+  readonly channelHalfWidth = 4.0;
   readonly baseDrop = 6.5; // descends 6.5m over 80m
 
   mesh: THREE.Mesh;
@@ -102,8 +102,8 @@ export class RiverTerrain {
           vec4 hyd = texture2D(uHydraulicsTex, vec2(uStation, 0.5));
           float waterY = hyd.g;
 
-          // Riverbed vs Bank blending
-          float channelMask = smoothstep(4.8, 3.2, distToCenter);
+          // Riverbed vs Bank blending (gravel bar extends across wide flood corridor)
+          float channelMask = smoothstep(7.2, 4.2, distToCenter);
 
           // UV mapping
           vec2 pebbleUv = vWorldPos.xz * 1.5;
@@ -119,9 +119,9 @@ export class RiverTerrain {
           vec3 arm = mix(bankArm, pebbleArm, channelMask);
 
           // Dynamic wetness darkening where under water or near shoreline
-          float submerged = smoothstep(waterY + 0.15, waterY - 0.05, vWorldPos.y);
-          albedo *= mix(1.0, 0.48, submerged * channelMask);
-          float roughness = mix(arm.g, 0.10, submerged * channelMask);
+          float submerged = smoothstep(waterY + 0.12, waterY - 0.04, vWorldPos.y);
+          albedo *= mix(1.0, 0.45, submerged);
+          float roughness = mix(arm.g, 0.08, submerged);
 
           // Lighting
           vec3 L = normalize(uSunDir);
@@ -175,15 +175,16 @@ export class RiverTerrain {
     const xc = this.getRiverCenter(z);
     const d = Math.abs(x - xc);
     const w = this.channelHalfWidth;
+    const dMax = 0.85;
 
     let bedDepth = 0;
     if (d < w) {
-      // Parabolic carved riverbed channel
+      // Parabolic carved low-flow channel
       const t = d / w;
-      bedDepth = -1.45 * (1.0 - t * t);
+      bedDepth = -dMax * (1.0 - t * t);
     } else {
-      // Sloping valley banks
-      bedDepth = 0.5 * Math.log(1.0 + (d - w) * 1.2);
+      // Gently sloping gravel bars & valley sides
+      bedDepth = 0.22 * (d - w) + 0.12 * Math.log(1.0 + 1.2 * (d - w));
     }
 
     // Micro-rock roughness along channel

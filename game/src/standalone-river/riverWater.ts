@@ -175,8 +175,8 @@ export class RiverWater {
     this.rocks = rocks;
 
     const segsZ = 320;
-    const segsX = 48;
-    const channelW = 14.0;
+    const segsX = 80;
+    const channelW = 20.0;
 
     const geo = new THREE.PlaneGeometry(channelW, terrain.length, segsX, segsZ);
     geo.rotateX(-Math.PI / 2);
@@ -256,15 +256,17 @@ export class RiverWater {
           float slope = getBedElevation(z);
           float xc = getRiverCenter(z);
           float d = abs(x - xc);
-          float w = 4.5;
+          float w = 4.0;
+          float dMax = 0.85;
           float bedDepth = 0.0;
           if (d < w) {
             float t = d / w;
-            bedDepth = -1.45 * (1.0 - t * t);
+            bedDepth = -dMax * (1.0 - t * t);
           } else {
-            bedDepth = 0.5 * log(1.0 + (d - w) * 1.2);
+            bedDepth = 0.22 * (d - w) + 0.12 * log(1.0 + 1.2 * (d - w));
           }
-          return slope + bedDepth;
+          float rockNoise = sin(x * 1.5) * cos(z * 1.5) * 0.08;
+          return slope + bedDepth + rockNoise;
         }
 
         void main() {
@@ -276,16 +278,23 @@ export class RiverWater {
           vHydraulics = hyd;
 
           float bedY = getBedHeight(wp.x, wp.z);
-          float depth = max(0.0, hyd.g - bedY);
+          float localDepth = max(0.0, hyd.g - bedY);
 
           // Hydraulic standing waves (traveling smoothly downstream with uniform advection phase):
-          float waveAmp = clamp(hyd.a * 0.25, 0.03, 0.50) * smoothstep(0.05, 0.40, depth);
+          // Damped smoothly to 0 at the shoreline boundary layer so waves never oscillate into rocks
+          float waveDamping = smoothstep(0.04, 0.40, localDepth);
+          float waveAmp = clamp(hyd.a * 0.22, 0.02, 0.35) * waveDamping;
           // Downstream distance along river corridor in meters (0.0 at upstream summit z=-40 -> 80.0 at valley base z=+40)
           float streamDist = (1.0 - uv.y) * 80.0;
           float wave = sin(streamDist * 0.65 - uTime * (uFlowSpeed * 0.85)) * waveAmp;
           wave += sin(streamDist * 1.40 - uTime * (uFlowSpeed * 1.20)) * (waveAmp * 0.45);
 
-          wp.y = hyd.g + wave;
+          // Seamless ground conforming: on dry banks, conform directly to terrain
+          if (bedY > hyd.g) {
+            wp.y = bedY;
+          } else {
+            wp.y = max(bedY, hyd.g + wave);
+          }
 
           float eps = 0.5;
           float x0 = getRiverCenter(wp.z - eps);
@@ -341,15 +350,17 @@ export class RiverWater {
           float slope = getBedElevation(z);
           float xc = getRiverCenter(z);
           float d = abs(x - xc);
-          float w = 4.5;
+          float w = 4.0;
+          float dMax = 0.85;
           float bedDepth = 0.0;
           if (d < w) {
             float t = d / w;
-            bedDepth = -1.45 * (1.0 - t * t);
+            bedDepth = -dMax * (1.0 - t * t);
           } else {
-            bedDepth = 0.5 * log(1.0 + (d - w) * 1.2);
+            bedDepth = 0.22 * (d - w) + 0.12 * log(1.0 + 1.2 * (d - w));
           }
-          return slope + bedDepth;
+          float rockNoise = sin(x * 1.5) * cos(z * 1.5) * 0.08;
+          return slope + bedDepth + rockNoise;
         }
 
         void main() {
@@ -360,7 +371,7 @@ export class RiverWater {
           float bedY = getBedHeight(vWorldPos.x, vWorldPos.z);
           float depth = vWorldPos.y - bedY;
 
-          if (depth <= 0.001) {
+          if (depth <= 0.0005) {
             discard;
           }
 
@@ -406,8 +417,9 @@ export class RiverWater {
           vec2 uvChop = mat2(0.927, 0.375, -0.375, 0.927) * (vec2(crossDist, flowDist3) * 1.50);
           vec3 nChop = texture2D(uWaterNormalMap, uvChop).rgb * 2.0 - 1.0;
 
-          // Active, bold normal perturbation (0.092) - rounded and non-angular:
-          vec3 normalPerturb = nSwell.xzy * 0.48 + nRipple.xzy * 0.36 + nChop.xzy * 0.16;
+          // Ripple normal perturbation smoothly calms to a glassy boundary layer at the shore:
+          float rippleDamping = smoothstep(0.01, 0.16, depth);
+          vec3 normalPerturb = (nSwell.xzy * 0.48 + nRipple.xzy * 0.36 + nChop.xzy * 0.16) * rippleDamping;
           vec3 N = normalize(vec3(vNormal.x + normalPerturb.x * 0.092, 1.0, vNormal.z + normalPerturb.z * 0.092));
 
           vec3 V = normalize(cameraPosition - vWorldPos);
@@ -425,7 +437,8 @@ export class RiverWater {
 
           // Screen-space refraction with visible pebble shimmer:
           vec2 screenUv = (vScreenPos.xy / vScreenPos.w) * 0.5 + 0.5;
-          float refrDistort = 0.045 * clamp(depth, 0.05, 0.45);
+          // Refraction distortion strictly fades to zero at the shoreline to prevent halo tearing
+          float refrDistort = 0.045 * smoothstep(0.02, 0.35, depth);
           vec2 refrUv = clamp(screenUv + normalPerturb.xz * refrDistort, 0.001, 0.999);
 
           vec3 bedCol;
@@ -470,7 +483,7 @@ export class RiverWater {
             // Physical hydraulic triggers:
             float froudeFoam = smoothstep(0.75, 1.25, localFroude) * 1.25;
             float speedFoam = smoothstep(2.5, 5.5, localVelocity) * 0.95;
-            float cascadeFoam = smoothstep(0.35, 0.05, depth) * smoothstep(1.4, 3.8, localVelocity);
+            float cascadeFoam = smoothstep(0.35, 0.08, depth) * smoothstep(1.4, 3.8, localVelocity) * smoothstep(0.02, 0.10, depth);
             float hydFoam = max(froudeFoam, max(speedFoam, cascadeFoam));
             float rapidTrigger = clamp(hydFoam + wakeFoam * 1.45, 0.0, 1.8);
 
@@ -515,7 +528,7 @@ export class RiverWater {
             }
           }
 
-          float shoreAlpha = smoothstep(0.001, 0.035, depth);
+          float shoreAlpha = smoothstep(0.0005, 0.055, depth);
           gl_FragColor = vec4(finalColor, shoreAlpha);
         }
       `,

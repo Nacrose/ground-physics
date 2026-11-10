@@ -102,14 +102,46 @@ export class RiverHydraulics {
     this.stations = [];
     const dz = this.length / (this.numStations - 1);
 
+    const w0 = 4.0;
+    const dMax = 0.85;
+
+    // Natural lateral expansion: as water rises, width expands onto gently sloping gravel bars
+    const getBankDist = (dh: number) => {
+      let dist = dh / 0.25;
+      for (let k = 0; k < 3; k++) {
+        const f = 0.22 * dist + 0.12 * Math.log(1.0 + 1.2 * dist) - dh;
+        const df = 0.22 + 0.144 / (1.0 + 1.2 * dist);
+        dist -= f / df;
+      }
+      return Math.max(0, dist);
+    };
+
+    const getTopWidth = (depth: number) => {
+      if (depth <= dMax) {
+        return 2.0 * w0 * Math.sqrt(Math.max(0.05, depth / dMax));
+      } else {
+        const dh = depth - dMax;
+        return 2.0 * (w0 + getBankDist(dh));
+      }
+    };
+
+    const getChannelArea = (depth: number) => {
+      if (depth <= dMax) {
+        const tw = getTopWidth(depth);
+        return (2.0 / 3.0) * tw * depth;
+      } else {
+        const aMain = (2.0 / 3.0) * (2.0 * w0) * dMax;
+        const dh = depth - dMax;
+        const tw = getTopWidth(depth);
+        const aBanks = 0.5 * (2.0 * w0 + tw) * dh * 0.82;
+        return aMain + aBanks;
+      }
+    };
+
     for (let i = 0; i < this.numStations; i++) {
       const z = this.zMin + i * dz;
       const bedBase = this.getBedElevation(z);
-      const bedLowest = bedBase - 1.45; // lowest point of parabolic channel
-
-      // Channel cross-section geometry: parabolic with top half-width ~4.2m
-      const w0 = 4.2;
-      const dMax = 1.45;
+      const bedLowest = bedBase - dMax; // lowest point of parabolic channel
 
       // Local bed slope S0 = -d(bedBase)/dz
       const zPrev = Math.max(this.zMin, z - dz * 2.0);
@@ -128,9 +160,9 @@ export class RiverHydraulics {
 
       // Solve for steady-state normal depth h using Manning's Equation:
       let h = 0.85;
-      for (let iter = 0; iter < 12; iter++) {
-        const topWidth = 2.0 * w0 * Math.sqrt(Math.min(1.0, Math.max(0.05, h / dMax)));
-        const cleanArea = (2.0 / 3.0) * topWidth * h;
+      for (let iter = 0; iter < 15; iter++) {
+        const topWidth = getTopWidth(h);
+        const cleanArea = getChannelArea(h);
         const effArea = Math.max(0.6, cleanArea - Math.min(cleanArea * 0.55, blockedArea));
         const wettedPerim = topWidth + (8.0 / 3.0) * ((h * h) / Math.max(topWidth, 1.0));
         const rh = effArea / Math.max(wettedPerim, 1.0);
@@ -141,8 +173,8 @@ export class RiverHydraulics {
 
         const dh = 0.02;
         const h2 = h + dh;
-        const tw2 = 2.0 * w0 * Math.sqrt(Math.min(1.0, Math.max(0.05, h2 / dMax)));
-        const ca2 = (2.0 / 3.0) * tw2 * h2;
+        const tw2 = getTopWidth(h2);
+        const ca2 = getChannelArea(h2);
         const ea2 = Math.max(0.6, ca2 - Math.min(ca2 * 0.55, blockedArea));
         const wp2 = tw2 + (8.0 / 3.0) * ((h2 * h2) / Math.max(tw2, 1.0));
         const rh2 = ea2 / Math.max(wp2, 1.0);
@@ -152,8 +184,8 @@ export class RiverHydraulics {
         h = Math.max(0.2, h - diff / dqdh);
       }
 
-      const topWidth = 2.0 * w0 * Math.sqrt(Math.min(1.0, Math.max(0.05, h / dMax)));
-      const cleanArea = (2.0 / 3.0) * topWidth * h;
+      const topWidth = getTopWidth(h);
+      const cleanArea = getChannelArea(h);
       const area = Math.max(0.8, cleanArea - Math.min(cleanArea * 0.55, blockedArea));
 
       const velocity = this.dischargeQ / area;
@@ -184,9 +216,7 @@ export class RiverHydraulics {
         // Pool leveled out to downstream sill crest
         this.stations[i].waterY = nextY;
         this.stations[i].depth = Math.max(0.2, this.stations[i].waterY - this.stations[i].bedY);
-        const w0 = 4.2;
-        const topWidth = 2.0 * w0 * Math.sqrt(Math.min(1.0, Math.max(0.05, this.stations[i].depth / 1.45)));
-        this.stations[i].area = Math.max(0.8, (2.0 / 3.0) * topWidth * this.stations[i].depth);
+        this.stations[i].area = Math.max(0.8, getChannelArea(this.stations[i].depth));
         this.stations[i].velocity = this.dischargeQ / this.stations[i].area;
         this.stations[i].froude = this.stations[i].velocity / Math.sqrt(this.gravity * Math.max(this.stations[i].depth, 0.15));
         this.stations[i].head = (this.stations[i].velocity * this.stations[i].velocity) / (2.0 * this.gravity);

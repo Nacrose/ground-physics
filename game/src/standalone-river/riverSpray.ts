@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { RiverRocks } from "./riverRocks";
 import { RiverHydraulics } from "./riverHydraulics";
+import { RiverTerrain } from "./riverTerrain";
 
 function generateSpraySpriteTexture(size = 64): THREE.DataTexture {
   const data = new Uint8Array(size * size * 4);
@@ -54,10 +55,12 @@ export class RiverSpray {
 
   private rocks: RiverRocks;
   private hydraulics: RiverHydraulics;
+  private terrain?: RiverTerrain;
 
-  constructor(rocks: RiverRocks, hydraulics: RiverHydraulics, sunDir?: THREE.Vector3) {
+  constructor(rocks: RiverRocks, hydraulics: RiverHydraulics, sunDir?: THREE.Vector3, terrain?: RiverTerrain) {
     this.rocks = rocks;
     this.hydraulics = hydraulics;
+    this.terrain = terrain;
 
     this.posArray = new Float32Array(this.maxParticles * 3);
     this.sizeArray = new Float32Array(this.maxParticles);
@@ -211,9 +214,11 @@ export class RiverSpray {
           size[i] = 0.15;
           col[i4 + 3] = Math.max(0, (life[i] / maxLife[i]) * 0.88);
 
-          // Kill droplet immediately upon plunging back into river surface
+          // Kill droplet immediately upon plunging back into river surface or striking terrain
           const waterY = this.hydraulics.getWaterHeightAt(pos[i3 + 2]);
-          if (pos[i3 + 1] < waterY - 0.04 && vel[i3 + 1] < 0) {
+          const groundY = this.terrain ? this.terrain.getBedHeight(pos[i3], pos[i3 + 2]) : -999.0;
+          const hitY = Math.max(waterY - 0.04, groundY);
+          if (pos[i3 + 1] < hitY && vel[i3 + 1] < 0) {
             life[i] = -1.0;
             pos[i3 + 1] = -999.0;
           }
