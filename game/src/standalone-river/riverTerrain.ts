@@ -155,10 +155,20 @@ export class RiverTerrain {
     return 4.0 * Math.sin(z * 0.07) + 1.8 * Math.cos(z * 0.15);
   }
 
+  getBedElevation(z: number): number {
+    const t = (z + 40.0) / 80.0;
+    const base = (1.0 - t) * 6.5;
+
+    const pool1 = Math.exp(-Math.pow((z + 16.0) / 6.5, 2.0)) * 0.45;
+    const pool2 = Math.exp(-Math.pow((z - 14.0) / 7.5, 2.0)) * 0.50;
+    const pool3 = Math.exp(-Math.pow((z - 32.0) / 6.0, 2.0)) * 0.35;
+
+    return base - (pool1 + pool2 + pool3);
+  }
+
   // Bed height calculation
   getBedHeight(x: number, z: number): number {
-    // Longitudinal elevation slope: from y=6.5 at z=-40 to y=0 at z=+40
-    const slope = (1.0 - (z + 40.0) / this.length) * this.baseDrop;
+    const slope = this.getBedElevation(z);
 
     // Distance from river centerline
     const xc = this.getRiverCenter(z);
@@ -176,7 +186,7 @@ export class RiverTerrain {
     }
 
     // Micro-rock roughness along channel
-    const rockNoise = Math.sin(x * 1.5) * Math.cos(z * 1.5) * 0.12;
+    const rockNoise = Math.sin(x * 1.5) * Math.cos(z * 1.5) * 0.08;
 
     return slope + bedDepth + rockNoise;
   }

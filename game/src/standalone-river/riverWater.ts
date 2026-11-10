@@ -18,17 +18,17 @@ export class RiverWater {
     this.terrain = terrain;
     this.hydraulics = hydraulics;
 
-    // Curved ribbon geometry following river path
+    // Curved ribbon geometry following river path - wide enough to span across the bank slopes
     const segsZ = 320;
-    const segsX = 40;
-    const channelW = 8.5;
+    const segsX = 48;
+    const channelW = 14.0; // 14m wide spans beyond the 4.5m half-width banks
 
     const geo = new THREE.PlaneGeometry(channelW, terrain.length, segsX, segsZ);
     geo.rotateX(-Math.PI / 2);
 
     const pos = geo.attributes.position;
     for (let i = 0; i < pos.count; i++) {
-      const uX = pos.getX(i); // [-4.25, +4.25]
+      const uX = pos.getX(i); // [-7.0, +7.0]
       const z = pos.getZ(i);  // [-40, +40]
       const xc = terrain.getRiverCenter(z);
       const waterY = hydraulics.getWaterHeightAt(z);
@@ -63,6 +63,30 @@ export class RiverWater {
           return 4.0 * sin(z * 0.07) + 1.8 * cos(z * 0.15);
         }
 
+        float getBedElevation(float z) {
+          float t = (z + 40.0) / 80.0;
+          float base = (1.0 - t) * 6.5;
+          float p1 = exp(-pow((z + 16.0) / 6.5, 2.0)) * 0.45;
+          float p2 = exp(-pow((z - 14.0) / 7.5, 2.0)) * 0.50;
+          float p3 = exp(-pow((z - 32.0) / 6.0, 2.0)) * 0.35;
+          return base - (p1 + p2 + p3);
+        }
+
+        float getBedHeight(float x, float z) {
+          float slope = getBedElevation(z);
+          float xc = getRiverCenter(z);
+          float d = abs(x - xc);
+          float w = 4.5;
+          float bedDepth = 0.0;
+          if (d < w) {
+            float t = d / w;
+            bedDepth = -1.45 * (1.0 - t * t);
+          } else {
+            bedDepth = 0.5 * log(1.0 + (d - w) * 1.2);
+          }
+          return slope + bedDepth;
+        }
+
         void main() {
           vec4 wp = modelMatrix * vec4(position, 1.0);
 
@@ -72,8 +96,16 @@ export class RiverWater {
           vec4 hyd = texture2D(uHydraulicsTex, vec2(uStation, 0.5));
           vHydraulics = hyd;
 
-          // Adjust base water surface elevation according to physical depth & discharge
-          wp.y = hyd.g;
+          // Water seeks its own level: perfectly horizontal plane across X at height hyd.g
+          float bedY = getBedHeight(wp.x, wp.z);
+          float depth = max(0.0, hyd.g - bedY);
+
+          // Standing waves along flow direction (z), damped to ZERO at shorelines so edges remain perfectly level
+          float waveAmp = clamp(hyd.a * 0.08, 0.01, 0.16) * smoothstep(0.05, 0.40, depth);
+          float wave = sin(wp.z * 1.8 - uTime * hyd.r * 1.2) * waveAmp;
+          wave += sin(wp.z * 3.6 - uTime * hyd.r * 2.2) * (waveAmp * 0.4);
+
+          wp.y = hyd.g + wave;
 
           // Flow tangent along curve
           float eps = 0.5;
@@ -81,13 +113,6 @@ export class RiverWater {
           float x1 = getRiverCenter(wp.z + eps);
           vec2 flowDir = normalize(vec2((x1 - x0) / (2.0 * eps), 1.0));
           vFlowDir = flowDir;
-
-          // Physical standing waves & hydraulic jump displacement
-          // Amplitude scales with dynamic velocity head Hv = v^2 / (2g)
-          float waveAmp = clamp(hyd.a * 0.10, 0.02, 0.22);
-          float wave = sin(wp.z * 1.8 - uTime * hyd.r * 1.2) * cos(wp.x * 2.2) * waveAmp;
-          wave += sin(wp.z * 3.6 - uTime * hyd.r * 2.2) * (waveAmp * 0.5);
-          wp.y += wave;
 
           vWorldPos = wp.xyz;
           vNormal = normalize(mat3(modelMatrix) * normal + vec3(0.0, 1.0, 0.0));
@@ -116,8 +141,17 @@ export class RiverWater {
           return 4.0 * sin(z * 0.07) + 1.8 * cos(z * 0.15);
         }
 
+        float getBedElevation(float z) {
+          float t = (z + 40.0) / 80.0;
+          float base = (1.0 - t) * 6.5;
+          float p1 = exp(-pow((z + 16.0) / 6.5, 2.0)) * 0.45;
+          float p2 = exp(-pow((z - 14.0) / 7.5, 2.0)) * 0.50;
+          float p3 = exp(-pow((z - 32.0) / 6.0, 2.0)) * 0.35;
+          return base - (p1 + p2 + p3);
+        }
+
         float getBedHeight(float x, float z) {
-          float slope = (1.0 - (z + 40.0) / 80.0) * 6.5;
+          float slope = getBedElevation(z);
           float xc = getRiverCenter(z);
           float d = abs(x - xc);
           float w = 4.5;
@@ -125,6 +159,8 @@ export class RiverWater {
           if (d < w) {
             float t = d / w;
             bedDepth = -1.45 * (1.0 - t * t);
+          } else {
+            bedDepth = 0.5 * log(1.0 + (d - w) * 1.2);
           }
           return slope + bedDepth;
         }
@@ -134,9 +170,14 @@ export class RiverWater {
           float localFroude = vHydraulics.b;
           float localHead = vHydraulics.a;
 
-          // River depth at this position
+          // True physical water depth relative to 3D valley terrain
           float bedY = getBedHeight(vWorldPos.x, vWorldPos.z);
-          float depth = max(vWorldPos.y - bedY, 0.02);
+          float depth = vWorldPos.y - bedY;
+
+          // Hydrostatic cutoff: if terrain is above water surface, that is dry ground!
+          if (depth <= 0.001) {
+            discard;
+          }
 
           // Dual-Phase Flow-Mapped Ripples driven by local physical velocity
           float tau = 0.8;
@@ -164,7 +205,7 @@ export class RiverWater {
 
           // Spectral Beer-Lambert Absorption
           vec3 alpha = vec3(1.40, 0.55, 0.28) * uAbsorbScale;
-          vec3 transmittance = exp(-alpha * (depth + 0.02));
+          vec3 transmittance = exp(-alpha * (depth + 0.01));
 
           // Subsurface scattering in wave crests
           vec3 sss = vec3(0.02, 0.12, 0.18) * 0.45 * (vec3(1.0) - transmittance);
@@ -183,7 +224,7 @@ export class RiverWater {
           vec3 finalColor = mix(waterBody, skyRefl, fresnel) + uSunColor * spec * NdotL;
 
           // Aerated foam in shallow cascades, high Froude supercritical rapids & wave crests
-          float cascade = smoothstep(0.35, 0.08, depth);
+          float cascade = smoothstep(0.30, 0.06, depth);
           float froudeFoam = smoothstep(0.85, 1.35, localFroude);
           float foamWave = sin(vWorldPos.z * 3.5 - uTime * localVelocity * 1.8);
           float foam = max(cascade * 0.5, froudeFoam * 0.85) * smoothstep(0.25, 0.8, foamWave + rip0 * 0.5 + localHead * 0.3);
@@ -193,10 +234,9 @@ export class RiverWater {
             finalColor = mix(finalColor, foamCol, foam * 0.90);
           }
 
-          // Shoreline alpha fade
-          float xc = getRiverCenter(vWorldPos.z);
-          float distToCenter = abs(vWorldPos.x - xc);
-          float shoreAlpha = smoothstep(4.2, 3.6, distToCenter);
+          // Hydrostatic sub-millimeter waterline fade:
+          // Translucent meniscus where water meets gravel, completely vanishing at depth 0
+          float shoreAlpha = smoothstep(0.001, 0.035, depth);
 
           gl_FragColor = vec4(finalColor, shoreAlpha);
         }

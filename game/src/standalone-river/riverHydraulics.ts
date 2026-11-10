@@ -82,18 +82,25 @@ export class RiverHydraulics {
     return 4.0 * Math.sin(z * 0.07) + 1.8 * Math.cos(z * 0.15);
   }
 
+  // Step-pool longitudinal elevation profile
   getBedElevation(z: number): number {
-    return (1.0 - (z + 40.0) / 80.0) * 6.5;
+    const t = (z + 40.0) / 80.0;
+    const base = (1.0 - t) * 6.5;
+
+    // 3 Natural Step-Pool plunge basins where water pools and levels out:
+    // Basin 1: z ≈ -16 (upstream of big rapid boulder)
+    // Basin 2: z ≈ +14 (around island rock)
+    // Basin 3: z ≈ +32 (lower quiet pool)
+    const pool1 = Math.exp(-Math.pow((z + 16.0) / 6.5, 2.0)) * 0.45;
+    const pool2 = Math.exp(-Math.pow((z - 14.0) / 7.5, 2.0)) * 0.50;
+    const pool3 = Math.exp(-Math.pow((z - 32.0) / 6.0, 2.0)) * 0.35;
+
+    return base - (pool1 + pool2 + pool3);
   }
 
   recompute() {
     this.stations = [];
     const dz = this.length / (this.numStations - 1);
-    let minV = 999;
-    let maxV = 0;
-    let minFr = 999;
-    let maxFr = 0;
-    let totalD = 0;
 
     for (let i = 0; i < this.numStations; i++) {
       const z = this.zMin + i * dz;
@@ -104,8 +111,10 @@ export class RiverHydraulics {
       const w0 = 4.2;
       const dMax = 1.45;
 
-      // Bed slope S0 = -d(bedBase)/dz
-      const slope = 6.5 / 80.0; // ~0.08125
+      // Local bed slope S0 = -d(bedBase)/dz
+      const zPrev = Math.max(this.zMin, z - dz * 2.0);
+      const zNext = Math.min(this.zMax, z + dz * 2.0);
+      const slope = Math.max(0.015, (this.getBedElevation(zPrev) - this.getBedElevation(zNext)) / (zNext - zPrev));
 
       // Submerged boulder obstruction calculation at this z slice
       let blockedArea = 0;
@@ -113,15 +122,12 @@ export class RiverHydraulics {
         const distZ = Math.abs(z - b.z);
         if (distZ < b.radius) {
           const sliceR = Math.sqrt(b.radius * b.radius - distZ * distZ);
-          // Blockage area contribution (submerged cylinder/sphere slice)
           blockedArea += sliceR * sliceR * 1.25;
         }
       }
 
       // Solve for steady-state normal depth h using Manning's Equation:
-      // Q = (1/n) * A * R_h^(2/3) * S0^(1/2)
-      // Iterative Newton/bisection solve for depth h:
-      let h = 0.85; // initial guess
+      let h = 0.85;
       for (let iter = 0; iter < 12; iter++) {
         const topWidth = 2.0 * w0 * Math.sqrt(Math.min(1.0, Math.max(0.05, h / dMax)));
         const cleanArea = (2.0 / 3.0) * topWidth * h;
@@ -133,7 +139,6 @@ export class RiverHydraulics {
         const diff = qCalc - this.dischargeQ;
         if (Math.abs(diff) < 0.05) break;
 
-        // Derivative approximation
         const dh = 0.02;
         const h2 = h + dh;
         const tw2 = 2.0 * w0 * Math.sqrt(Math.min(1.0, Math.max(0.05, h2 / dMax)));
@@ -147,32 +152,16 @@ export class RiverHydraulics {
         h = Math.max(0.2, h - diff / dqdh);
       }
 
-      // Backwater swell upstream of tight obstructions and draw-down at contractions
       const topWidth = 2.0 * w0 * Math.sqrt(Math.min(1.0, Math.max(0.05, h / dMax)));
       const cleanArea = (2.0 / 3.0) * topWidth * h;
       const area = Math.max(0.8, cleanArea - Math.min(cleanArea * 0.55, blockedArea));
 
-      // Physical velocity via continuity: v = Q / A
       const velocity = this.dischargeQ / area;
-
-      // Froude number: Fr = v / sqrt(g * (A / topWidth))
       const hydMeanDepth = Math.max(area / Math.max(topWidth, 1.0), 0.15);
       const froude = velocity / Math.sqrt(this.gravity * hydMeanDepth);
-
-      // Velocity head: Hv = v^2 / (2g)
       const head = (velocity * velocity) / (2.0 * this.gravity);
-
-      // Water surface elevation
       const waterY = bedLowest + h;
-
-      // Foam intensity: created when Froude is high (supercritical rapids) or dynamic head is large
       const foamIntensity = Math.min(1.0, Math.max(0.0, (froude - 0.75) * 1.4 + head * 0.25));
-
-      minV = Math.min(minV, velocity);
-      maxV = Math.max(maxV, velocity);
-      minFr = Math.min(minFr, froude);
-      maxFr = Math.max(maxFr, froude);
-      totalD += h;
 
       this.stations.push({
         z,
@@ -185,17 +174,44 @@ export class RiverHydraulics {
         head,
         foamIntensity,
       });
+    }
 
-      // Write to texture (RGBA 32F):
-      // R: velocity (m/s)
-      // G: waterY (absolute world height)
-      // B: froude number
-      // A: dynamic wave amplitude (head in meters)
+    // Hydrostatic backwater leveling pass:
+    // Water "finds its own level" in basins behind boulder sills (upstream water surface cannot drop below a downstream pond crest)
+    for (let i = this.numStations - 2; i >= 0; i--) {
+      const nextY = this.stations[i + 1].waterY;
+      if (this.stations[i].waterY < nextY - 0.005) {
+        // Pool leveled out to downstream sill crest
+        this.stations[i].waterY = nextY;
+        this.stations[i].depth = Math.max(0.2, this.stations[i].waterY - this.stations[i].bedY);
+        const w0 = 4.2;
+        const topWidth = 2.0 * w0 * Math.sqrt(Math.min(1.0, Math.max(0.05, this.stations[i].depth / 1.45)));
+        this.stations[i].area = Math.max(0.8, (2.0 / 3.0) * topWidth * this.stations[i].depth);
+        this.stations[i].velocity = this.dischargeQ / this.stations[i].area;
+        this.stations[i].froude = this.stations[i].velocity / Math.sqrt(this.gravity * Math.max(this.stations[i].depth, 0.15));
+        this.stations[i].head = (this.stations[i].velocity * this.stations[i].velocity) / (2.0 * this.gravity);
+      }
+    }
+
+    let minV = 999;
+    let maxV = 0;
+    let minFr = 999;
+    let maxFr = 0;
+    let totalD = 0;
+
+    for (let i = 0; i < this.numStations; i++) {
+      const st = this.stations[i];
+      minV = Math.min(minV, st.velocity);
+      maxV = Math.max(maxV, st.velocity);
+      minFr = Math.min(minFr, st.froude);
+      maxFr = Math.max(maxFr, st.froude);
+      totalD += st.depth;
+
       const idx = i * 4;
-      this.texData[idx] = velocity;
-      this.texData[idx + 1] = waterY;
-      this.texData[idx + 2] = froude;
-      this.texData[idx + 3] = head;
+      this.texData[idx] = st.velocity;
+      this.texData[idx + 1] = st.waterY;
+      this.texData[idx + 2] = st.froude;
+      this.texData[idx + 3] = st.head;
     }
 
     this.minVelocity = minV;
@@ -207,7 +223,6 @@ export class RiverHydraulics {
     this.texture.needsUpdate = true;
   }
 
-  // CPU query helper along river
   getStationAtZ(z: number): HydraulicStation {
     const clampedZ = Math.max(this.zMin, Math.min(this.zMax, z));
     const t = (clampedZ - this.zMin) / this.length;
@@ -215,7 +230,6 @@ export class RiverHydraulics {
     return this.stations[index];
   }
 
-  // Cross-sectional velocity taking boundary layer friction (law of the wall) into account
   getVelocityAt(x: number, z: number): number {
     const st = this.getStationAtZ(z);
     const xc = this.getRiverCenter(z);
@@ -223,7 +237,6 @@ export class RiverHydraulics {
     const w0 = 4.2;
     if (dist >= w0) return 0.2;
 
-    // Parabolic/power profile across channel width: zero at banks, max in center
     const u = dist / w0;
     const wallShear = Math.pow(Math.max(0.0, 1.0 - u * u * u * u), 0.33);
     return Math.max(0.2, st.velocity * wallShear * 1.22);
