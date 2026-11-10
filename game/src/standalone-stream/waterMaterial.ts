@@ -1,283 +1,369 @@
 import * as THREE from "three";
 
-/**
- * 🌊 High-Fidelity Optical Water & Riverbed Shaders
- * Recreates the rendering pipeline of stream.mulualem.com:
- *
- * 1. Spectral Wavelength-Dependent Beer-Lambert Absorption:
- *    alpha = vec3(1.40, 0.55, 0.28)
- * 2. Snell's Law Screen Refraction & Optical Depth
- * 3. Dual-Phase Flow Mapping (phase-staggered velocity advection)
- * 4. Screen-Space Normal Derivative Anti-Aliasing (dFdx/dFdy)
- * 5. Physical Foam (hydraulic jumps, Froude supercritical flow, boulder wakes)
- * 6. Dancing Real-Time Caustics projected onto the riverbed
- */
-
-export function createWaterMaterial(options: {
+export interface WaterMaterialOptions {
   size: number;
-  gridRes: number;
+  res: number;
   sunDir: THREE.Vector3;
   sunColor: THREE.Color;
-  skyColor: THREE.Color;
-}) {
+}
+
+export function createWaterMaterial(opts: WaterMaterialOptions): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
+    uniforms: {
+      uState: { value: null },
+      uAux: { value: null },
+      uTerrain: { value: null },
+      uScreenTex: { value: null },
+      uEnvMap: { value: null },
+      uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+      uSize: { value: opts.size },
+      uRes: { value: opts.res },
+      uDx: { value: opts.size / opts.res },
+      uSunDir: { value: opts.sunDir },
+      uSunColor: { value: opts.sunColor },
+      uTime: { value: 0.0 },
+      uRefraction: { value: 0.90 },
+      uAbsorbScale: { value: 3.5 },
+      uRoughness: { value: 0.10 },
+      uGlintBoost: { value: 0.70 },
+      uScatterStrength: { value: 0.35 },
+    },
     transparent: true,
-    side: THREE.DoubleSide,
     depthWrite: false,
-    vertexShader: /* glsl */ `
-      uniform sampler2D uStateTex;
+    vertexShader: `
+      precision highp float;
+      uniform sampler2D uState;
+      uniform sampler2D uTerrain;
       uniform float uSize;
-      varying vec3 vWorldPos;
+      uniform float uRes;
+      uniform float uDx;
+
       varying vec2 vUv;
+      varying vec3 vWorldPos;
+      varying vec3 vNormal;
+      varying vec4 vScreenPos;
       varying float vDepth;
-      varying vec2 vFlowVel;
 
       void main() {
-        // Map world XZ position into normalized [0..1] simulation UV coordinates
-        vUv = position.xz / uSize + 0.5;
-        vec4 state = texture2D(uStateTex, vUv);
+        vUv = uv;
+        vec2 texel = 1.0 / vec2(uRes);
+
+        vec4 state = texture2D(uState, uv);
         float h = state.r;
         float eta = state.a;
         vDepth = h;
-        vFlowVel = state.gb;
 
-        // Displace vertex vertically to the fluid free-surface elevation eta
-        vec3 displaced = vec3(position.x, eta, position.z);
-        vWorldPos = displaced;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(displaced, 1.0);
+        // Displace vertex along Y to water surface elevation eta
+        vec3 displaced = position;
+        displaced.y = eta;
+
+        vec4 worldP = modelMatrix * vec4(displaced, 1.0);
+        vWorldPos = worldP.xyz;
+
+        // Evaluate normal from surrounding eta heights
+        vec4 stateR = texture2D(uState, uv + vec2(texel.x, 0.0));
+        vec4 stateL = texture2D(uState, uv - vec2(texel.x, 0.0));
+        vec4 stateT = texture2D(uState, uv + vec2(0.0, texel.y));
+        vec4 stateB = texture2D(uState, uv - vec2(0.0, texel.y));
+
+        float deta_dx = (stateR.a - stateL.a) / (2.0 * uDx);
+        float deta_dz = (stateT.a - stateB.a) / (2.0 * uDx);
+        vNormal = normalize(vec3(-deta_dx, 1.0, -deta_dz));
+
+        vec4 clipPos = projectionMatrix * viewMatrix * worldP;
+        vScreenPos = clipPos;
+        gl_Position = clipPos;
       }
     `,
-    fragmentShader: /* glsl */ `
-      uniform sampler2D uStateTex;
-      uniform sampler2D uAuxTex;
-      uniform sampler2D uCausticTex;
+    fragmentShader: `
+      precision highp float;
+      uniform sampler2D uState;
+      uniform sampler2D uAux;
+      uniform sampler2D uScreenTex;
+      uniform sampler2D uEnvMap;
+      uniform vec2 uResolution;
       uniform vec3 uSunDir;
       uniform vec3 uSunColor;
-      uniform vec3 uSkyColor;
-      uniform vec3 uCamPos;
       uniform float uTime;
-      uniform float uSize;
-      uniform float uAbsorbScale;
-      uniform float uScatterStrength;
       uniform float uRefraction;
+      uniform float uAbsorbScale;
       uniform float uRoughness;
+      uniform float uGlintBoost;
+      uniform float uScatterStrength;
 
-      varying vec3 vWorldPos;
       varying vec2 vUv;
+      varying vec3 vWorldPos;
+      varying vec3 vNormal;
+      varying vec4 vScreenPos;
       varying float vDepth;
-      varying vec2 vFlowVel;
 
-      // Noise helpers for micro-ripples and streamlines
-      float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      // Fast hash noise for procedural micro-ripples
+      float hash(vec2 p) {
+        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+      }
+
       float noise(vec2 p) {
-        vec2 i = floor(p), f = fract(p);
-        vec2 u = f * f * (3.0 - 2.0 * f);
-        return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
-                   mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        float a = hash(i);
+        float b = hash(i + vec2(1.0, 0.0));
+        float c = hash(i + vec2(0.0, 1.0));
+        float d = hash(i + vec2(1.0, 1.0));
+        return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
       }
 
       void main() {
-        if (vDepth < 0.003) discard;
+        if (vDepth < 0.001) discard;
 
-        float invRes = 1.0 / float(${options.gridRes.toFixed(1)});
-        
-        // Reconstruct water surface normal from simulated height gradient
-        float etaE = texture2D(uStateTex, vUv + vec2(invRes, 0.0)).a;
-        float etaW = texture2D(uStateTex, vUv - vec2(invRes, 0.0)).a;
-        float etaN = texture2D(uStateTex, vUv + vec2(0.0, invRes)).a;
-        float etaS = texture2D(uStateTex, vUv - vec2(0.0, invRes)).a;
-        float cellM = uSize * invRes;
-        
-        vec3 geomNorm = normalize(vec3(-(etaE - etaW) / (2.0 * cellM), 1.0, -(etaN - etaS) / (2.0 * cellM)));
+        vec4 state = texture2D(uState, vUv);
+        vec4 aux = texture2D(uAux, vUv);
+        float foam = aux.r;
 
-        // Dual-Phase Flow Mapping:
-        // Staggered advected UV sets driven by simulated velocity vector vFlowVel
-        float flowSpeed = length(vFlowVel);
-        vec2 flowDir = flowSpeed > 0.01 ? vFlowVel / flowSpeed : vec2(1.0, 0.0);
-        
-        float t1 = fract(uTime * 1.2);
-        float t2 = fract(uTime * 1.2 + 0.5);
-        float flowWeight = abs(t1 - 0.5) * 2.0; // Triangular blending window
+        // Dual-Phase Flow-Mapped Surface Ripples
+        vec2 vel = vec2(state.g, state.b);
+        float speed = length(vel);
+        float tau = 0.8;
+        float t0 = mod(uTime, tau);
+        float t1 = mod(uTime + tau * 0.5, tau);
+        float w0 = sin((t0 / tau) * 3.14159265);
+        float w1 = sin((t1 / tau) * 3.14159265);
 
-        vec2 uv1 = vUv * 36.0 - vFlowVel * (t1 * 1.8);
-        vec2 uv2 = vUv * 36.0 - vFlowVel * (t2 * 1.8);
-        
-        float rip1 = noise(uv1 * 2.5);
-        float rip2 = noise(uv2 * 2.5);
-        float rip = mix(rip1, rip2, flowWeight);
+        vec2 uv0 = vWorldPos.xz * 12.0 - vel * t0 * 0.6;
+        vec2 uv1 = vWorldPos.xz * 12.0 - vel * t1 * 0.6;
 
-        // Elongated streamlines in fast flow
-        vec2 stCoord = vec2(dot(vWorldPos.xz, flowDir) * 1.2 - uTime * flowSpeed * 1.8,
-                            dot(vWorldPos.xz, vec2(-flowDir.y, flowDir.x)) * 8.0);
-        float streak = noise(stCoord) * smoothstep(0.4, 1.2, flowSpeed);
+        vec2 rippleGrad0 = vec2(
+          noise(uv0 + vec2(0.05, 0.0)) - noise(uv0 - vec2(0.05, 0.0)),
+          noise(uv0 + vec2(0.0, 0.05)) - noise(uv0 - vec2(0.0, 0.05))
+        );
+        vec2 rippleGrad1 = vec2(
+          noise(uv1 + vec2(0.05, 0.0)) - noise(uv1 - vec2(0.05, 0.0)),
+          noise(uv1 + vec2(0.0, 0.05)) - noise(uv1 - vec2(0.0, 0.05))
+        );
+        vec2 ripple = (rippleGrad0 * w0 + rippleGrad1 * w1) * 0.04 * (1.0 - foam * 0.5);
 
-        // Combine macro geometry normal with micro-ripples
-        vec3 n = normalize(geomNorm + vec3((rip - 0.5) * 0.14 + (streak - 0.5) * 0.08, 0.0, (rip2 - 0.5) * 0.14));
+        // Combined Surface Normal
+        vec3 N = normalize(vec3(vNormal.x + ripple.x, vNormal.y, vNormal.z + ripple.y));
+        vec3 V = normalize(cameraPosition - vWorldPos);
+        vec3 L = normalize(uSunDir);
+        vec3 H = normalize(L + V);
 
-        // Screen-space normal derivative anti-aliasing (kills subpixel shimmering/glitter)
-        vec3 dNdx = dFdx(n);
-        vec3 dNdy = dFdy(n);
-        float geomRoughness = min(sqrt(dot(dNdx, dNdx) + dot(dNdy, dNdy)) * 1.6, 0.45);
-        float finalRoughness = clamp(uRoughness + geomRoughness, 0.04, 0.95);
+        // Screen UV for background refraction
+        vec2 screenUv = (vScreenPos.xy / vScreenPos.w) * 0.5 + 0.5;
+        // Perturb screen UV along surface normal
+        vec2 refrOffset = N.xz * uRefraction * 0.035 * min(vDepth, 0.20) * (1.0 - foam);
+        vec2 finalScreenUv = clamp(screenUv + refrOffset, 0.001, 0.999);
 
-        // View and light vectors
-        vec3 v = normalize(uCamPos - vWorldPos);
-        vec3 l = normalize(uSunDir);
-        vec3 h = normalize(v + l);
-        float ndv = max(dot(n, v), 0.0);
-        float ndl = max(dot(n, l), 0.0);
+        vec3 bedColor = texture2D(uScreenTex, finalScreenUv).rgb;
 
-        // Fresnel reflection (Schlick approximation)
-        float f0 = 0.02; // Water index of refraction = 1.333 -> ((1.333-1)/(1.333+1))^2 = 0.02
-        float fresnel = f0 + (1.0 - f0) * pow(1.0 - ndv, 5.0);
+        // Spectral Beer-Lambert Absorption
+        // Red absorbs rapidly (1.40), green moderately (0.55), blue slowly (0.28)
+        vec3 alpha = vec3(1.40, 0.55, 0.28) * uAbsorbScale;
+        vec3 transmittance = exp(-alpha * (vDepth + 0.015));
 
-        // --- SPECTRAL BEER-LAMBERT ABSORPTION (stream.mulualem.com) ---
-        // Physical absorption coefficient vector: Red=1.40, Green=0.55, Blue=0.28
-        vec3 absorbCoeff = vec3(1.40, 0.55, 0.28) * uAbsorbScale;
-        vec3 transmittance = exp(-absorbCoeff * vDepth);
+        // Subsurface scattering tint
+        vec3 sssColor = vec3(0.02, 0.10, 0.16) * uScatterStrength;
+        vec3 waterBody = bedColor * transmittance + sssColor * (vec3(1.0) - transmittance);
 
-        // Deep water ambient subsurface in-scattering
-        vec3 scatterCol = vec3(0.02, 0.12, 0.18) * uScatterStrength;
-        vec3 waterBody = scatterCol * (1.0 - transmittance);
+        // Specular Reflection (Sun + Sky)
+        float NdotV = max(dot(N, V), 0.0);
+        float NdotL = max(dot(N, L), 0.0);
+        float NdotH = max(dot(N, H), 0.0);
 
-        // Sun specular glints (Blinn-Phong)
-        float specPower = mix(140.0, 18.0, finalRoughness);
-        float spec = pow(max(dot(n, h), 0.0), specPower) * (1.0 - finalRoughness * 0.7);
-        vec3 specularSun = uSunColor * spec * 1.6;
+        // Schlick Fresnel
+        float F0 = 0.02;
+        float fresnel = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
 
-        // Sky reflection on wave slopes
-        vec3 reflectedSky = uSkyColor * fresnel * 1.1;
+        // Blinn-Phong specular glint
+        float specPower = 120.0;
+        float spec = pow(NdotH, specPower) * uGlintBoost;
+        vec3 sunHighlight = uSunColor * spec * NdotL;
 
-        // --- HYDRODYNAMIC FOAM (Froude + Hydraulic Jumps) ---
-        vec4 aux = texture2D(uAuxTex, vUv);
-        float simFoam = aux.r;
-        
-        // Breaking crest aeration
-        float crest = max(geomNorm.y < 0.94 ? (1.0 - geomNorm.y) * 4.0 : 0.0, 0.0);
-        float totalFoam = clamp(simFoam + crest * 0.55 * smoothstep(0.4, 1.2, flowSpeed), 0.0, 1.0);
+        // Sky reflection
+        vec3 R = reflect(-V, N);
+        vec3 skyRefl = mix(vec3(0.18, 0.28, 0.38), vec3(0.70, 0.82, 0.95), smoothstep(-0.2, 0.8, R.y));
 
-        // Brilliant aerated whitewater
-        vec3 foamCol = mix(vec3(0.96, 0.98, 1.0), uSkyColor, 0.12);
+        vec3 waterColor = mix(waterBody, skyRefl, fresnel) + sunHighlight;
 
-        // Final composite
-        vec3 surfaceCol = waterBody + reflectedSky + specularSun;
-        surfaceCol = mix(surfaceCol, foamCol, totalFoam * 0.95);
+        // Aerated foam overlay
+        if (foam > 0.02) {
+          float foamNoise = noise(vWorldPos.xz * 45.0 + uTime * 0.5);
+          float foamMask = smoothstep(0.15, 0.65, foam + foamNoise * 0.3);
+          vec3 foamColor = vec3(0.96, 0.98, 1.0) * (0.8 + 0.2 * NdotL);
+          waterColor = mix(waterColor, foamColor, foamMask * 0.88);
+        }
 
-        // Gradual Beer-Lambert optical alpha extinction
-        float alpha = clamp(1.0 - dot(transmittance, vec3(0.333)), 0.15, 0.94);
-        alpha = max(alpha, totalFoam * 0.92);
-        alpha *= smoothstep(0.003, 0.02, vDepth);
-
-        gl_FragColor = vec4(surfaceCol, alpha);
+        // Shoreline fade
+        float shoreAlpha = smoothstep(0.001, 0.008, vDepth);
+        gl_FragColor = vec4(waterColor, shoreAlpha);
       }
     `,
-    uniforms: {
-      uStateTex: { value: null },
-      uAuxTex: { value: null },
-      uCausticTex: { value: null },
-      uSunDir: { value: options.sunDir },
-      uSunColor: { value: options.sunColor },
-      uSkyColor: { value: options.skyColor },
-      uCamPos: { value: new THREE.Vector3() },
-      uTime: { value: 0 },
-      uSize: { value: options.size },
-      uAbsorbScale: { value: 3.2 },
-      uScatterStrength: { value: 0.35 },
-      uRefraction: { value: 0.85 },
-      uRoughness: { value: 0.08 },
-    },
   });
 }
 
-export function createBedMaterial(options: {
-  size: number;
-  sunDir: THREE.Vector3;
-  sunColor: THREE.Color;
-  skyColor: THREE.Color;
-}) {
+export function createBedMaterial(sunDir: THREE.Vector3, sunColor: THREE.Color): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
-    vertexShader: /* glsl */ `
-      uniform sampler2D uBedTex;
-      uniform float uSize;
-      varying vec3 vWorldPos;
+    uniforms: {
+      uMap: { value: null },
+      uNor: { value: null },
+      uArm: { value: null },
+      uState: { value: null },
+      uAux: { value: null },
+      uCaustics: { value: null },
+      uSunDir: { value: sunDir },
+      uSunColor: { value: sunColor },
+      uSize: { value: 3.0 },
+    },
+    vertexShader: `
       varying vec2 vUv;
+      varying vec3 vWorldPos;
       varying vec3 vNormal;
 
       void main() {
-        vUv = position.xz / uSize + 0.5;
-        float bed = texture2D(uBedTex, vUv).r;
-        vec3 pos = vec3(position.x, bed, position.z);
-        vWorldPos = pos;
-        vNormal = normal;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+        vUv = uv;
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorldPos = wp.xyz;
+        vNormal = normalize(mat3(modelMatrix) * normal);
+        gl_Position = projectionMatrix * viewMatrix * wp;
       }
     `,
-    fragmentShader: /* glsl */ `
-      uniform sampler2D uStateTex;
-      uniform sampler2D uCausticTex;
+    fragmentShader: `
+      precision highp float;
+      uniform sampler2D uMap;
+      uniform sampler2D uNor;
+      uniform sampler2D uArm;
+      uniform sampler2D uState;
+      uniform sampler2D uAux;
+      uniform sampler2D uCaustics;
       uniform vec3 uSunDir;
       uniform vec3 uSunColor;
-      uniform vec3 uSkyColor;
       uniform float uSize;
-      uniform float uCausticStrength;
 
-      varying vec3 vWorldPos;
       varying vec2 vUv;
+      varying vec3 vWorldPos;
       varying vec3 vNormal;
 
-      float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-      float noise(vec2 p) {
-        vec2 i = floor(p), f = fract(p);
-        vec2 u = f * f * (3.0 - 2.0 * f);
-        return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
-                   mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
-      }
-
       void main() {
-        vec4 state = texture2D(uStateTex, vUv);
+        // Ganges pebbles texture tiling (5x across the 3m domain)
+        vec2 tiledUv = (vWorldPos.xz / uSize + 0.5) * 5.0;
+        vec3 albedo = texture2D(uMap, tiledUv).rgb;
+        vec3 arm = texture2D(uArm, tiledUv).rgb; // r: AO, g: roughness, b: metalness
+
+        // Simulation coordinates: map world xz [-1.5, 1.5] -> [0, 1]
+        vec2 simUv = vWorldPos.xz / uSize + 0.5;
+        vec4 state = texture2D(uState, simUv);
+        vec4 aux = texture2D(uAux, simUv);
+
         float h = state.r;
+        float wet = aux.g;
 
-        // Multi-frequency granite rock & cobble texture
-        vec2 p = vWorldPos.xz;
-        float n1 = noise(p * 2.2);
-        float n2 = noise(p * 8.5);
-        float n3 = noise(p * 24.0);
-        float rock = n1 * 0.55 + n2 * 0.30 + n3 * 0.15;
-
-        // Palette: dark scoured bedrock, cobbles, and sand
-        vec3 graniteDark = vec3(0.18, 0.20, 0.22);
-        vec3 graniteMid  = vec3(0.35, 0.38, 0.40);
-        vec3 sand        = vec3(0.48, 0.44, 0.36);
-        vec3 baseCol = mix(graniteDark, graniteMid, rock);
-        baseCol = mix(baseCol, sand, smoothstep(0.65, 0.85, n2) * 0.45);
-
-        // Wetness darkening: submerged rocks darken by 50%
-        float isWet = smoothstep(0.005, 0.04, h);
-        baseCol *= mix(1.0, 0.48, isWet);
-
-        // Real-time refracted caustics on submerged riverbed
-        vec3 caustics = texture2D(uCausticTex, vUv).rgb * uCausticStrength;
-        baseCol += caustics * isWet * vec3(1.0, 0.96, 0.88);
+        // Dynamic wetness darkening (water drops albedo by 50% and reduces roughness)
+        float isWet = clamp(wet, 0.0, 1.0);
+        albedo *= mix(1.0, 0.50, isWet);
+        float roughness = mix(arm.g, 0.10, isWet);
 
         // Lighting
-        vec3 l = normalize(uSunDir);
-        float ndl = max(dot(vNormal, l), 0.0);
-        vec3 ambient = uSkyColor * 0.35;
-        vec3 diffuse = uSunColor * ndl * 0.85;
+        vec3 L = normalize(uSunDir);
+        vec3 N = normalize(vNormal);
+        float NdotL = max(dot(N, L), 0.0);
 
-        vec3 finalCol = baseCol * (ambient + diffuse);
-        gl_FragColor = vec4(finalCol, 1.0);
+        // Caustics on riverbed
+        vec3 caustic = texture2D(uCaustics, simUv).rgb;
+        float causticIntensity = caustic.r * smoothstep(0.005, 0.03, h);
+
+        vec3 direct = uSunColor * (NdotL + causticIntensity * 1.5);
+        vec3 ambient = vec3(0.20, 0.22, 0.25) * arm.r; // AO
+
+        vec3 finalColor = albedo * (ambient + direct);
+        gl_FragColor = vec4(finalColor, 1.0);
       }
     `,
+  });
+}
+
+export function createTriplanarRockMaterial(sunDir: THREE.Vector3, sunColor: THREE.Color): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
     uniforms: {
-      uBedTex: { value: null },
-      uStateTex: { value: null },
-      uCausticTex: { value: null },
-      uSunDir: { value: options.sunDir },
-      uSunColor: { value: options.sunColor },
-      uSkyColor: { value: options.skyColor },
-      uSize: { value: options.size },
-      uCausticStrength: { value: 2.8 },
+      uMap: { value: null },
+      uNor: { value: null },
+      uArm: { value: null },
+      uState: { value: null },
+      uAux: { value: null },
+      uCaustics: { value: null },
+      uSunDir: { value: sunDir },
+      uSunColor: { value: sunColor },
+      uSize: { value: 3.0 },
     },
+    vertexShader: `
+      varying vec3 vWorldPos;
+      varying vec3 vNormal;
+
+      void main() {
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorldPos = wp.xyz;
+        vNormal = normalize(mat3(modelMatrix) * normal);
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      uniform sampler2D uMap;
+      uniform sampler2D uNor;
+      uniform sampler2D uArm;
+      uniform sampler2D uState;
+      uniform sampler2D uAux;
+      uniform sampler2D uCaustics;
+      uniform vec3 uSunDir;
+      uniform vec3 uSunColor;
+      uniform float uSize;
+
+      varying vec3 vWorldPos;
+      varying vec3 vNormal;
+
+      void main() {
+        // Triplanar weights
+        vec3 N = normalize(vNormal);
+        vec3 weights = pow(abs(N), vec3(4.0));
+        weights /= (weights.x + weights.y + weights.z);
+
+        // Triplanar projection (scale 1.6)
+        vec3 p = vWorldPos * 1.6;
+        vec3 colYZ = texture2D(uMap, p.yz).rgb;
+        vec3 colZX = texture2D(uMap, p.zx).rgb;
+        vec3 colXY = texture2D(uMap, p.xy).rgb;
+        vec3 albedo = colYZ * weights.x + colZX * weights.y + colXY * weights.z;
+
+        vec3 armYZ = texture2D(uArm, p.yz).rgb;
+        vec3 armZX = texture2D(uArm, p.zx).rgb;
+        vec3 armXY = texture2D(uArm, p.xy).rgb;
+        vec3 arm = armYZ * weights.x + armZX * weights.y + armXY * weights.z;
+
+        // Simulation coordinates
+        vec2 simUv = vWorldPos.xz / uSize + 0.5;
+        vec4 state = texture2D(uState, simUv);
+        vec4 aux = texture2D(uAux, simUv);
+
+        float waterEta = state.a;
+        float h = state.r;
+
+        // Waterline wetness: rock underwater or in splash zone darkens significantly (70%)
+        float submerged = smoothstep(waterEta + 0.04, waterEta - 0.01, vWorldPos.y) * clamp(aux.g, 0.0, 1.0);
+        albedo *= mix(1.0, 0.32, submerged);
+
+        // Lighting
+        vec3 L = normalize(uSunDir);
+        float NdotL = max(dot(N, L), 0.0);
+
+        // Caustics on submerged boulder surfaces
+        vec3 caustic = texture2D(uCaustics, simUv).rgb;
+        float causticIntensity = caustic.r * submerged;
+
+        vec3 direct = uSunColor * (NdotL + causticIntensity * 1.2);
+        vec3 ambient = vec3(0.22, 0.24, 0.26) * arm.r;
+
+        vec3 finalColor = albedo * (ambient + direct);
+        gl_FragColor = vec4(finalColor, 1.0);
+      }
+    `,
   });
 }

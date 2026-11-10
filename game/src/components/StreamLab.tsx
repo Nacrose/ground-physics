@@ -7,12 +7,12 @@ export default function StreamLab() {
   const containerRef = useRef<HTMLDivElement>(null);
   const labRef = useRef<StandaloneStreamLab | null>(null);
 
-  const [inflowSpeed, setInflowSpeed] = useState(2.4);
-  const [inflowDepth, setInflowDepth] = useState(0.38);
-  const [causticsStrength, setCausticsStrength] = useState(2.8);
-  const [foamGen, setFoamGen] = useState(2.2);
-  const [absorbScale, setAbsorbScale] = useState(3.2);
-  const [viewMode, setViewMode] = useState<ViewMode>("realistic");
+  const [inflowSpeed, setInflowSpeed] = useState(0.6);
+  const [inflowDepth, setInflowDepth] = useState(0.10);
+  const [causticsStrength, setCausticsStrength] = useState(3.0);
+  const [foamGen, setFoamGen] = useState(2.0);
+  const [absorbScale, setAbsorbScale] = useState(3.5);
+  const [isPaused, setIsPaused] = useState(false);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -37,7 +37,7 @@ export default function StreamLab() {
 
   const handleCaustics = (val: number) => {
     setCausticsStrength(val);
-    if (labRef.current) labRef.current.caustics.params.strength = val;
+    if (labRef.current) labRef.current.caustics.intensity = val;
   };
 
   const handleFoam = (val: number) => {
@@ -50,25 +50,19 @@ export default function StreamLab() {
     if (labRef.current) labRef.current.waterMat.uniforms.uAbsorbScale.value = val;
   };
 
-  const handleViewMode = (mode: ViewMode) => {
-    setViewMode(mode);
-    if (labRef.current) labRef.current.setViewMode(mode);
-  };
-
-  const triggerSplash = () => {
-    if (labRef.current) {
-      labRef.current.simulation.addDisturbance(0.35, 0.5, 0.08, 0.45);
-    }
+  const togglePause = () => {
+    setIsPaused(!isPaused);
+    if (labRef.current) labRef.current.isPaused = !isPaused;
   };
 
   const resetSim = () => {
     if (labRef.current) {
-      labRef.current.simulation.reset();
+      labRef.current.reset();
     }
   };
 
   return (
-    <div style={{ position: "relative", width: "100vw", height: "100vh", overflow: "hidden", background: "#0b0f12" }}>
+    <div style={{ position: "relative", width: "100vw", height: "100vh", overflow: "hidden", background: "#2a2420" }}>
       {/* 3D WebGL Canvas */}
       <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
 
@@ -78,46 +72,46 @@ export default function StreamLab() {
           position: "absolute",
           top: 18,
           left: 18,
-          background: "rgba(12, 16, 20, 0.88)",
-          backdropFilter: "blur(12px)",
-          border: "1px solid rgba(255, 255, 255, 0.12)",
-          borderRadius: 10,
+          background: "rgba(18, 16, 14, 0.88)",
+          backdropFilter: "blur(14px)",
+          border: "1px solid rgba(255, 230, 200, 0.15)",
+          borderRadius: 12,
           padding: "16px 20px",
-          color: "#e2e8f0",
+          color: "#f1ede6",
           fontFamily: "system-ui, -apple-system, sans-serif",
           fontSize: 13,
           minWidth: 320,
-          boxShadow: "0 10px 30px rgba(0,0,0,0.45)",
+          boxShadow: "0 12px 36px rgba(0,0,0,0.55)",
           userSelect: "none",
         }}
       >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-          <div style={{ fontWeight: 700, fontSize: 15, letterSpacing: "0.08em", color: "#67e8f9" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+          <div style={{ fontWeight: 700, fontSize: 15, letterSpacing: "0.06em", color: "#ffd080" }}>
             STREAM // HYDRO LAB
           </div>
-          <span style={{ fontSize: 10, background: "#0891b2", color: "#fff", padding: "2px 6px", borderRadius: 4 }}>
+          <span style={{ fontSize: 10, background: "#d97706", color: "#fff", padding: "2px 6px", borderRadius: 4, fontWeight: 600 }}>
             STANDALONE
           </span>
         </div>
 
-        <p style={{ margin: "0 0 14px 0", fontSize: 11, color: "#94a3b8", lineHeight: 1.4 }}>
-          Inspired by <em>stream.mulualem.com</em>. GPU 2D Shallow Water Equations, ray-refracted caustics, spectral Beer-Lambert absorption, and hydrodynamic foam.
+        <p style={{ margin: "0 0 14px 0", fontSize: 11, color: "#a8a29e", lineHeight: 1.4 }}>
+          Exact recreation of <em>stream.mulualem.com</em>: 3.0m pebble diorama, 2D SWE, Poly Haven PBR, Beer-Lambert spectral absorption, screen-space refraction, and ray caustics.
         </p>
 
         {/* Sliders */}
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span>Inflow Velocity:</span>
-            <span style={{ color: "#38bdf8", fontWeight: 600 }}>{inflowSpeed.toFixed(1)} m/s</span>
+            <span style={{ color: "#ffd080", fontWeight: 600 }}>{inflowSpeed.toFixed(2)} m/s</span>
           </label>
           <input
             type="range"
-            min="0.5"
-            max="5.0"
-            step="0.1"
+            min="0.2"
+            max="1.5"
+            step="0.05"
             value={inflowSpeed}
             onChange={(e) => handleInflowSpeed(parseFloat(e.target.value))}
-            style={{ width: "100%", accentColor: "#38bdf8" }}
+            style={{ width: "100%", accentColor: "#ffd080" }}
           />
 
           <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -126,9 +120,9 @@ export default function StreamLab() {
           </label>
           <input
             type="range"
-            min="0.15"
-            max="0.80"
-            step="0.02"
+            min="0.04"
+            max="0.25"
+            step="0.01"
             value={inflowDepth}
             onChange={(e) => handleInflowDepth(parseFloat(e.target.value))}
             style={{ width: "100%", accentColor: "#38bdf8" }}
@@ -177,51 +171,14 @@ export default function StreamLab() {
           />
         </div>
 
-        {/* View Mode */}
-        <div style={{ marginTop: 14, paddingTop: 10, borderTop: "1px solid rgba(255,255,255,0.08)" }}>
-          <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 6 }}>VIEW MODE:</div>
-          <div style={{ display: "flex", gap: 6 }}>
-            <button
-              onClick={() => handleViewMode("realistic")}
-              style={{
-                flex: 1,
-                padding: "6px 8px",
-                fontSize: 11,
-                background: viewMode === "realistic" ? "#0284c7" : "rgba(255,255,255,0.08)",
-                border: "none",
-                borderRadius: 4,
-                color: "#fff",
-                cursor: "pointer",
-              }}
-            >
-              Realistic Liquid
-            </button>
-            <button
-              onClick={() => handleViewMode("caustics")}
-              style={{
-                flex: 1,
-                padding: "6px 8px",
-                fontSize: 11,
-                background: viewMode === "caustics" ? "#d97706" : "rgba(255,255,255,0.08)",
-                border: "none",
-                borderRadius: 4,
-                color: "#fff",
-                cursor: "pointer",
-              }}
-            >
-              Caustics Focus
-            </button>
-          </div>
-        </div>
-
         {/* Actions */}
         <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
           <button
-            onClick={triggerSplash}
+            onClick={togglePause}
             style={{
               flex: 1,
               padding: "7px 10px",
-              background: "#059669",
+              background: isPaused ? "#16a34a" : "#475569",
               border: "none",
               borderRadius: 6,
               color: "#fff",
@@ -230,12 +187,12 @@ export default function StreamLab() {
               cursor: "pointer",
             }}
           >
-            🌊 Drop Splash
+            {isPaused ? "▶ Resume" : "⏸ Pause"}
           </button>
           <button
             onClick={resetSim}
             style={{
-              padding: "7px 10px",
+              padding: "7px 12px",
               background: "rgba(255,255,255,0.12)",
               border: "none",
               borderRadius: 6,
@@ -249,9 +206,9 @@ export default function StreamLab() {
           <a
             href="/"
             style={{
-              padding: "7px 10px",
-              background: "rgba(255,255,255,0.06)",
-              border: "none",
+              padding: "7px 12px",
+              background: "rgba(255,255,255,0.08)",
+              border: "1px solid rgba(255,255,255,0.15)",
               borderRadius: 6,
               color: "#94a3b8",
               fontSize: 11,
@@ -260,29 +217,13 @@ export default function StreamLab() {
               alignItems: "center",
             }}
           >
-            Main Game
+            Game &rarr;
           </a>
         </div>
-      </div>
 
-      {/* Interaction Tips Banner */}
-      <div
-        style={{
-          position: "absolute",
-          bottom: 16,
-          left: "50%",
-          transform: "translateX(-50%)",
-          background: "rgba(10, 14, 18, 0.75)",
-          backdropFilter: "blur(8px)",
-          border: "1px solid rgba(255,255,255,0.08)",
-          borderRadius: 20,
-          padding: "6px 18px",
-          color: "#94a3b8",
-          fontSize: 12,
-          pointerEvents: "none",
-        }}
-      >
-        Left-click & drag on water to create ripples • Right-click & drag to orbit • Scroll to zoom
+        <div style={{ marginTop: 12, fontSize: 10, color: "#78716c", borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 8 }}>
+          Left drag to rotate camera • Right drag to pan • Scroll to zoom
+        </div>
       </div>
     </div>
   );

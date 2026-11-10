@@ -14,3 +14,4 @@ const StreamLab = dynamic(() => import("@/components/StreamLab"), {
 export default function StreamPage() {
   return <StreamLab />;
 }
+
