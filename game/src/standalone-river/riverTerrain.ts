@@ -1,6 +1,21 @@
 import * as THREE from "three";
 import { RiverHydraulics } from "./riverHydraulics";
 
+export interface PuddleBasin {
+  xOffset: number; // offset from river center xc(z)
+  z: number;
+  radius: number;
+  depth: number;
+  name: string;
+}
+
+export const PUDDLE_BASINS: PuddleBasin[] = [
+  { xOffset: -5.6, z: -16.0, radius: 2.2, depth: 0.15, name: "West Terrace Basin" },
+  { xOffset: 5.4,  z: -4.0,  radius: 2.5, depth: 0.18, name: "East Gravel Bar Pool" },
+  { xOffset: -5.8, z: 12.0,  radius: 2.4, depth: 0.16, name: "West Floodplain Hollow" },
+  { xOffset: 5.2,  z: 26.0,  radius: 2.5, depth: 0.17, name: "East Lower Gravel Bar" },
+];
+
 export class RiverTerrain {
   readonly length = 80.0; // Z from -40 to +40
   readonly width = 32.0;  // X from -16 to +16
@@ -57,6 +72,7 @@ export class RiverTerrain {
         uSunDir: { value: sunDir },
         uSunColor: { value: sunColor },
         uTime: { value: 0.0 },
+        uRainIntensity: { value: 0.0 },
       },
       vertexShader: `
         varying vec3 vWorldPos;
@@ -83,6 +99,7 @@ export class RiverTerrain {
         uniform vec3 uSunDir;
         uniform vec3 uSunColor;
         uniform float uTime;
+        uniform float uRainIntensity;
 
         varying vec3 vWorldPos;
         varying vec3 vNormal;
@@ -123,6 +140,13 @@ export class RiverTerrain {
           albedo *= mix(1.0, 0.45, submerged);
           float roughness = mix(arm.g, 0.08, submerged);
 
+          // Dynamic Rain Wetness (terrain absorbs water, turns dark & glossy)
+          float rainWetness = clamp(uRainIntensity / 50.0, 0.0, 1.0);
+          if (rainWetness > 0.005) {
+            albedo *= mix(1.0, 0.64, rainWetness * 0.85);
+            roughness = mix(roughness, 0.06, rainWetness * 0.72);
+          }
+
           // Lighting
           vec3 L = normalize(uSunDir);
           vec3 N = normalize(vNormal);
@@ -142,6 +166,28 @@ export class RiverTerrain {
           }
 
           vec3 finalColor = albedo * (ambient + direct);
+
+          // Visible Hillslope Runoff Streams & Rivulets:
+          // Water sheets down the valley banks (distToCenter > 4.2) towards the river
+          if (rainWetness > 0.02 && distToCenter > 4.1) {
+            vec2 runoffDir = normalize(vec2(-sign(vWorldPos.x - xCenter) * 1.6, 0.65));
+            float flowSpeed = 2.8 + rainWetness * 1.6;
+            vec2 rUv1 = vWorldPos.xz * 1.8 + runoffDir * (uTime * flowSpeed);
+            vec2 rUv2 = vWorldPos.xz * 3.6 + runoffDir * (uTime * flowSpeed * 1.4);
+
+            float rill1 = texture2D(uPebbleNor, rUv1).r;
+            float rill2 = texture2D(uBankNor, rUv2).g;
+            float rillMask = pow(rill1 * rill2, 1.6) * 4.2 * rainWetness;
+            rillMask *= smoothstep(3.9, 5.8, distToCenter);
+
+            vec3 V = normalize(cameraPosition - vWorldPos);
+            vec3 H = normalize(L + V);
+            float rillSpec = pow(max(dot(N, H), 0.0), 28.0) * 1.6 * rainWetness;
+            vec3 rillColor = mix(vec3(0.35, 0.52, 0.68), uSunColor, 0.40);
+
+            finalColor = mix(finalColor, rillColor * (ambient + direct) + uSunColor * rillSpec, clamp(rillMask * 0.60, 0.0, 0.85));
+          }
+
           gl_FragColor = vec4(finalColor, 1.0);
         }
       `,
@@ -185,6 +231,20 @@ export class RiverTerrain {
     } else {
       // Gently sloping gravel bars & valley sides
       bedDepth = 0.22 * (d - w) + 0.12 * Math.log(1.0 + 1.2 * (d - w));
+    }
+
+    // Carve natural gravel bar depression bowls for puddles
+    for (const b of PUDDLE_BASINS) {
+      const bx = xc + b.xOffset;
+      const dx = x - bx;
+      const dz = z - b.z;
+      const distSq = dx * dx + dz * dz;
+      const rSq = b.radius * b.radius;
+      if (distSq < rSq) {
+        const t = Math.sqrt(distSq) / b.radius;
+        const dip = b.depth * Math.pow(1.0 - t * t, 2.0);
+        bedDepth -= dip;
+      }
     }
 
     // Micro-rock roughness along channel

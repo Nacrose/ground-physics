@@ -16,6 +16,8 @@ export default function RiverLab() {
   const [followRiver, setFollowRiver] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [activePreset, setActivePreset] = useState<string>("rapids");
+  const [rainIntensity, setRainIntensity] = useState(0.0); // 0 to 80 mm/h
+  const [catchmentRunoffQ, setCatchmentRunoffQ] = useState(0.0);
 
   // Hydraulic live metrics
   const [minV, setMinV] = useState(1.6);
@@ -31,6 +33,7 @@ export default function RiverLab() {
     setMinFr(hyd.minFroude);
     setMaxFr(hyd.maxFroude);
     setAvgDepth(hyd.avgDepth);
+    setCatchmentRunoffQ(lab.runoff.currentRainQ);
   };
 
   useEffect(() => {
@@ -39,7 +42,15 @@ export default function RiverLab() {
     labRef.current = lab;
     updateTelemetry(lab);
 
+    // Periodic telemetry update to track dynamic catchment runoff swell
+    const interval = setInterval(() => {
+      if (labRef.current) {
+        updateTelemetry(labRef.current);
+      }
+    }, 250);
+
     return () => {
+      clearInterval(interval);
       lab.dispose();
       labRef.current = null;
     };
@@ -78,10 +89,18 @@ export default function RiverLab() {
     if (labRef.current) labRef.current.setFollowRiver(val);
   };
 
-  const handlePreset = (preset: "rapids" | "island" | "canyon" | "overview") => {
+  const handlePreset = (preset: "rapids" | "island" | "canyon" | "overview" | "runoff") => {
     setActivePreset(preset);
     setFollowRiver(false);
     if (labRef.current) labRef.current.setViewPreset(preset);
+  };
+
+  const handleRainIntensity = (val: number) => {
+    setRainIntensity(val);
+    if (labRef.current) {
+      labRef.current.setRainIntensity(val);
+      updateTelemetry(labRef.current);
+    }
   };
 
   const togglePause = () => {
@@ -208,11 +227,20 @@ export default function RiverLab() {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 12px" }}>
             <div>
               <span style={{ color: "#94a3b8" }}>Discharge ($Q$):</span>{" "}
-              <strong style={{ color: "#f8fafc" }}>{dischargeQ.toFixed(1)} m³/s</strong>
+              <strong style={{ color: "#f8fafc" }}>
+                {(dischargeQ + catchmentRunoffQ).toFixed(1)} m³/s
+              </strong>
+              {catchmentRunoffQ > 0.2 && (
+                <span style={{ fontSize: 9.5, color: "#38bdf8", marginLeft: 4 }}>
+                  (+{catchmentRunoffQ.toFixed(1)} runoff)
+                </span>
+              )}
             </div>
             <div>
-              <span style={{ color: "#94a3b8" }}>Mean Depth:</span>{" "}
-              <strong style={{ color: "#f8fafc" }}>{avgDepth.toFixed(2)} m</strong>
+              <span style={{ color: "#94a3b8" }}>Rain / Runoff:</span>{" "}
+              <strong style={{ color: rainIntensity > 0 ? "#38bdf8" : "#94a3b8" }}>
+                {rainIntensity.toFixed(0)} mm/h {rainIntensity > 40 ? "(Storm)" : rainIntensity > 0 ? "(Rain)" : "(Dry)"}
+              </strong>
             </div>
             <div>
               <span style={{ color: "#94a3b8" }}>Velocity Range:</span>{" "}
@@ -224,6 +252,77 @@ export default function RiverLab() {
                 {minFr.toFixed(2)} – {maxFr.toFixed(2)} {maxFr > 1.0 ? "(Supercritical)" : "(Subcritical)"}
               </strong>
             </div>
+          </div>
+        </div>
+
+        {/* Precipitation & Hillslope Runoff Controls */}
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: "#38bdf8", textTransform: "uppercase", marginBottom: 6 }}>
+            Precipitation & Hillslope Runoff
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 8 }}>
+            <button
+              onClick={() => handleRainIntensity(0.0)}
+              style={{
+                padding: "6px 4px",
+                borderRadius: 6,
+                border: "1px solid rgba(255,255,255,0.12)",
+                background: rainIntensity === 0.0 ? "#0284c7" : "rgba(255,255,255,0.06)",
+                color: "#fff",
+                fontSize: 10,
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+            >
+              ☀️ Dry (0)
+            </button>
+            <button
+              onClick={() => handleRainIntensity(25.0)}
+              style={{
+                padding: "6px 4px",
+                borderRadius: 6,
+                border: "1px solid rgba(255,255,255,0.12)",
+                background: rainIntensity === 25.0 ? "#0284c7" : "rgba(255,255,255,0.06)",
+                color: "#fff",
+                fontSize: 10,
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+            >
+              🌧️ Rain (25)
+            </button>
+            <button
+              onClick={() => handleRainIntensity(65.0)}
+              style={{
+                padding: "6px 4px",
+                borderRadius: 6,
+                border: "1px solid rgba(255,255,255,0.12)",
+                background: rainIntensity === 65.0 ? "#0284c7" : "rgba(255,255,255,0.06)",
+                color: "#fff",
+                fontSize: 10,
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+            >
+              ⛈️ Storm (65)
+            </button>
+          </div>
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3, fontSize: 12 }}>
+              <span style={{ color: "#d6d3d1" }}>Rain Rate</span>
+              <span style={{ color: rainIntensity > 0 ? "#38bdf8" : "#94a3b8", fontWeight: 600 }}>
+                {rainIntensity.toFixed(0)} mm/h
+              </span>
+            </div>
+            <input
+              type="range"
+              min={0.0}
+              max={80.0}
+              step={1.0}
+              value={rainIntensity}
+              onChange={(e) => handleRainIntensity(parseFloat(e.target.value))}
+              style={{ width: "100%", accentColor: "#38bdf8", cursor: "pointer" }}
+            />
           </div>
         </div>
 
@@ -381,6 +480,22 @@ export default function RiverLab() {
               }}
             >
               🦅 Valley Overview
+            </button>
+            <button
+              onClick={() => handlePreset("runoff")}
+              style={{
+                gridColumn: "span 2",
+                padding: "7px 8px",
+                borderRadius: 6,
+                border: "1px solid rgba(56, 189, 248, 0.4)",
+                background: !followRiver && activePreset === "runoff" ? "#0284c7" : "rgba(56, 189, 248, 0.12)",
+                color: !followRiver && activePreset === "runoff" ? "#fff" : "#7dd3fc",
+                fontSize: 11,
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+            >
+              🏞️ Hillslope Runoff & Pools View
             </button>
           </div>
 

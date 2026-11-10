@@ -265,6 +265,7 @@ export class RiverWater {
         uAbsorbScale: { value: 3.5 },
         uFoamScale: { value: 1.0 },
         uFlowSpeed: { value: 3.8 },
+        uRainIntensity: { value: 0.0 },
       },
       transparent: true,
       depthWrite: false,
@@ -375,6 +376,7 @@ export class RiverWater {
         uniform float uAbsorbScale;
         uniform float uFoamScale;
         uniform float uFlowSpeed;
+        uniform float uRainIntensity;
 
         varying vec3 vWorldPos;
         varying vec3 vNormal;
@@ -483,6 +485,20 @@ export class RiverWater {
           // Ripples stay alive right up to the water edge (calming only in final 2.5 mm):
           float rippleDamping = smoothstep(0.001, 0.025, depth);
           vec3 normalPerturb = (nSwell.xzy * 0.48 + nRipple.xzy * 0.36 + nChop.xzy * 0.16) * rippleDamping;
+
+          // Dynamic Raindrop Impact Rings across the river surface:
+          if (uRainIntensity > 0.5) {
+            vec2 rainGrid = vWorldPos.xz * 3.6;
+            vec2 rCell = floor(rainGrid);
+            vec2 rFrac = fract(rainGrid) - 0.5;
+            float rPhase = fract(sin(dot(rCell, vec2(127.1, 311.7))) * 43758.5453 + uTime * 4.0);
+            float rDist = length(rFrac);
+            float rRing = sin(rDist * 32.0 - rPhase * 22.0) * exp(-rDist * 4.5) * (1.0 - rPhase);
+            float rScale = clamp(uRainIntensity / 50.0, 0.0, 1.0) * 0.22;
+            normalPerturb.x += rRing * rScale;
+            normalPerturb.z += rRing * rScale;
+          }
+
           vec3 N = normalize(vec3(vNormal.x + normalPerturb.x * 0.092, 1.0, vNormal.z + normalPerturb.z * 0.092));
 
           vec3 V = normalize(cameraPosition - vWorldPos);
@@ -613,6 +629,10 @@ export class RiverWater {
 
   setFoamEnabled(enabled: boolean) {
     this.material.uniforms.uFoamScale.value = enabled ? 1.0 : 0.0;
+  }
+
+  setRainIntensity(intensity: number) {
+    this.material.uniforms.uRainIntensity.value = intensity;
   }
 
   update(time: number) {

@@ -6,6 +6,7 @@ import { RiverTerrain } from "./riverTerrain";
 import { RiverRocks } from "./riverRocks";
 import { RiverWater } from "./riverWater";
 import { RiverSpray } from "./riverSpray";
+import { RiverRunoff } from "./riverRunoff";
 
 export class StandaloneRiverLab {
   readonly container: HTMLElement;
@@ -19,6 +20,7 @@ export class StandaloneRiverLab {
   rocks: RiverRocks;
   water: RiverWater;
   spray: RiverSpray;
+  runoff: RiverRunoff;
 
   sunLight: THREE.DirectionalLight;
   sunDir = new THREE.Vector3(0.55, 0.75, 0.35).normalize();
@@ -26,6 +28,7 @@ export class StandaloneRiverLab {
 
   screenTarget: THREE.WebGLRenderTarget;
 
+  baseQ = 15.0; // base spring discharge without rain
   isPaused = false;
   cameraFollowRiver = false;
   private cameraProgress = 0.15; // [0, 1] along river
@@ -116,6 +119,10 @@ export class StandaloneRiverLab {
     this.spray = new RiverSpray(this.rocks, this.hydraulics, this.sunDir, this.terrain);
     this.scene.add(this.spray.mesh);
 
+    // 10. Dynamic Rain, Hillslope Runoff & Depression Pooling
+    this.runoff = new RiverRunoff(this.terrain, this.hydraulics, this.sunDir, this.sunColor);
+    this.scene.add(this.runoff.group);
+
     window.addEventListener("resize", this.onResize);
 
     this.lastTime = performance.now();
@@ -142,6 +149,10 @@ export class StandaloneRiverLab {
       this.terrain.material.uniforms.uTime.value = this.simTime;
       this.water.update(this.simTime);
       this.spray.update(delta);
+      this.runoff.update(delta, this.camera.position, this.simTime);
+
+      // Dynamic catchment runoff swelling river discharge:
+      this.hydraulics.setDischarge(this.baseQ + this.runoff.currentRainQ);
 
       if (this.cameraFollowRiver) {
         this.cameraProgress = (this.cameraProgress + delta * 0.022) % 1.0;
@@ -169,7 +180,13 @@ export class StandaloneRiverLab {
   };
 
   setDischarge(q: number) {
-    this.hydraulics.setDischarge(q);
+    this.baseQ = q;
+    this.hydraulics.setDischarge(this.baseQ + this.runoff.currentRainQ);
+  }
+
+  setRainIntensity(intensity: number) {
+    this.runoff.setRainIntensity(intensity);
+    this.water.setRainIntensity(intensity);
   }
 
   setClarity(clarity: number) {
@@ -201,7 +218,7 @@ export class StandaloneRiverLab {
     }
   }
 
-  setViewPreset(preset: "rapids" | "island" | "canyon" | "overview") {
+  setViewPreset(preset: "rapids" | "island" | "canyon" | "overview" | "runoff") {
     this.cameraFollowRiver = false;
     if (preset === "rapids") {
       this.controls.target.set(1.2, 4.8, -18.0);
@@ -215,6 +232,12 @@ export class StandaloneRiverLab {
     } else if (preset === "overview") {
       this.controls.target.set(0, 2.0, 0);
       this.camera.position.set(24.0, 28.0, -15.0);
+    } else if (preset === "runoff") {
+      // Focus directly onto the West Terrace Puddle Basin and Hillslope Runoff Rivulets
+      const z = -16.0;
+      const xc = this.terrain.getRiverCenter(z);
+      this.controls.target.set(xc - 5.6, 5.0, z);
+      this.camera.position.set(xc - 1.5, 7.8, z - 8.2);
     }
     this.controls.update();
   }
