@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { RGBELoader } from "three/examples/jsm/loaders/RGBELoader.js";
+import { RiverHydraulics } from "./riverHydraulics";
 import { RiverTerrain } from "./riverTerrain";
 import { RiverRocks } from "./riverRocks";
 import { RiverWater } from "./riverWater";
@@ -13,6 +14,7 @@ export class StandaloneRiverLab {
   camera: THREE.PerspectiveCamera;
   controls: OrbitControls;
 
+  hydraulics: RiverHydraulics;
   terrain: RiverTerrain;
   rocks: RiverRocks;
   water: RiverWater;
@@ -92,20 +94,23 @@ export class StandaloneRiverLab {
 
     const texLoader = new THREE.TextureLoader();
 
-    // 5. River Terrain Valley
-    this.terrain = new RiverTerrain(texLoader, this.sunDir, this.sunColor);
+    // 5. Open-Channel Saint-Venant Hydraulics Solver
+    this.hydraulics = new RiverHydraulics();
+
+    // 6. River Terrain Valley
+    this.terrain = new RiverTerrain(texLoader, this.sunDir, this.sunColor, this.hydraulics);
     this.scene.add(this.terrain.mesh);
 
-    // 6. Mid-Stream Boulders & Instanced River Pebbles
-    this.rocks = new RiverRocks(this.terrain, texLoader, this.sunDir, this.sunColor);
+    // 7. Mid-Stream Boulders & Instanced River Pebbles
+    this.rocks = new RiverRocks(this.terrain, texLoader, this.sunDir, this.sunColor, this.hydraulics);
     this.scene.add(this.rocks.group);
 
-    // 7. Dynamic Flowing Water Ribbon
-    this.water = new RiverWater(this.terrain, this.sunDir, this.sunColor, this.screenTarget);
+    // 8. Dynamic Flowing Water Ribbon
+    this.water = new RiverWater(this.terrain, this.sunDir, this.sunColor, this.screenTarget, this.hydraulics);
     this.scene.add(this.water.mesh);
 
-    // 8. 3D Spray Particle System
-    this.spray = new RiverSpray(this.rocks);
+    // 9. 3D Spray Particle System
+    this.spray = new RiverSpray(this.rocks, this.hydraulics);
     this.scene.add(this.spray.mesh);
 
     window.addEventListener("resize", this.onResize);
@@ -136,10 +141,10 @@ export class StandaloneRiverLab {
       this.spray.update(delta);
 
       if (this.cameraFollowRiver) {
-        this.cameraProgress = (this.cameraProgress + delta * 0.025) % 1.0;
+        this.cameraProgress = (this.cameraProgress + delta * 0.022) % 1.0;
         const z = -35.0 + this.cameraProgress * 70.0;
         const xc = this.terrain.getRiverCenter(z);
-        const wy = this.terrain.getWaterHeight(xc, z);
+        const wy = this.hydraulics.getWaterHeightAt(z);
 
         this.controls.target.set(xc, wy, z + 6.0);
         this.camera.position.set(xc + 5.5, wy + 4.0, z - 7.0);
@@ -160,8 +165,8 @@ export class StandaloneRiverLab {
     this.renderer.render(this.scene, this.camera);
   };
 
-  setFlowSpeed(speed: number) {
-    this.water.flowSpeed = speed;
+  setDischarge(q: number) {
+    this.hydraulics.setDischarge(q);
   }
 
   setClarity(clarity: number) {

@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { RiverTerrain } from "./riverTerrain";
+import { RiverHydraulics } from "./riverHydraulics";
 
 export interface RiverBoulderData {
   mesh: THREE.Mesh;
@@ -16,7 +17,8 @@ export class RiverRocks {
     terrain: RiverTerrain,
     texLoader: THREE.TextureLoader,
     sunDir: THREE.Vector3,
-    sunColor: THREE.Color
+    sunColor: THREE.Color,
+    hydraulics: RiverHydraulics
   ) {
     const rock05Diffuse = texLoader.load("/assets-1k/rock_05/Diffuse.jpg");
     const rock05Nor = texLoader.load("/assets-1k/rock_05/nor_gl.jpg");
@@ -31,6 +33,7 @@ export class RiverRocks {
     const createRockMat = (map: THREE.Texture, nor: THREE.Texture, arm: THREE.Texture) => {
       return new THREE.ShaderMaterial({
         uniforms: {
+          uHydraulicsTex: { value: hydraulics.texture },
           uMap: { value: map },
           uNor: { value: nor },
           uArm: { value: arm },
@@ -49,6 +52,7 @@ export class RiverRocks {
         `,
         fragmentShader: `
           precision highp float;
+          uniform sampler2D uHydraulicsTex;
           uniform sampler2D uMap;
           uniform sampler2D uNor;
           uniform sampler2D uArm;
@@ -56,11 +60,6 @@ export class RiverRocks {
           uniform vec3 uSunColor;
           varying vec3 vWorldPos;
           varying vec3 vNormal;
-
-          float getWaterHeight(float z) {
-            float slope = (1.0 - (z + 40.0) / 80.0) * 6.5;
-            return slope + 0.35;
-          }
 
           void main() {
             vec3 N = normalize(vNormal);
@@ -76,8 +75,10 @@ export class RiverRocks {
                        texture2D(uArm, p.zx).rgb * weights.y +
                        texture2D(uArm, p.xy).rgb * weights.z;
 
-            // Waterline wetness darkening
-            float waterY = getWaterHeight(vWorldPos.z);
+            // Waterline wetness darkening using real-time hydraulic height
+            float uStation = clamp((vWorldPos.z + 40.0) / 80.0, 0.0, 1.0);
+            vec4 hyd = texture2D(uHydraulicsTex, vec2(uStation, 0.5));
+            float waterY = hyd.g;
             float submerged = smoothstep(waterY + 0.15, waterY - 0.05, vWorldPos.y);
             col *= mix(1.0, 0.32, submerged);
 
@@ -176,3 +177,4 @@ export class RiverRocks {
     this.group.add(this.pebblesMesh);
   }
 }
+

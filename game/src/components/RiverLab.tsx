@@ -8,7 +8,7 @@ export default function RiverLab() {
   const containerRef = useRef<HTMLDivElement>(null);
   const labRef = useRef<StandaloneRiverLab | null>(null);
 
-  const [flowSpeed, setFlowSpeed] = useState(3.2);
+  const [dischargeQ, setDischargeQ] = useState(22.0);
   const [clarity, setClarity] = useState(3.5);
   const [sprayEnabled, setSprayEnabled] = useState(true);
   const [pebblesEnabled, setPebblesEnabled] = useState(true);
@@ -16,10 +16,27 @@ export default function RiverLab() {
   const [isPaused, setIsPaused] = useState(false);
   const [activePreset, setActivePreset] = useState<string>("rapids");
 
+  // Hydraulic live metrics
+  const [minV, setMinV] = useState(1.6);
+  const [maxV, setMaxV] = useState(5.8);
+  const [minFr, setMinFr] = useState(0.5);
+  const [maxFr, setMaxFr] = useState(1.4);
+  const [avgDepth, setAvgDepth] = useState(0.85);
+
+  const updateTelemetry = (lab: StandaloneRiverLab) => {
+    const hyd = lab.hydraulics;
+    setMinV(hyd.minVelocity);
+    setMaxV(hyd.maxVelocity);
+    setMinFr(hyd.minFroude);
+    setMaxFr(hyd.maxFroude);
+    setAvgDepth(hyd.avgDepth);
+  };
+
   useEffect(() => {
     if (!containerRef.current) return;
     const lab = new StandaloneRiverLab(containerRef.current);
     labRef.current = lab;
+    updateTelemetry(lab);
 
     return () => {
       lab.dispose();
@@ -27,9 +44,12 @@ export default function RiverLab() {
     };
   }, []);
 
-  const handleFlowSpeed = (val: number) => {
-    setFlowSpeed(val);
-    if (labRef.current) labRef.current.setFlowSpeed(val);
+  const handleDischarge = (val: number) => {
+    setDischargeQ(val);
+    if (labRef.current) {
+      labRef.current.setDischarge(val);
+      updateTelemetry(labRef.current);
+    }
   };
 
   const handleClarity = (val: number) => {
@@ -136,17 +156,17 @@ export default function RiverLab() {
           position: "absolute",
           top: 18,
           left: 18,
-          background: "rgba(18, 16, 14, 0.88)",
+          background: "rgba(18, 16, 14, 0.90)",
           backdropFilter: "blur(14px)",
-          border: "1px solid rgba(255, 230, 200, 0.15)",
+          border: "1px solid rgba(56, 189, 248, 0.25)",
           borderRadius: 12,
           padding: "16px 20px",
           color: "#f1ede6",
           fontFamily: "system-ui, -apple-system, sans-serif",
           fontSize: 13,
-          minWidth: 340,
-          maxWidth: 400,
-          boxShadow: "0 12px 36px rgba(0,0,0,0.55)",
+          minWidth: 350,
+          maxWidth: 420,
+          boxShadow: "0 14px 40px rgba(0,0,0,0.65)",
           userSelect: "none",
           maxHeight: "calc(100vh - 36px)",
           overflowY: "auto",
@@ -154,16 +174,141 @@ export default function RiverLab() {
       >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
           <div style={{ fontWeight: 700, fontSize: 15, letterSpacing: "0.06em", color: "#38bdf8" }}>
-            RIVER // HYDRO VALLEY
+            SAINT-VENANT // RIVER HYDRAULICS
           </div>
           <span style={{ fontSize: 10, background: "#0284c7", color: "#fff", padding: "2px 6px", borderRadius: 4, fontWeight: 600 }}>
-            STANDALONE 80m
+            FLUID DYNAMICS
           </span>
         </div>
 
-        <p style={{ margin: "0 0 14px 0", fontSize: 11, color: "#a8a29e", lineHeight: 1.4 }}>
-          Hybrid river architecture scaling fluid simulation: 80m mountain corridor, Poly Haven Ganges pebbles & rock PBR, dual-phase flow ripples, Beer-Lambert spectral absorption, mid-stream rapids boulders, and 3D SPH airborne spray droplets.
+        <p style={{ margin: "0 0 12px 0", fontSize: 11, color: "#a8a29e", lineHeight: 1.4 }}>
+          Continuity equation ($Q = A \cdot v$) and Manning&apos;s formula solver across 80m. Channel constrictions by mid-stream boulders squeeze cross-sectional area, accelerating local velocity and triggering supercritical hydraulic jumps ($Fr &gt; 1$).
         </p>
+
+        {/* Live Hydraulic Telemetry Card */}
+        <div
+          style={{
+            background: "rgba(15, 23, 42, 0.7)",
+            border: "1px solid rgba(56, 189, 248, 0.25)",
+            borderRadius: 8,
+            padding: "10px 12px",
+            marginBottom: 14,
+            fontSize: 11,
+          }}
+        >
+          <div style={{ fontWeight: 600, color: "#38bdf8", marginBottom: 6, fontSize: 11, textTransform: "uppercase" }}>
+            Real-Time Hydraulic Telemetry
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 12px" }}>
+            <div>
+              <span style={{ color: "#94a3b8" }}>Discharge ($Q$):</span>{" "}
+              <strong style={{ color: "#f8fafc" }}>{dischargeQ.toFixed(1)} m³/s</strong>
+            </div>
+            <div>
+              <span style={{ color: "#94a3b8" }}>Mean Depth:</span>{" "}
+              <strong style={{ color: "#f8fafc" }}>{avgDepth.toFixed(2)} m</strong>
+            </div>
+            <div>
+              <span style={{ color: "#94a3b8" }}>Velocity Range:</span>{" "}
+              <strong style={{ color: "#38bdf8" }}>{minV.toFixed(1)} – {maxV.toFixed(1)} m/s</strong>
+            </div>
+            <div>
+              <span style={{ color: "#94a3b8" }}>Froude ($Fr$):</span>{" "}
+              <strong style={{ color: maxFr > 1.0 ? "#f97316" : "#4ade80" }}>
+                {minFr.toFixed(2)} – {maxFr.toFixed(2)} {maxFr > 1.0 ? "(Supercritical)" : "(Subcritical)"}
+              </strong>
+            </div>
+          </div>
+        </div>
+
+        {/* Discharge Flow Regime Presets */}
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: "#38bdf8", textTransform: "uppercase", marginBottom: 6 }}>
+            Flow Regime Presets
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
+            <button
+              onClick={() => handleDischarge(12.0)}
+              style={{
+                padding: "6px 4px",
+                borderRadius: 6,
+                border: "1px solid rgba(255,255,255,0.12)",
+                background: dischargeQ === 12.0 ? "#0284c7" : "rgba(255,255,255,0.06)",
+                color: "#fff",
+                fontSize: 10,
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+            >
+              🍃 Low (12 m³/s)
+            </button>
+            <button
+              onClick={() => handleDischarge(22.0)}
+              style={{
+                padding: "6px 4px",
+                borderRadius: 6,
+                border: "1px solid rgba(255,255,255,0.12)",
+                background: dischargeQ === 22.0 ? "#0284c7" : "rgba(255,255,255,0.06)",
+                color: "#fff",
+                fontSize: 10,
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+            >
+              🌊 Normal (22 m³/s)
+            </button>
+            <button
+              onClick={() => handleDischarge(45.0)}
+              style={{
+                padding: "6px 4px",
+                borderRadius: 6,
+                border: "1px solid rgba(255,255,255,0.12)",
+                background: dischargeQ === 45.0 ? "#0284c7" : "rgba(255,255,255,0.06)",
+                color: "#fff",
+                fontSize: 10,
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+            >
+              ⚡ Torrent (45 m³/s)
+            </button>
+          </div>
+        </div>
+
+        {/* Sliders */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 11, marginBottom: 14 }}>
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3, fontSize: 12 }}>
+              <span style={{ color: "#d6d3d1" }}>Volumetric Discharge ($Q$)</span>
+              <span style={{ color: "#38bdf8", fontWeight: 600 }}>{dischargeQ.toFixed(1)} m³/s</span>
+            </div>
+            <input
+              type="range"
+              min={8.0}
+              max={55.0}
+              step={0.5}
+              value={dischargeQ}
+              onChange={(e) => handleDischarge(parseFloat(e.target.value))}
+              style={{ width: "100%", accentColor: "#38bdf8", cursor: "pointer" }}
+            />
+          </div>
+
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3, fontSize: 12 }}>
+              <span style={{ color: "#d6d3d1" }}>Water Depth / Murkiness</span>
+              <span style={{ color: "#38bdf8", fontWeight: 600 }}>{clarity.toFixed(1)}</span>
+            </div>
+            <input
+              type="range"
+              min={1.0}
+              max={8.0}
+              step={0.2}
+              value={clarity}
+              onChange={(e) => handleClarity(parseFloat(e.target.value))}
+              style={{ width: "100%", accentColor: "#38bdf8", cursor: "pointer" }}
+            />
+          </div>
+        </div>
 
         {/* Camera Views */}
         <div style={{ marginBottom: 14 }}>
@@ -256,41 +401,6 @@ export default function RiverLab() {
           </button>
         </div>
 
-        {/* Sliders */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 11, marginBottom: 14 }}>
-          <div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3, fontSize: 12 }}>
-              <span style={{ color: "#d6d3d1" }}>Flow Velocity</span>
-              <span style={{ color: "#38bdf8", fontWeight: 600 }}>{flowSpeed.toFixed(1)} m/s</span>
-            </div>
-            <input
-              type="range"
-              min={1.0}
-              max={7.0}
-              step={0.1}
-              value={flowSpeed}
-              onChange={(e) => handleFlowSpeed(parseFloat(e.target.value))}
-              style={{ width: "100%", accentColor: "#38bdf8", cursor: "pointer" }}
-            />
-          </div>
-
-          <div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3, fontSize: 12 }}>
-              <span style={{ color: "#d6d3d1" }}>Water Depth / Murkiness</span>
-              <span style={{ color: "#38bdf8", fontWeight: 600 }}>{clarity.toFixed(1)}</span>
-            </div>
-            <input
-              type="range"
-              min={1.0}
-              max={8.0}
-              step={0.2}
-              value={clarity}
-              onChange={(e) => handleClarity(parseFloat(e.target.value))}
-              style={{ width: "100%", accentColor: "#38bdf8", cursor: "pointer" }}
-            />
-          </div>
-        </div>
-
         {/* Toggles */}
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
           <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12 }}>
@@ -300,7 +410,7 @@ export default function RiverLab() {
               onChange={(e) => handleSprayToggle(e.target.checked)}
               style={{ accentColor: "#38bdf8" }}
             />
-            <span>3D Airborne Spray Particles (Rapids collisions)</span>
+            <span>3D Physical Spray Particles (Kinetic boulder impacts)</span>
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12 }}>
             <input
@@ -333,7 +443,7 @@ export default function RiverLab() {
           </button>
           <button
             onClick={() => {
-              handleFlowSpeed(3.2);
+              handleDischarge(22.0);
               handleClarity(3.5);
               handleSprayToggle(true);
               handlePebblesToggle(true);
@@ -365,12 +475,12 @@ export default function RiverLab() {
             gap: "4px 8px",
           }}
         >
-          <div>Valley Length: <strong style={{ color: "#d6d3d1" }}>80 meters</strong></div>
-          <div>Elevation Drop: <strong style={{ color: "#d6d3d1" }}>6.5 meters</strong></div>
-          <div>Boulders: <strong style={{ color: "#d6d3d1" }}>10 Mid-Stream</strong></div>
-          <div>Pebbles: <strong style={{ color: "#d6d3d1" }}>1,200 Instanced</strong></div>
+          <div>Solver: <strong style={{ color: "#d6d3d1" }}>Saint-Venant 1D</strong></div>
+          <div>Roughness ($n$): <strong style={{ color: "#d6d3d1" }}>0.040 (Manning)</strong></div>
+          <div>Continuity: <strong style={{ color: "#d6d3d1" }}>Q = A · v = const</strong></div>
+          <div>Energy: <strong style={{ color: "#d6d3d1" }}>E = h + v²/2g</strong></div>
           <div>Water Shading: <strong style={{ color: "#d6d3d1" }}>Beer-Lambert + SSR</strong></div>
-          <div>Spray System: <strong style={{ color: "#d6d3d1" }}>600 Droplet SPH</strong></div>
+          <div>Spray System: <strong style={{ color: "#d6d3d1" }}>Kinetic SPH Droplets</strong></div>
         </div>
       </div>
     </div>

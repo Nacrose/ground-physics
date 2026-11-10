@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { RiverRocks } from "./riverRocks";
+import { RiverHydraulics } from "./riverHydraulics";
 
 export class RiverSpray {
   readonly maxParticles = 600;
@@ -13,9 +14,11 @@ export class RiverSpray {
   private dummy = new THREE.Object3D();
 
   private rocks: RiverRocks;
+  private hydraulics: RiverHydraulics;
 
-  constructor(rocks: RiverRocks) {
+  constructor(rocks: RiverRocks, hydraulics: RiverHydraulics) {
     this.rocks = rocks;
+    this.hydraulics = hydraulics;
 
     this.geo = new THREE.SphereGeometry(0.06, 6, 6);
     this.mat = new THREE.MeshPhysicalMaterial({
@@ -44,24 +47,32 @@ export class RiverSpray {
     const boulders = this.rocks.boulders;
     let active = 0;
 
-    // Spawn new spray from boulders
+    // Spawn new spray from boulders based on fluid kinetic energy
     for (let i = 0; i < this.maxParticles; i++) {
       if (this.life[i] <= 0) {
-        if (Math.random() < 0.25 && boulders.length > 0) {
+        if (boulders.length > 0) {
           const b = boulders[Math.floor(Math.random() * boulders.length)];
-          const i3 = i * 3;
+          const st = this.hydraulics.getStationAtZ(b.center.z);
 
-          // Spawn upstream face of boulder
-          this.pos[i3] = b.center.x + (Math.random() - 0.5) * b.radius;
-          this.pos[i3 + 1] = b.center.y + b.radius * 0.4;
-          this.pos[i3 + 2] = b.center.z - b.radius * 0.8;
+          // Spawn threshold directly governed by local dynamic head and Froude number
+          const spawnThreshold = Math.min(0.65, 0.10 + st.head * 0.22 + (st.froude > 1.0 ? 0.20 : 0.0));
 
-          // Blast upwards and outwards
-          this.vel[i3] = (Math.random() - 0.5) * 3.5;
-          this.vel[i3 + 1] = 2.5 + Math.random() * 3.0;
-          this.vel[i3 + 2] = 2.0 + Math.random() * 3.0; // downstream
+          if (Math.random() < spawnThreshold) {
+            const i3 = i * 3;
+            const localV = st.velocity;
 
-          this.life[i] = 0.6 + Math.random() * 0.5;
+            // Spawn at upstream face of boulder collision
+            this.pos[i3] = b.center.x + (Math.random() - 0.5) * b.radius;
+            this.pos[i3 + 1] = st.waterY + 0.1 + Math.random() * 0.2;
+            this.pos[i3 + 2] = b.center.z - b.radius * 0.75;
+
+            // Blast upwards and downstream proportional to fluid velocity
+            this.vel[i3] = (Math.random() - 0.5) * (localV * 0.75);
+            this.vel[i3 + 1] = localV * (0.55 + Math.random() * 0.65);
+            this.vel[i3 + 2] = localV * (0.60 + Math.random() * 0.70);
+
+            this.life[i] = 0.5 + Math.random() * 0.5;
+          }
         }
       } else {
         const i3 = i * 3;

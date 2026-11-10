@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { RiverHydraulics } from "./riverHydraulics";
 
 export class RiverTerrain {
   readonly length = 80.0; // Z from -40 to +40
@@ -9,7 +10,12 @@ export class RiverTerrain {
   mesh: THREE.Mesh;
   material: THREE.ShaderMaterial;
 
-  constructor(texLoader: THREE.TextureLoader, sunDir: THREE.Vector3, sunColor: THREE.Color) {
+  constructor(
+    texLoader: THREE.TextureLoader,
+    sunDir: THREE.Vector3,
+    sunColor: THREE.Color,
+    hydraulics: RiverHydraulics
+  ) {
     const resX = 160;
     const resZ = 240;
 
@@ -41,6 +47,7 @@ export class RiverTerrain {
 
     this.material = new THREE.ShaderMaterial({
       uniforms: {
+        uHydraulicsTex: { value: hydraulics.texture },
         uPebbleMap: { value: pebbleDiffuse },
         uPebbleNor: { value: pebbleNor },
         uPebbleArm: { value: pebbleArm },
@@ -66,6 +73,7 @@ export class RiverTerrain {
       `,
       fragmentShader: `
         precision highp float;
+        uniform sampler2D uHydraulicsTex;
         uniform sampler2D uPebbleMap;
         uniform sampler2D uPebbleNor;
         uniform sampler2D uPebbleArm;
@@ -85,16 +93,14 @@ export class RiverTerrain {
           return 4.0 * sin(z * 0.07) + 1.8 * cos(z * 0.15);
         }
 
-        // River water surface elevation
-        float getWaterHeight(float x, float z) {
-          float slope = (1.0 - (z + 40.0) / 80.0) * 6.5;
-          return slope + 0.35;
-        }
-
         void main() {
           float xCenter = getRiverCenter(vWorldPos.z);
           float distToCenter = abs(vWorldPos.x - xCenter);
-          float waterY = getWaterHeight(vWorldPos.x, vWorldPos.z);
+
+          // Real-time hydraulic water surface elevation
+          float uStation = clamp((vWorldPos.z + 40.0) / 80.0, 0.0, 1.0);
+          vec4 hyd = texture2D(uHydraulicsTex, vec2(uStation, 0.5));
+          float waterY = hyd.g;
 
           // Riverbed vs Bank blending
           float channelMask = smoothstep(4.8, 3.2, distToCenter);
@@ -181,3 +187,4 @@ export class RiverTerrain {
     return slope + 0.35;
   }
 }
+

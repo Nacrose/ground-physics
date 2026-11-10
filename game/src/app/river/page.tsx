@@ -28,3 +28,4 @@ const RiverLab = dynamic(() => import("@/components/RiverLab"), {
 export default function RiverPage() {
   return <RiverLab />;
 }
+
