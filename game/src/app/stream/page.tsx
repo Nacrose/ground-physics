@@ -1,17 +1,29 @@
 "use client";
 
-import dynamic from "next/dynamic";
-
-const StreamLab = dynamic(() => import("@/components/StreamLab"), {
-  ssr: false,
-  loading: () => (
-    <div style={{ display: "grid", placeItems: "center", height: "100vh", background: "#0b0f12", color: "#67e8f9", fontFamily: "system-ui" }}>
-      <div>Loading Shallow Water & Caustics Lab…</div>
-    </div>
-  ),
-});
+import React, { useEffect, useState } from "react";
 
 export default function StreamPage() {
-  return <StreamLab />;
-}
+  const [query, setQuery] = useState("");
 
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      setQuery(window.location.search);
+    }
+  }, []);
+
+  return (
+    <div style={{ width: "100vw", height: "100vh", overflow: "hidden", margin: 0, padding: 0, background: "#0b0f12" }}>
+      <iframe
+        src={`/stream/index.html${query || "?gui=1"}`}
+        style={{
+          width: "100%",
+          height: "100%",
+          border: "none",
+          display: "block",
+        }}
+        title="Stream Simulation Lab"
+        allow="accelerometer; camera; encrypted-media; display-capture; geolocation; gyroscope; microphone; midi; clipboard-read; clipboard-write; web-share"
+      />
+    </div>
+  );
+}
