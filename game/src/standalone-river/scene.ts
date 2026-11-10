@@ -90,6 +90,9 @@ export class StandaloneRiverLab {
       hdr.mapping = THREE.EquirectangularReflectionMapping;
       this.scene.environment = hdr;
       this.scene.environmentIntensity = 0.45;
+      if (this.water) {
+        this.water.setEnvMap(hdr);
+      }
     });
 
     const texLoader = new THREE.TextureLoader();
