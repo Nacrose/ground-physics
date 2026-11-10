@@ -167,25 +167,32 @@ export class RiverTerrain {
 
           vec3 finalColor = albedo * (ambient + direct);
 
-          // Visible Hillslope Runoff Streams & Rivulets:
-          // Water sheets down the valley banks (distToCenter > 4.2) towards the river
-          if (rainWetness > 0.02 && distToCenter > 4.1) {
-            vec2 runoffDir = normalize(vec2(-sign(vWorldPos.x - xCenter) * 1.6, 0.65));
-            float flowSpeed = 2.8 + rainWetness * 1.6;
-            vec2 rUv1 = vWorldPos.xz * 1.8 + runoffDir * (uTime * flowSpeed);
-            vec2 rUv2 = vWorldPos.xz * 3.6 + runoffDir * (uTime * flowSpeed * 1.4);
+          // Visible Hillslope Runoff Sheet & Glistening Sheen:
+          // Water sheets down the valley banks (distToCenter > 4.1) towards the river
+          if (rainWetness > 0.01 && distToCenter > 4.0) {
+            vec2 runoffDir = normalize(vec2(-sign(vWorldPos.x - xCenter) * 1.8, 0.65));
+            float flowSpeed = 3.2 + rainWetness * 1.8;
+            vec2 rUv1 = vWorldPos.xz * 2.2 + runoffDir * (uTime * flowSpeed);
+            vec2 rUv2 = vWorldPos.xz * 4.4 + runoffDir * (uTime * flowSpeed * 1.35);
 
-            float rill1 = texture2D(uPebbleNor, rUv1).r;
-            float rill2 = texture2D(uBankNor, rUv2).g;
-            float rillMask = pow(rill1 * rill2, 1.6) * 4.2 * rainWetness;
-            rillMask *= smoothstep(3.9, 5.8, distToCenter);
+            vec3 rNor1 = texture2D(uPebbleNor, rUv1).rgb * 2.0 - 1.0;
+            vec3 rNor2 = texture2D(uBankNor, rUv2).rgb * 2.0 - 1.0;
+            vec3 rWave = normalize(rNor1 * 0.55 + rNor2 * 0.45);
 
+            // Perturb surface normal so water film reflects sunlight dynamically:
+            vec3 wetN = normalize(N + vec3(rWave.x * 0.35, 0.0, rWave.z * 0.35) * rainWetness);
             vec3 V = normalize(cameraPosition - vWorldPos);
             vec3 H = normalize(L + V);
-            float rillSpec = pow(max(dot(N, H), 0.0), 28.0) * 1.6 * rainWetness;
-            vec3 rillColor = mix(vec3(0.35, 0.52, 0.68), uSunColor, 0.40);
+            vec3 R = reflect(-V, wetN);
 
-            finalColor = mix(finalColor, rillColor * (ambient + direct) + uSunColor * rillSpec, clamp(rillMask * 0.60, 0.0, 0.85));
+            float NdotV = clamp(dot(wetN, V), 0.0, 1.0);
+            float fresnel = 0.05 + 0.95 * pow(1.0 - NdotV, 3.5);
+            vec3 skyRefl = mix(vec3(0.35, 0.48, 0.62), vec3(0.78, 0.88, 1.0), max(R.y, 0.0));
+
+            float wetSpec = pow(max(dot(wetN, H), 0.0), 32.0) * 2.8 * rainWetness * fresnel;
+            float sheetAmount = clamp(rainWetness * 0.65, 0.0, 0.75);
+
+            finalColor = mix(finalColor, skyRefl * (ambient + direct) + uSunColor * wetSpec, sheetAmount);
           }
 
           gl_FragColor = vec4(finalColor, 1.0);

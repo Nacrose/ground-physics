@@ -120,7 +120,14 @@ export class StandaloneRiverLab {
     this.scene.add(this.spray.mesh);
 
     // 10. Dynamic Rain, Hillslope Runoff & Depression Pooling
-    this.runoff = new RiverRunoff(this.terrain, this.hydraulics, this.sunDir, this.sunColor);
+    this.runoff = new RiverRunoff(
+      this.terrain,
+      this.hydraulics,
+      this.sunDir,
+      this.sunColor,
+      this.water.material.uniforms.uWaterNormalMap.value,
+      this.water.material.uniforms.uFoamTex.value
+    );
     this.scene.add(this.runoff.group);
 
     window.addEventListener("resize", this.onResize);

@@ -8,16 +8,15 @@ function generateRaindropTexture(size = 64): THREE.DataTexture {
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       const idx = (y * size + x) * 4;
-      const dx = Math.abs((x + 0.5 - center) / center); // 0 at center -> 1 at edges
-      const dy = (y + 0.5) / size; // 0 at top -> 1 at bottom
+      const dx = Math.abs((x + 0.5 - center) / center);
+      const dy = (y + 0.5) / size;
 
-      // Elongated falling rain streak (needle aspect ratio)
       const xShape = Math.exp(-dx * dx * 18.0);
       const yShape = Math.sin(dy * Math.PI);
-      const alpha = Math.min(1.0, xShape * yShape * 1.4);
+      const alpha = Math.min(1.0, xShape * yShape * 1.5);
 
-      data[idx] = 220;
-      data[idx + 1] = 235;
+      data[idx] = 230;
+      data[idx + 1] = 242;
       data[idx + 2] = 255;
       data[idx + 3] = Math.round(alpha * 255);
     }
@@ -29,6 +28,20 @@ function generateRaindropTexture(size = 64): THREE.DataTexture {
   return tex;
 }
 
+const RUNOFF_STREAMS = [
+  // West Valley Wall (xTop < 0, flows from mountain ridge into west river bank)
+  { zStart: -34.0, zEnd: -28.0, xTop: -14.2, side: -1, width: 1.1 },
+  { zStart: -22.0, zEnd: -16.0, xTop: -13.8, side: -1, width: 1.3 }, // Cascades into West Terrace Basin!
+  { zStart: -6.0,  zEnd: 0.0,   xTop: -14.0, side: -1, width: 1.2 },
+  { zStart: 12.0,  zEnd: 18.0,  xTop: -13.6, side: -1, width: 1.4 }, // Cascades into West Floodplain Hollow!
+  { zStart: 26.0,  zEnd: 32.0,  xTop: -14.2, side: -1, width: 1.2 },
+  // East Valley Wall (xTop > 0, flows from mountain ridge into east river bank)
+  { zStart: -30.0, zEnd: -24.0, xTop: 14.0,  side: 1,  width: 1.1 },
+  { zStart: -14.0, zEnd: -8.0,  xTop: 13.6,  side: 1,  width: 1.3 }, // Cascades into East Gravel Bar Pool!
+  { zStart: 4.0,   zEnd: 10.0,  xTop: 14.0,  side: 1,  width: 1.2 },
+  { zStart: 20.0,  zEnd: 26.0,  xTop: 13.8,  side: 1,  width: 1.3 }, // Cascades into East Lower Gravel Bar!
+];
+
 export class RiverRunoff {
   rainIntensity = 0.0; // [0, 80] mm/h
   currentRainQ = 0.0;  // [0, 30] m³/s added to river discharge
@@ -39,7 +52,7 @@ export class RiverRunoff {
   private sunDir: THREE.Vector3;
   private sunColor: THREE.Color;
 
-  // 3D Atmospheric Rain
+  // 1. 3D Atmospheric Falling Rain
   readonly maxRainDrops = 2400;
   private rainMesh: THREE.Points;
   private rainGeo: THREE.BufferGeometry;
@@ -47,14 +60,18 @@ export class RiverRunoff {
   private rainPos: Float32Array;
   private rainVel: Float32Array;
 
-  // Puddles (Depression Basins on Gravel Bars)
-  puddleFills: number[] = [0.0, 0.0, 0.0, 0.0]; // 0.0 = dry, 1.0 = brim-full & spilling
+  // 2. Physical 3D Hillslope Runoff Stream Ribbons
+  private streamMeshes: THREE.Mesh[] = [];
+  private streamMats: THREE.ShaderMaterial[] = [];
+
+  // 3. Permanent Puddles (Depression Basins on Gravel Bars)
+  puddleFills: number[] = [0.35, 0.40, 0.35, 0.40]; // 0.35 = calm base pool, 1.0 = brim-full & overflowing
   private puddleMeshes: THREE.Mesh[] = [];
   private puddleMats: THREE.ShaderMaterial[] = [];
   private puddleBaseY: number[] = [];
   private puddleRimY: number[] = [];
 
-  // Spillway Runoff Rivulets (connecting overflowing puddles to the river)
+  // 4. Spillway Runoff Rivulets
   private spillwayMeshes: THREE.Mesh[] = [];
   private spillwayMats: THREE.ShaderMaterial[] = [];
 
@@ -62,7 +79,9 @@ export class RiverRunoff {
     terrain: RiverTerrain,
     hydraulics: RiverHydraulics,
     sunDir: THREE.Vector3,
-    sunColor: THREE.Color
+    sunColor: THREE.Color,
+    waterNormalMap?: THREE.Texture,
+    foamTex?: THREE.Texture
   ) {
     this.terrain = terrain;
     this.hydraulics = hydraulics;
@@ -72,7 +91,13 @@ export class RiverRunoff {
     this.group = new THREE.Group();
     this.group.name = "RiverRunoff";
 
-    // 1. Setup 3D Atmospheric Falling Rain System
+    // Fallback normal/foam if not provided
+    const dummyNorm = waterNormalMap || new THREE.DataTexture(new Uint8Array([128, 128, 255, 255]), 1, 1, THREE.RGBAFormat);
+    const dummyFoam = foamTex || new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, THREE.RGBAFormat);
+
+    // =========================================================================
+    // PART 1: 3D ATMOSPHERIC FALLING RAIN SYSTEM
+    // =========================================================================
     this.rainPos = new Float32Array(this.maxRainDrops * 3);
     this.rainVel = new Float32Array(this.maxRainDrops * 3);
 
@@ -80,12 +105,11 @@ export class RiverRunoff {
       const i3 = i * 3;
       this.rainPos[i3] = (Math.random() - 0.5) * 60.0;
       this.rainPos[i3 + 1] = Math.random() * 28.0;
-      this.rainPos[i3 + 2] = (Math.random() - 0.5) * 80.0;
+      this.rainPos[i3 + 2] = (Math.random() - 0.5) * 85.0;
 
-      // Realistic terminal velocity with wind tilt
-      this.rainVel[i3] = 2.2 + (Math.random() - 0.5) * 0.8;
-      this.rainVel[i3 + 1] = -(18.0 + Math.random() * 4.0);
-      this.rainVel[i3 + 2] = 3.5 + (Math.random() - 0.5) * 1.0;
+      this.rainVel[i3] = 2.4 + (Math.random() - 0.5) * 0.8;
+      this.rainVel[i3 + 1] = -(20.0 + Math.random() * 4.0);
+      this.rainVel[i3 + 2] = 3.6 + (Math.random() - 0.5) * 1.0;
     }
 
     this.rainGeo = new THREE.BufferGeometry();
@@ -101,7 +125,7 @@ export class RiverRunoff {
       vertexShader: `
         void main() {
           vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-          gl_PointSize = clamp(24.0 * (450.0 / -mvPos.z), 4.0, 48.0);
+          gl_PointSize = clamp(26.0 * (480.0 / -mvPos.z), 4.0, 52.0);
           gl_Position = projectionMatrix * mvPos;
         }
       `,
@@ -112,7 +136,7 @@ export class RiverRunoff {
 
         void main() {
           vec4 tex = texture2D(uStreakTex, gl_PointCoord);
-          float a = tex.a * uRainAlpha * 0.55;
+          float a = tex.a * uRainAlpha * 0.65;
           if (a < 0.015) discard;
           gl_FragColor = vec4(0.88, 0.94, 1.0, a);
         }
@@ -123,24 +147,188 @@ export class RiverRunoff {
     });
 
     this.rainMesh = new THREE.Points(this.rainGeo, this.rainMat);
-    this.rainMesh.renderOrder = 20;
+    this.rainMesh.renderOrder = 25;
     this.rainMesh.frustumCulled = false;
     this.group.add(this.rainMesh);
 
-    // 2. Setup Depression Puddles on Gravel Terraces
-    PUDDLE_BASINS.forEach((basin, idx) => {
+    // =========================================================================
+    // PART 2: 9 PHYSICAL 3D HILLSLOPE RUNOFF STREAMS (CASCADING WATER RIBBONS)
+    // =========================================================================
+    RUNOFF_STREAMS.forEach((cfg) => {
+      const segs = 24;
+      const ptsLeft: number[] = [];
+      const ptsRight: number[] = [];
+      const uvs: number[] = [];
+      const indices: number[] = [];
+
+      for (let s = 0; s <= segs; s++) {
+        const t = s / segs;
+        const curZ = cfg.zStart + (cfg.zEnd - cfg.zStart) * t;
+        const xc = this.terrain.getRiverCenter(curZ);
+
+        // Meandering path from mountain top to river bank:
+        const meanderX = Math.sin(t * Math.PI * 2.5) * 0.45;
+        const meanderZ = Math.cos(t * Math.PI * 2.0) * 0.35;
+
+        const curXCenter = (xc + cfg.xTop) * (1.0 - t) + (xc + cfg.side * 3.85) * t + meanderX;
+        const curZCenter = curZ + meanderZ;
+
+        // Stream width expands as rivulets merge:
+        const curWidth = cfg.width * (0.65 + 0.55 * t);
+
+        // Tangent & cross-vector:
+        const nextT = Math.min(1.0, t + 0.05);
+        const nextZ = cfg.zStart + (cfg.zEnd - cfg.zStart) * nextT;
+        const nextXc = this.terrain.getRiverCenter(nextZ);
+        const nextXCenter = (nextXc + cfg.xTop) * (1.0 - nextT) + (nextXc + cfg.side * 3.85) * nextT;
+        const dir = new THREE.Vector2(nextXCenter - curXCenter, nextZ - curZCenter).normalize();
+        const cross = new THREE.Vector2(-dir.y, dir.x);
+
+        const xL = curXCenter - cross.x * (curWidth * 0.5);
+        const zL = curZCenter - cross.y * (curWidth * 0.5);
+        const yL = this.terrain.getBedHeight(xL, zL) + 0.038; // Raised 3.8 cm: GUARANTEED ZERO CLIPPING!
+
+        const xR = curXCenter + cross.x * (curWidth * 0.5);
+        const zR = curZCenter + cross.y * (curWidth * 0.5);
+        const yR = this.terrain.getBedHeight(xR, zR) + 0.038;
+
+        const baseIdx = s * 2;
+        ptsLeft.push(xL, yL, zL);
+        ptsRight.push(xR, yR, zR);
+        uvs.push(0.0, t, 1.0, t);
+
+        if (s < segs) {
+          indices.push(baseIdx, baseIdx + 1, baseIdx + 2);
+          indices.push(baseIdx + 1, baseIdx + 3, baseIdx + 2);
+        }
+      }
+
+      const streamGeo = new THREE.BufferGeometry();
+      const allVerts = new Float32Array((segs + 1) * 6);
+      for (let s = 0; s <= segs; s++) {
+        allVerts[s * 6] = ptsLeft[s * 3];
+        allVerts[s * 6 + 1] = ptsLeft[s * 3 + 1];
+        allVerts[s * 6 + 2] = ptsLeft[s * 3 + 2];
+        allVerts[s * 6 + 3] = ptsRight[s * 3];
+        allVerts[s * 6 + 4] = ptsRight[s * 3 + 1];
+        allVerts[s * 6 + 5] = ptsRight[s * 3 + 2];
+      }
+      streamGeo.setAttribute("position", new THREE.BufferAttribute(allVerts, 3));
+      streamGeo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+      streamGeo.setIndex(indices);
+      streamGeo.computeVertexNormals();
+
+      const streamMat = new THREE.ShaderMaterial({
+        uniforms: {
+          uWaterNormal: { value: dummyNorm },
+          uFoamTex: { value: dummyFoam },
+          uSunDir: { value: sunDir },
+          uSunColor: { value: sunColor },
+          uTime: { value: 0.0 },
+          uRainIntensity: { value: 0.0 },
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          varying vec3 vWorldPos;
+          varying vec3 vNormal;
+
+          void main() {
+            vUv = uv;
+            vec4 wp = modelMatrix * vec4(position, 1.0);
+            vWorldPos = wp.xyz;
+            vNormal = normalize(mat3(modelMatrix) * normal);
+            gl_Position = projectionMatrix * viewMatrix * wp;
+          }
+        `,
+        fragmentShader: `
+          precision highp float;
+          uniform sampler2D uWaterNormal;
+          uniform sampler2D uFoamTex;
+          uniform vec3 uSunDir;
+          uniform vec3 uSunColor;
+          uniform float uTime;
+          uniform float uRainIntensity;
+
+          varying vec2 vUv;
+          varying vec3 vWorldPos;
+          varying vec3 vNormal;
+
+          void main() {
+            float rainNorm = clamp(uRainIntensity / 50.0, 0.0, 1.0);
+            // In dry weather, a faint crystal mountain brook (0.35); in rain, a roaring torrent (1.0)!
+            float streamIntensity = mix(0.35, 1.0, rainNorm);
+
+            // Fast downhill liquid flow advection (vUv.y -> 1.0 towards river)
+            float flowSpeed = 3.8 + rainNorm * 2.2;
+            vec2 uvFlow1 = vec2(vUv.x * 1.6, vUv.y * 4.0 - uTime * flowSpeed);
+            vec2 uvFlow2 = vec2(vUv.x * 2.4 + 0.35, vUv.y * 7.5 - uTime * (flowSpeed * 1.35));
+
+            vec3 n1 = texture2D(uWaterNormal, uvFlow1).rgb * 2.0 - 1.0;
+            vec3 n2 = texture2D(uWaterNormal, uvFlow2).rgb * 2.0 - 1.0;
+            vec3 nWave = normalize(n1 * 0.6 + n2 * 0.4);
+
+            vec3 N = normalize(vNormal + vec3(nWave.x * 0.28, 0.0, nWave.z * 0.28));
+            vec3 V = normalize(cameraPosition - vWorldPos);
+            vec3 L = normalize(uSunDir);
+            vec3 H = normalize(L + V);
+            vec3 R = reflect(-V, N);
+
+            // Optical Fresnel sky reflection
+            float NdotV = clamp(dot(N, V), 0.0, 1.0);
+            float fresnel = 0.06 + 0.94 * pow(1.0 - NdotV, 3.5);
+            vec3 skyRefl = mix(vec3(0.35, 0.50, 0.65), vec3(0.80, 0.90, 1.0), max(R.y, 0.0));
+
+            // Shallow turquoise liquid body
+            vec3 waterBody = vec3(0.12, 0.32, 0.40);
+            vec3 waterColor = mix(waterBody, skyRefl, fresnel);
+
+            // Dancing sun specular glints on racing waves
+            float NdotH = max(dot(N, H), 0.0);
+            float NdotL = max(dot(N, L), 0.0);
+            float spec = pow(NdotH, 36.0) * 3.5 * fresnel * NdotL;
+            waterColor += uSunColor * spec;
+
+            // Cascading whitewater froth along steps & steep drops
+            float foamNoise = texture2D(uFoamTex, vec2(vUv.x * 2.0, vUv.y * 5.0 - uTime * flowSpeed)).r;
+            float cascadeFoam = smoothstep(0.42, 0.85, foamNoise) * (0.35 + 0.50 * rainNorm);
+
+            // Intense white water splash plume at river entry confluence (vUv.y > 0.82)
+            float riverPlunge = smoothstep(0.80, 0.98, vUv.y) * 0.85;
+            float totalFoam = clamp(cascadeFoam + riverPlunge, 0.0, 1.0);
+            waterColor = mix(waterColor, vec3(0.95, 0.98, 1.0) * (0.85 + 0.35 * NdotL), totalFoam * 0.90);
+
+            // Cross-stream curved natural edge falloff (thick center, soft shore)
+            float crossProfile = sin(vUv.x * 3.14159);
+            float alpha = pow(crossProfile, 0.55) * streamIntensity * 0.92;
+
+            gl_FragColor = vec4(waterColor, alpha);
+          }
+        `,
+        transparent: true,
+        depthWrite: false,
+      });
+
+      const streamMesh = new THREE.Mesh(streamGeo, streamMat);
+      streamMesh.renderOrder = 14;
+      this.streamMeshes.push(streamMesh);
+      this.streamMats.push(streamMat);
+      this.group.add(streamMesh);
+    });
+
+    // =========================================================================
+    // PART 3: 4 PERMANENT NATURAL POOLS (GRAVEL BAR DEPRESSIONS)
+    // =========================================================================
+    PUDDLE_BASINS.forEach((basin) => {
       const xc = this.terrain.getRiverCenter(basin.z);
       const bx = xc + basin.xOffset;
       const bz = basin.z;
 
-      // Calculate bed height at basin center and rim lip
       const bedY = this.terrain.getBedHeight(bx, bz);
       const rimY = bedY + basin.depth;
       this.puddleBaseY.push(bedY);
       this.puddleRimY.push(rimY);
 
-      // Puddle water disc geometry
-      const discGeo = new THREE.CircleGeometry(basin.radius * 0.96, 36);
+      const discGeo = new THREE.CircleGeometry(basin.radius * 0.98, 40);
       discGeo.rotateX(-Math.PI / 2);
 
       const pMat = new THREE.ShaderMaterial({
@@ -148,7 +336,7 @@ export class RiverRunoff {
           uTime: { value: 0.0 },
           uSunDir: { value: sunDir },
           uSunColor: { value: sunColor },
-          uFill: { value: 0.0 }, // 0 = empty, 1 = full
+          uFill: { value: 0.35 }, // Always visible liquid pool!
           uRainIntensity: { value: 0.0 },
         },
         vertexShader: `
@@ -177,8 +365,6 @@ export class RiverRunoff {
           varying vec3 vNormal;
 
           void main() {
-            if (uFill < 0.02) discard;
-
             vec2 p = vUv * 2.0 - 1.0;
             float rDist = length(p);
             if (rDist > 1.0) discard;
@@ -186,39 +372,39 @@ export class RiverRunoff {
             // Concentric raindrop ripples on puddle mirror surface:
             float ripple = 0.0;
             if (uRainIntensity > 0.5) {
-              for (int k = 0; k < 3; k++) {
+              for (int k = 0; k < 4; k++) {
                 float kF = float(k);
-                float tOff = kF * 0.382;
-                float cycle = fract(uTime * 1.6 + tOff);
-                vec2 center = vec2(sin(kF * 4.3 + floor(uTime * 1.6 + tOff)), cos(kF * 6.7 + floor(uTime * 1.6 + tOff))) * 0.40;
+                float tOff = kF * 0.285;
+                float cycle = fract(uTime * 1.8 + tOff);
+                vec2 center = vec2(sin(kF * 4.3 + floor(uTime * 1.8 + tOff)), cos(kF * 6.7 + floor(uTime * 1.8 + tOff))) * 0.45;
                 float d = length(p - center);
-                float wave = sin(d * 38.0 - cycle * 18.0) * exp(-d * 5.0) * (1.0 - cycle);
+                float wave = sin(d * 42.0 - cycle * 20.0) * exp(-d * 5.0) * (1.0 - cycle);
                 ripple += wave;
               }
             }
 
-            vec3 N = normalize(vec3(ripple * 0.12, 1.0, ripple * 0.12));
+            vec3 N = normalize(vec3(ripple * 0.15, 1.0, ripple * 0.15));
             vec3 V = normalize(cameraPosition - vWorldPos);
             vec3 L = normalize(uSunDir);
             vec3 H = normalize(L + V);
             vec3 R = reflect(-V, N);
 
-            // Optical sky reflection
+            // High-contrast mirror sky reflection (pure liquid look)
             float NdotV = clamp(dot(N, V), 0.0, 1.0);
-            float fresnel = 0.04 + 0.96 * pow(1.0 - NdotV, 4.0);
-            vec3 skyRefl = mix(vec3(0.40, 0.52, 0.65), vec3(0.75, 0.86, 0.98), max(R.y, 0.0));
+            float fresnel = 0.05 + 0.95 * pow(1.0 - NdotV, 3.5);
+            vec3 skyRefl = mix(vec3(0.28, 0.42, 0.56), vec3(0.82, 0.92, 1.0), max(R.y, 0.0));
 
-            // Shallow liquid body (translucent clear puddle water)
-            vec3 shallowCol = vec3(0.20, 0.28, 0.32);
+            // Translucent clear puddle shallows
+            vec3 shallowCol = vec3(0.16, 0.30, 0.36);
             vec3 finalColor = mix(shallowCol, skyRefl, fresnel);
 
-            // Sun glints on raindrop ripple crests
+            // Sun glints on ripple crests
             float NdotH = max(dot(N, H), 0.0);
-            float glint = pow(NdotH, 64.0) * 2.2 * fresnel;
+            float glint = pow(NdotH, 64.0) * 3.5 * fresnel;
             finalColor += uSunColor * glint;
 
-            // Soft shoreline edge falloff:
-            float edgeAlpha = smoothstep(1.0, 0.75, rDist) * smoothstep(0.0, 0.20, uFill) * 0.88;
+            // Soft shoreline edge blending
+            float edgeAlpha = smoothstep(1.0, 0.75, rDist) * 0.92;
             gl_FragColor = vec4(finalColor, edgeAlpha);
           }
         `,
@@ -227,23 +413,24 @@ export class RiverRunoff {
       });
 
       const puddleMesh = new THREE.Mesh(discGeo, pMat);
-      puddleMesh.position.set(bx, bedY + 0.01, bz);
+      puddleMesh.position.set(bx, bedY + 0.04, bz);
       puddleMesh.renderOrder = 12;
       this.puddleMeshes.push(puddleMesh);
       this.puddleMats.push(pMat);
       this.group.add(puddleMesh);
 
-      // 3. Setup Overflow Spillway Rivulet (carries runoff from puddle to river edge)
+      // =======================================================================
+      // PART 4: OVERFLOW SPILLWAY CHUTE (CONNECTS PUDDLE TO MAIN RIVER)
+      // =======================================================================
       const riverBankX = xc + (basin.xOffset < 0 ? -3.85 : 3.85);
       const riverZ = bz + 1.8;
       const waterY = this.hydraulics.getWaterHeightAt(riverZ);
 
-      // Create a 2-segment ribbon connecting puddle lip to river edge
-      const spStart = new THREE.Vector3(bx + (basin.xOffset < 0 ? basin.radius * 0.75 : -basin.radius * 0.75), rimY, bz + 0.2);
+      const spStart = new THREE.Vector3(bx + (basin.xOffset < 0 ? basin.radius * 0.80 : -basin.radius * 0.80), rimY + 0.02, bz + 0.2);
       const spEnd = new THREE.Vector3(riverBankX, waterY + 0.02, riverZ);
       const spMid = new THREE.Vector3((spStart.x + spEnd.x) * 0.5, (spStart.y + spEnd.y) * 0.5 + 0.03, (spStart.z + spEnd.z) * 0.5);
 
-      const spWidth = 0.55;
+      const spWidth = 0.85;
       const spGeo = new THREE.BufferGeometry();
       const spPts = [
         spStart.x - spWidth * 0.5, spStart.y, spStart.z,
@@ -266,7 +453,7 @@ export class RiverRunoff {
           uTime: { value: 0.0 },
           uSunDir: { value: sunDir },
           uSunColor: { value: sunColor },
-          uFlowActive: { value: 0.0 }, // 0 = dry, 1 = active stream
+          uRainIntensity: { value: 0.0 },
         },
         vertexShader: `
           varying vec2 vUv;
@@ -286,26 +473,27 @@ export class RiverRunoff {
           uniform float uTime;
           uniform vec3 uSunDir;
           uniform vec3 uSunColor;
-          uniform float uFlowActive;
+          uniform float uRainIntensity;
 
           varying vec2 vUv;
           varying vec3 vWorldPos;
           varying vec3 vNormal;
 
           void main() {
-            if (uFlowActive < 0.02) discard;
+            float rainNorm = clamp(uRainIntensity / 50.0, 0.0, 1.0);
+            float active = mix(0.25, 0.95, rainNorm);
 
-            // Rushing runoff rill waves flowing towards river (vUv.y -> 1.0)
-            float flow = sin(vUv.y * 24.0 - uTime * 6.5) * 0.5 + 0.5;
+            // Fast streaming runoff waves rushing down gravel bar into river
+            float flow = sin(vUv.y * 28.0 - uTime * 6.5) * 0.5 + 0.5;
             float crossShape = sin(vUv.x * 3.14159);
-            float rillAlpha = crossShape * uFlowActive * (0.45 + 0.35 * flow);
+            float rillAlpha = pow(crossShape, 0.6) * active * (0.60 + 0.35 * flow);
 
             vec3 V = normalize(cameraPosition - vWorldPos);
             vec3 L = normalize(uSunDir);
             vec3 H = normalize(L + V);
-            float spec = pow(max(dot(vNormal, H), 0.0), 32.0) * 1.8;
+            float spec = pow(max(dot(vNormal, H), 0.0), 32.0) * 2.2;
 
-            vec3 waterCol = mix(vec3(0.40, 0.55, 0.70), vec3(0.85, 0.95, 1.0), flow * 0.4);
+            vec3 waterCol = mix(vec3(0.35, 0.50, 0.65), vec3(0.88, 0.96, 1.0), flow * 0.5);
             gl_FragColor = vec4(waterCol + uSunColor * spec, rillAlpha);
           }
         `,
@@ -324,12 +512,22 @@ export class RiverRunoff {
   setRainIntensity(intensity: number) {
     this.rainIntensity = Math.max(0, Math.min(80, intensity));
     this.terrain.material.uniforms.uRainIntensity.value = this.rainIntensity;
+
+    this.streamMats.forEach((mat) => {
+      mat.uniforms.uRainIntensity.value = this.rainIntensity;
+    });
+    this.puddleMats.forEach((mat) => {
+      mat.uniforms.uRainIntensity.value = this.rainIntensity;
+    });
+    this.spillwayMats.forEach((mat) => {
+      mat.uniforms.uRainIntensity.value = this.rainIntensity;
+    });
   }
 
   update(dt: number, cameraPos: THREE.Vector3, simTime: number) {
     const clampedDt = Math.min(dt, 0.033);
 
-    // 1. Update Falling Rain Streaks
+    // 1. Advance Rain Streaks
     const rainNormalized = this.rainIntensity / 65.0;
     this.rainMat.uniforms.uRainAlpha.value = Math.min(1.0, rainNormalized);
 
@@ -344,7 +542,6 @@ export class RiverRunoff {
         pos[i3 + 1] += vel[i3 + 1] * clampedDt;
         pos[i3 + 2] += vel[i3 + 2] * clampedDt;
 
-        // Wrap around camera bounding volume:
         if (pos[i3 + 1] < -2.0) {
           pos[i3] = cameraPos.x + (Math.random() - 0.5) * 55.0;
           pos[i3 + 1] = cameraPos.y + 16.0 + Math.random() * 12.0;
@@ -356,16 +553,21 @@ export class RiverRunoff {
       this.rainMesh.visible = false;
     }
 
-    // 2. Hydrological Infiltration & Puddle Filling
-    // Filling rate depends on rain intensity; drainage depends on gravel infiltration
-    const fillRate = (this.rainIntensity / 50.0) * 0.18; // fill in ~6-8 seconds in heavy downpour
-    const drainRate = 0.035; // slow natural infiltration when rain stops
+    // 2. Advance 3D Runoff Streams
+    this.streamMats.forEach((mat) => {
+      mat.uniforms.uTime.value = simTime;
+      mat.uniforms.uRainIntensity.value = this.rainIntensity;
+    });
+
+    // 3. Hydrological Infiltration & Puddle Elevation
+    const fillRate = (this.rainIntensity / 50.0) * 0.22;
+    const drainRate = 0.04;
 
     PUDDLE_BASINS.forEach((basin, idx) => {
       if (this.rainIntensity > 0.5) {
         this.puddleFills[idx] = Math.min(1.0, this.puddleFills[idx] + fillRate * clampedDt);
       } else {
-        this.puddleFills[idx] = Math.max(0.0, this.puddleFills[idx] - drainRate * clampedDt);
+        this.puddleFills[idx] = Math.max(0.35, this.puddleFills[idx] - drainRate * clampedDt);
       }
 
       const fill = this.puddleFills[idx];
@@ -374,23 +576,17 @@ export class RiverRunoff {
       pMat.uniforms.uFill.value = fill;
       pMat.uniforms.uRainIntensity.value = this.rainIntensity;
 
-      // Physically elevate the puddle water surface as it fills
       const baseY = this.puddleBaseY[idx];
-      const rimY = this.puddleRimY[idx];
-      const currentWaterY = baseY + 0.01 + fill * (basin.depth - 0.01);
+      const currentWaterY = baseY + 0.02 + fill * (basin.depth - 0.02);
       this.puddleMeshes[idx].position.y = currentWaterY;
 
-      // Overflow Spillway Rivulet: active when puddle is > 65% full and spilling over rim
       const spMat = this.spillwayMats[idx];
-      const spillFlow = Math.max(0, (fill - 0.65) / 0.35);
       spMat.uniforms.uTime.value = simTime;
-      spMat.uniforms.uFlowActive.value = spillFlow;
+      spMat.uniforms.uRainIntensity.value = this.rainIntensity;
     });
 
-    // 3. Hillslope Catchment Runoff Swell (adds dynamic inflow to river discharge Q)
-    // 0 mm/h -> 0 m³/s; 25 mm/h -> +10 m³/s; 65 mm/h -> +28 m³/s
+    // 4. Catchment Runoff River Swell
     const targetRainQ = (this.rainIntensity / 65.0) * 28.0;
-    // Catchment concentration hydrograph lag:
     this.currentRainQ += (targetRainQ - this.currentRainQ) * Math.min(clampedDt * 0.35, 0.08);
   }
 }
