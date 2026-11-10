@@ -20,18 +20,18 @@ export class RiverFoamDrift {
     this.hydraulics = hydraulics;
     this.rocks = rocks;
 
-    // Disc / squashed sphere for floating foam clumps
-    const geo = new THREE.CylinderGeometry(0.18, 0.18, 0.03, 8);
+    // Disc for floating foam clumps - large enough to clearly track visually
+    const geo = new THREE.CylinderGeometry(0.24, 0.24, 0.04, 10);
     const mat = new THREE.MeshBasicMaterial({
-      color: 0xf0fdf4,
+      color: 0xffffff,
       transparent: true,
-      opacity: 0.88,
+      opacity: 0.95,
       depthWrite: false,
     });
 
     this.mesh = new THREE.InstancedMesh(geo, mat, this.maxParticles);
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.mesh.renderOrder = 12;
+    this.mesh.renderOrder = 14;
 
     this.xOffset = new Float32Array(this.maxParticles);
     this.zPos = new Float32Array(this.maxParticles);
@@ -42,12 +42,11 @@ export class RiverFoamDrift {
     // Seed foam clumps distributed along entire 80m river corridor
     for (let i = 0; i < this.maxParticles; i++) {
       this.zPos[i] = -39.0 + (i / this.maxParticles) * 78.0 + (Math.random() - 0.5) * 1.5;
-      // Normal distribution toward center channel
       const u = (Math.random() - 0.5) + (Math.random() - 0.5);
       this.xOffset[i] = u * 2.8;
-      this.baseScale[i] = 0.5 + Math.random() * 0.9;
+      this.baseScale[i] = 0.75 + Math.random() * 1.25;
       this.rot[i] = Math.random() * Math.PI * 2.0;
-      this.spinSpeed[i] = (Math.random() - 0.5) * 2.5;
+      this.spinSpeed[i] = (Math.random() - 0.5) * 3.0;
     }
   }
 
@@ -60,26 +59,22 @@ export class RiverFoamDrift {
       const xc = this.hydraulics.getRiverCenter(z);
       const worldX = xc + xOff;
 
-      // 1. Physical Velocity from Saint-Venant Solver
       let v = this.hydraulics.getVelocityAt(worldX, z);
 
-      // Check for boulder interactions
+      // Check for boulder collisions & wakes
       for (const b of boulders) {
         const dx = worldX - b.center.x;
         const dz = z - b.center.z;
         const dist = Math.hypot(dx, dz);
 
-        // Boulder deflection around flanks
-        if (dist < b.radius + 0.3) {
-          xOff += Math.sign(dx || 0.1) * 3.5 * dt;
-          v *= 0.5;
+        if (dist < b.radius + 0.35) {
+          xOff += Math.sign(dx || 0.1) * 4.0 * dt;
+          v *= 0.45;
         }
 
-        // Leeward eddy wake: behind boulder
-        if (dz > 0.1 && dz < b.radius * 3.2 && Math.abs(dx) < b.radius * 1.1) {
-          // Foam gets trapped and slowly spins in the eddy
-          v *= 0.25;
-          this.rot[i] += 4.5 * dt;
+        if (dz > 0.1 && dz < b.radius * 3.5 && Math.abs(dx) < b.radius * 1.15) {
+          v *= 0.22;
+          this.rot[i] += 5.5 * dt;
         }
       }
 
@@ -87,7 +82,6 @@ export class RiverFoamDrift {
       z += v * dt;
       this.rot[i] += this.spinSpeed[i] * dt;
 
-      // Wrap around when reaching downstream exit
       if (z > 39.5) {
         z = -39.5 + Math.random() * 2.0;
         const u = (Math.random() - 0.5) + (Math.random() - 0.5);
@@ -97,21 +91,19 @@ export class RiverFoamDrift {
       this.zPos[i] = z;
       this.xOffset[i] = xOff;
 
-      // Place exactly on dynamic water surface
       const finalXc = this.hydraulics.getRiverCenter(z);
       const waterY = this.hydraulics.getWaterHeightAt(z);
 
-      // Standing wave dynamic heave
       const st = this.hydraulics.getStationAtZ(z);
-      const waveHeave = Math.sin(z * 1.4) * (st.head * 0.12);
+      const waveHeave = Math.sin(z * 1.4) * (st.head * 0.15);
 
-      this.dummy.position.set(finalXc + xOff, waterY + 0.02 + waveHeave, z);
+      this.dummy.position.set(finalXc + xOff, waterY + 0.045 + waveHeave, z);
       this.dummy.rotation.set(0, this.rot[i], 0);
 
-      // Scale stretched in flow direction proportionally to speed (motion blur elongation)
-      const speedStretch = Math.min(2.5, 1.0 + v * 0.18);
+      // Elongate in flow direction with speed
+      const speedStretch = Math.min(3.5, 1.2 + v * 0.28);
       const s = this.baseScale[i];
-      this.dummy.scale.set(s * 0.85, s * 0.5, s * speedStretch);
+      this.dummy.scale.set(s * 0.9, s * 0.5, s * speedStretch);
       this.dummy.updateMatrix();
 
       this.mesh.setMatrixAt(i, this.dummy.matrix);
