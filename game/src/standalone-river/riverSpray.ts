@@ -39,7 +39,7 @@ function generateSpraySpriteTexture(size = 64): THREE.DataTexture {
 }
 
 export class RiverSpray {
-  readonly maxParticles = 1400;
+  readonly maxParticles = 4200;
   readonly mesh: THREE.Points;
   private geo: THREE.BufferGeometry;
   private mat: THREE.ShaderMaterial;
@@ -96,8 +96,8 @@ export class RiverSpray {
         void main() {
           vColor = aColor;
           vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-          // Tangible, clearly visible spray scale (6 to 65 pixels across typical viewing distances)
-          gl_PointSize = clamp(aSize * (1200.0 / -mvPos.z), 3.0, 65.0);
+          // Tangible, clearly visible spray scale (4 to 75 pixels across typical viewing distances)
+          gl_PointSize = clamp(aSize * (1250.0 / -mvPos.z), 3.0, 75.0);
           gl_Position = projectionMatrix * mvPos;
         }
       `,
@@ -114,7 +114,7 @@ export class RiverSpray {
 
           // Sparkling liquid sun glint on droplet surface:
           vec2 p = gl_PointCoord * 2.0 - 1.0;
-          float glint = pow(max(0.0, 1.0 - length(p - vec2(0.25, 0.25)) * 2.2), 3.0) * 1.6;
+          float glint = pow(max(0.0, 1.0 - length(p - vec2(0.25, 0.25)) * 2.2), 3.0) * 1.8;
           col.rgb += vec3(glint) * col.a;
 
           gl_FragColor = col;
@@ -149,66 +149,102 @@ export class RiverSpray {
         const isMist = Math.random() < 0.20; // 80% sparkling ballistic droplets, 20% soft mist
         type[i] = isMist ? 1 : 0;
 
-        // 80% of spray spawns around boulders; 20% spawns on supercritical rapid crests
-        if (Math.random() < 0.80 && boulders.length > 0) {
+        const spawnRoll = Math.random();
+        if (spawnRoll < 0.80 && boulders.length > 0) {
           const b = boulders[Math.floor(Math.random() * boulders.length)];
           const st = this.hydraulics.getStationAtZ(b.center.z);
           const localV = st.velocity;
 
-          const angle = (Math.random() - 0.5) * Math.PI * 0.85;
-          const rDist = b.radius * (0.78 + Math.random() * 0.22);
-          pos[i3] = b.center.x + Math.sin(angle) * rDist;
-          pos[i3 + 1] = st.waterY + 0.06 + Math.random() * 0.08;
-          pos[i3 + 2] = b.center.z - Math.cos(angle) * rDist;
+          if (spawnRoll < 0.60) {
+            // Zone A: Upstream Bow Impact (water violently crashing into boulder's upstream face)
+            const angle = (Math.random() - 0.5) * Math.PI * 0.85;
+            const rDist = b.radius * (0.75 + Math.random() * 0.25);
+            pos[i3] = b.center.x + Math.sin(angle) * rDist;
+            pos[i3 + 1] = st.waterY + 0.05 + Math.random() * 0.08;
+            pos[i3 + 2] = b.center.z - Math.cos(angle) * rDist; // Upstream face (-z)
 
-          const outDirX = Math.sin(angle);
+            const outDirX = Math.sin(angle);
 
-          if (isMist) {
-            // Soft billowy mist puff
-            vel[i3] = outDirX * (localV * 0.35);
-            vel[i3 + 1] = 0.80 + Math.random() * 0.90;
-            vel[i3 + 2] = localV * (0.70 + Math.random() * 0.40);
-            const totalLife = 0.60 + Math.random() * 0.45;
-            life[i] = totalLife;
-            maxLife[i] = totalLife;
-            size[i] = 0.35; // Clearly visible on screen
-            col[i4] = 0.95;
-            col[i4 + 1] = 0.98;
-            col[i4 + 2] = 1.0;
-            col[i4 + 3] = 0.0;
+            if (isMist) {
+              // Soft billowy mist puff rising over rock
+              vel[i3] = outDirX * (localV * 0.35);
+              vel[i3 + 1] = 0.90 + Math.random() * 1.10;
+              vel[i3 + 2] = localV * (0.75 + Math.random() * 0.40);
+              const totalLife = 0.60 + Math.random() * 0.45;
+              life[i] = totalLife;
+              maxLife[i] = totalLife;
+              size[i] = 0.35;
+              col[i4] = 0.95;
+              col[i4 + 1] = 0.98;
+              col[i4 + 2] = 1.0;
+              col[i4 + 3] = 0.0;
+            } else {
+              // Energetic ballistic droplet curling over boulder
+              vel[i3] = outDirX * localV * (0.45 + Math.random() * 0.50);
+              vel[i3 + 1] = 1.80 + Math.random() * 2.50; // Flight time ~ 0.4 - 0.7s
+              vel[i3 + 2] = localV * (0.95 + Math.random() * 0.50);
+              const totalLife = 0.38 + Math.random() * 0.32;
+              life[i] = totalLife;
+              maxLife[i] = totalLife;
+              size[i] = 0.12 + Math.random() * 0.09;
+              col[i4] = 1.0;
+              col[i4 + 1] = 1.0;
+              col[i4 + 2] = 1.0;
+              col[i4 + 3] = 0.95;
+            }
           } else {
-            // Ballistic Spray Droplet: energetic arc curling over boulder (15 to 45 cm rise)
-            vel[i3] = outDirX * localV * (0.40 + Math.random() * 0.50);
-            vel[i3 + 1] = 1.60 + Math.random() * 2.20; // Flight time ~ 0.4 - 0.6s
-            vel[i3 + 2] = localV * (0.90 + Math.random() * 0.50);
-            const totalLife = 0.35 + Math.random() * 0.30;
-            life[i] = totalLife;
-            maxLife[i] = totalLife;
-            size[i] = 0.12 + Math.random() * 0.08; // 6 to 12 pixels on screen
-            col[i4] = 1.0;
-            col[i4 + 1] = 1.0;
-            col[i4 + 2] = 1.0;
-            col[i4 + 3] = 0.95;
+            // Zone B: Downstream Wake Rooster Tail & Turbulent Boil (streams recombining behind boulder)
+            const wakeOffsetZ = b.radius * (0.35 + Math.random() * 1.40);
+            const wakeOffsetX = (Math.random() - 0.5) * (b.radius * 1.20);
+            pos[i3] = b.center.x + wakeOffsetX;
+            pos[i3 + 1] = st.waterY + 0.04 + Math.random() * 0.06;
+            pos[i3 + 2] = b.center.z + wakeOffsetZ;
+
+            if (isMist) {
+              vel[i3] = wakeOffsetX * 1.2;
+              vel[i3 + 1] = 0.85 + Math.random() * 0.90;
+              vel[i3 + 2] = localV * (0.65 + Math.random() * 0.35);
+              const totalLife = 0.55 + Math.random() * 0.40;
+              life[i] = totalLife;
+              maxLife[i] = totalLife;
+              size[i] = 0.32;
+              col[i4] = 0.95;
+              col[i4 + 1] = 0.98;
+              col[i4 + 2] = 1.0;
+              col[i4 + 3] = 0.0;
+            } else {
+              vel[i3] = (Math.random() - 0.5) * 1.6;
+              vel[i3 + 1] = 1.40 + Math.random() * 1.90;
+              vel[i3 + 2] = localV * (0.80 + Math.random() * 0.45);
+              const totalLife = 0.32 + Math.random() * 0.28;
+              life[i] = totalLife;
+              maxLife[i] = totalLife;
+              size[i] = 0.11 + Math.random() * 0.07;
+              col[i4] = 1.0;
+              col[i4 + 1] = 1.0;
+              col[i4 + 2] = 1.0;
+              col[i4 + 3] = 0.92;
+            }
           }
         } else {
-          // Rapid chute crest spray
+          // Zone C: Rapid Chute Crests & Supercritical Waves
           const zRand = -32.0 + Math.random() * 64.0;
           const st = this.hydraulics.getStationAtZ(zRand);
           const localV = st.velocity;
           const xc = this.hydraulics.getRiverCenter(zRand);
 
-          pos[i3] = xc + (Math.random() - 0.5) * 3.5;
+          pos[i3] = xc + (Math.random() - 0.5) * 3.8;
           pos[i3 + 1] = st.waterY + 0.04 + Math.random() * 0.06;
           pos[i3 + 2] = zRand;
 
-          vel[i3] = (Math.random() - 0.5) * (localV * 0.40);
-          vel[i3 + 1] = 1.40 + Math.random() * 1.80;
-          vel[i3 + 2] = localV * (1.05 + Math.random() * 0.40);
+          vel[i3] = (Math.random() - 0.5) * (localV * 0.45);
+          vel[i3 + 1] = 1.50 + Math.random() * 2.00;
+          vel[i3 + 2] = localV * (1.05 + Math.random() * 0.45);
 
-          const totalLife = 0.30 + Math.random() * 0.25;
+          const totalLife = 0.32 + Math.random() * 0.28;
           life[i] = totalLife;
           maxLife[i] = totalLife;
-          size[i] = 0.10 + Math.random() * 0.06;
+          size[i] = 0.11 + Math.random() * 0.07;
           col[i4] = 1.0;
           col[i4 + 1] = 1.0;
           col[i4 + 2] = 1.0;

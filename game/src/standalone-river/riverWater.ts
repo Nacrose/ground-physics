@@ -78,81 +78,113 @@ function generateWaterNormalMap(size = 512): THREE.DataTexture {
 }
 
 function generateFoamTexture(size = 256): THREE.DataTexture {
-  const p = new Uint8Array(512);
-  let seed = 1337;
+  const perm = new Uint8Array(512);
+  let seed = 424242;
   const rand = () => {
     seed = (seed * 16807) % 2147483647;
     return (seed - 1) / 2147483646;
   };
-  const perm = Array.from({ length: 256 }, (_, i) => i);
+  for (let i = 0; i < 256; i++) perm[i] = i;
   for (let i = 255; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1));
     [perm[i], perm[j]] = [perm[j], perm[i]];
   }
-  for (let i = 0; i < 512; i++) p[i] = perm[i & 255];
+  for (let i = 0; i < 512; i++) perm[i] = perm[i & 255];
 
-  const fade = (t: number) => t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
-  const lerp = (a: number, b: number, t: number) => a + t * (b - a);
-  const grad = (hash: number, x: number, y: number) => {
-    const h = hash & 7;
-    const u = h < 4 ? x : y;
-    const v = h < 4 ? y : x;
-    return ((h & 1) ? -u : u) + ((h & 2) ? -2.0 * v : 2.0 * v);
-  };
+  const gradX = new Float32Array(256);
+  const gradY = new Float32Array(256);
+  for (let i = 0; i < 256; i++) {
+    const th = (i / 256) * Math.PI * 2;
+    gradX[i] = Math.cos(th);
+    gradY[i] = Math.sin(th);
+  }
 
-  const noise = (x: number, y: number, freq: number) => {
-    const X0 = ((Math.floor(x) % freq) + freq) % freq;
-    const Y0 = ((Math.floor(y) % freq) + freq) % freq;
-    const X1 = (X0 + 1) % freq;
-    const Y1 = (Y0 + 1) % freq;
+  function perlin2D(x: number, y: number, period: number): number {
+    const X0 = ((Math.floor(x) % period) + period) % period;
+    const Y0 = ((Math.floor(y) % period) + period) % period;
+    const X1 = (X0 + 1) % period;
+    const Y1 = (Y0 + 1) % period;
     const xf = x - Math.floor(x);
     const yf = y - Math.floor(y);
-    const u = fade(xf);
-    const v = fade(yf);
-    const aa = p[p[X0] + Y0];
-    const ab = p[p[X0] + Y1];
-    const ba = p[p[X1] + Y0];
-    const bb = p[p[X1] + Y1];
-    return lerp(
-      lerp(grad(aa, xf, yf), grad(ba, xf - 1.0, yf), u),
-      lerp(grad(ab, xf, yf - 1.0), grad(bb, xf - 1.0, yf - 1.0), u),
-      v
-    );
-  };
+    const u = xf * xf * xf * (xf * (xf * 6.0 - 15.0) + 10.0);
+    const v = yf * yf * yf * (yf * (yf * 6.0 - 15.0) + 10.0);
+
+    const g00 = perm[perm[X0] + Y0];
+    const g10 = perm[perm[X1] + Y0];
+    const g01 = perm[perm[X0] + Y1];
+    const g11 = perm[perm[X1] + Y1];
+
+    const d00 = gradX[g00] * xf + gradY[g00] * yf;
+    const d10 = gradX[g10] * (xf - 1.0) + gradY[g10] * yf;
+    const d01 = gradX[g01] * xf + gradY[g01] * (yf - 1.0);
+    const d11 = gradX[g11] * (xf - 1.0) + gradY[g11] * (yf - 1.0);
+
+    const x1 = d00 + u * (d10 - d00);
+    const x2 = d01 + u * (d11 - d01);
+    return x1 + v * (x2 - x1);
+  }
 
   const numPixels = size * size;
   const data = new Uint8Array(numPixels * 4);
+
+  const rawR = new Float32Array(numPixels);
+  const rawG = new Float32Array(numPixels);
+  const rawB = new Float32Array(numPixels);
+
+  let minR = 1e9, maxR = -1e9;
+  let minG = 1e9, maxG = -1e9;
+  let minB = 1e9, maxB = -1e9;
 
   for (let y = 0; y < size; y++) {
     const v = y / size;
     for (let x = 0; x < size; x++) {
       const u = x / size;
-      const idx = (y * size + x) * 4;
+      const idx = y * size + x;
 
-      // 4 Octaves with Golden Ratio rotation to eliminate ANY grid or net pattern:
-      const n1 = noise(u * 4.0, v * 4.0, 4) * 0.5 + 0.5;
-      const u2 = u * 0.798 - v * 0.602;
-      const v2 = u * 0.602 + v * 0.798;
-      const n2 = noise(u2 * 8.0, v2 * 8.0, 8) * 0.5 + 0.5;
-      const u3 = u * 0.292 - v * 0.956;
-      const v3 = u * 0.956 + v * 0.292;
-      const n3 = noise(u3 * 16.0, v3 * 16.0, 16) * 0.5 + 0.5;
-      const n4 = noise(u * 32.0, v * 32.0, 32) * 0.5 + 0.5;
+      // Strictly periodic fluid domain warping (turbulent curl displacement):
+      const wU = perlin2D(u * 4.0, v * 4.0, 4) * 0.14;
+      const wV = perlin2D(u * 4.0 + 2.3, v * 4.0 + 1.7, 4) * 0.14;
+      const uw = u + wU;
+      const vw = v + wV;
 
-      // Channel R: Billowy aerated whitecap heads (organic fractal turbulence)
-      const whitecaps = Math.pow(n1 * 0.45 + n2 * 0.32 + n3 * 0.16 + n4 * 0.07, 1.25);
-      // Channel G: High-frequency effervescent bubble flecks
-      const bubbles = Math.pow(n2 * 0.40 + n3 * 0.38 + n4 * 0.22, 1.15);
-      // Channel B: Lacy curl turbulence (ragged fractal tear lines)
-      const lace = Math.pow(Math.abs(n2 - n3) * 2.0, 0.85);
-      // Channel A: 3D normal relief
-      const height = Math.min(1.0, whitecaps * 0.65 + bubbles * 0.35);
+      const n1 = perlin2D(uw * 4.0, vw * 4.0, 4) * 0.5 + 0.5;
+      const n2 = perlin2D(uw * 8.0, vw * 8.0, 8) * 0.5 + 0.5;
+      const n3 = perlin2D(uw * 16.0, vw * 16.0, 16) * 0.5 + 0.5;
+      const n4 = perlin2D(u * 32.0, v * 32.0, 32) * 0.5 + 0.5;
 
-      data[idx] = Math.round(whitecaps * 255);
-      data[idx + 1] = Math.round(bubbles * 255);
-      data[idx + 2] = Math.round(lace * 255);
-      data[idx + 3] = Math.round(height * 255);
+      // Channel R: Billowy whitecap froth heads (fluffy aerated cloud billows)
+      const froth = Math.pow(n1 * 0.46 + n2 * 0.34 + n3 * 0.15 + n4 * 0.05, 1.25);
+
+      // Channel G: Lacy filamentary streamers / veins (ridge noise on warped coordinates)
+      const vein = Math.pow(1.0 - Math.abs(2.0 * (n2 * 0.62 + n3 * 0.38) - 1.0), 1.5);
+
+      // Channel B: Micro-bubble effervescence speckle
+      const bubbles = Math.pow(n3 * 0.55 + n4 * 0.45, 1.4);
+
+      rawR[idx] = froth;
+      rawG[idx] = vein;
+      rawB[idx] = bubbles;
+
+      if (froth < minR) minR = froth; if (froth > maxR) maxR = froth;
+      if (vein < minG) minG = vein; if (vein > maxG) maxG = vein;
+      if (bubbles < minB) minB = bubbles; if (bubbles > maxB) maxB = bubbles;
     }
+  }
+
+  const rangeR = maxR - minR || 1.0;
+  const rangeG = maxG - minG || 1.0;
+  const rangeB = maxB - minB || 1.0;
+
+  for (let i = 0; i < numPixels; i++) {
+    const rNorm = (rawR[i] - minR) / rangeR;
+    const gNorm = (rawG[i] - minG) / rangeG;
+    const bNorm = (rawB[i] - minB) / rangeB;
+    const aNorm = Math.min(1.0, rNorm * 0.65 + gNorm * 0.35);
+
+    data[i * 4] = Math.round(rNorm * 255);
+    data[i * 4 + 1] = Math.round(gNorm * 255);
+    data[i * 4 + 2] = Math.round(bNorm * 255);
+    data[i * 4 + 3] = Math.round(aNorm * 255);
   }
 
   const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat, THREE.UnsignedByteType);
@@ -401,16 +433,23 @@ export class RiverWater {
             if (bR <= 0.05) continue;
 
             vec2 dXZ = vWorldPos.xz - bPos.xz;
+            float distToBoulder = length(dXZ);
             float downstreamDist = vWorldPos.z - bPos.z;
             float crossDist = abs(dXZ.x);
 
-            // Expanding V-wake trailing behind boulder
-            if (downstreamDist > 0.0 && downstreamDist < bR * 5.0) {
-              float wakeSpread = bR * (0.8 + (downstreamDist / (bR * 5.0)) * 0.9);
+            // 1. Upstream Bow Shock (rushing water slamming into upstream face of boulder)
+            if (downstreamDist <= 0.20 && distToBoulder < bR * 1.40) {
+              float bowIntensity = smoothstep(bR * 1.40, bR * 0.85, distToBoulder);
+              wakeFoam += bowIntensity * 1.45;
+            }
+
+            // 2. Expanding V-wake trailing behind boulder
+            if (downstreamDist > 0.0 && downstreamDist < bR * 6.5) {
+              float wakeSpread = bR * (0.85 + (downstreamDist / (bR * 6.5)) * 1.25);
               if (crossDist < wakeSpread) {
-                float zFactor = 1.0 - (downstreamDist / (bR * 5.0));
+                float zFactor = 1.0 - (downstreamDist / (bR * 6.5));
                 float xFactor = 1.0 - (crossDist / wakeSpread);
-                wakeFoam += zFactor * xFactor * 0.90;
+                wakeFoam += zFactor * xFactor * 1.15;
               }
             }
           }
@@ -502,52 +541,57 @@ export class RiverWater {
           float sharpGlint = pow(NdotH, 110.0) * 3.2 * fresnel * NdotL;
           finalColor += uSunColor * (broadSpec + sharpGlint);
 
-          // PHOTOREALISTIC CELLULAR VORONOI FOAM & WHITE-WATER RAPIDS:
+          // PHOTOREALISTIC CELLULAR FOAM & WHITE-WATER RAPIDS:
           if (uFoamScale > 0.01) {
             // Physical hydraulic triggers:
-            float froudeFoam = smoothstep(0.75, 1.25, localFroude) * 1.25;
-            float speedFoam = smoothstep(2.5, 5.5, localVelocity) * 0.95;
-            float cascadeFoam = smoothstep(0.35, 0.08, depth) * smoothstep(1.4, 3.8, localVelocity) * smoothstep(0.02, 0.10, depth);
+            float froudeFoam = smoothstep(0.78, 1.22, localFroude) * 1.35;
+            float speedFoam = smoothstep(2.6, 5.2, localVelocity) * 1.05;
+            float cascadeFoam = smoothstep(0.38, 0.08, depth) * smoothstep(1.4, 3.6, localVelocity) * smoothstep(0.015, 0.10, depth);
             float hydFoam = max(froudeFoam, max(speedFoam, cascadeFoam));
-            float rapidTrigger = clamp(hydFoam + wakeFoam * 1.45, 0.0, 1.8);
+            float rapidTrigger = clamp(hydFoam + wakeFoam * 1.5, 0.0, 2.0);
 
-            // Multi-scale organic fractal foam sampling (downstream advection with lateral drift):
-            vec2 fUv1 = vec2(latDrift1 * 0.45, flowDist1 * 0.40);
-            vec2 fUv2 = mat2(0.92, -0.39, 0.39, 0.92) * vec2(latDrift2 * 1.15, flowDist2 * 1.05);
+            // Streamwise anisotropic foam UVs:
+            // Cross-stream coordinates are scaled higher (0.85 and 1.60) than downstream coordinates (0.28 and 0.48)
+            // This naturally stretches foam features along river streamlines into elegant, flowing streamers!
+            vec2 fUv1 = vec2(latDrift1 * 0.85, flowDist1 * 0.28);
+            vec2 fUv2 = vec2(latDrift2 * 1.60, flowDist2 * 0.48);
 
             vec4 foam1 = texture2D(uFoamTex, fUv1);
             vec4 foam2 = texture2D(uFoamTex, fUv2);
 
-            // Fluffy whitecap heads (organic fractal turbulence) + micro bubbles:
-            float whitecaps = foam1.r * 0.60 + foam2.g * 0.40;
-            float streamers = foam1.b * 0.50 + foam2.b * 0.50;
+            // Active boiling whitecap aeration head (channel R):
+            float frothField = foam1.r * 0.65 + foam2.r * 0.35;
+            float rapidFroth = smoothstep(0.70 - rapidTrigger * 0.48, 1.08 - rapidTrigger * 0.28, frothField) * min(rapidTrigger * 1.1, 1.4);
 
-            // Organic boiling whitecaps: fluffy foam crests in rapids and boulder wakes
-            float rapidFroth = smoothstep(0.68 - rapidTrigger * 0.50, 1.05 - rapidTrigger * 0.25, whitecaps) * min(rapidTrigger, 1.25);
+            // Passive trailing lacy streamers & bubble rafts (channel G):
+            float lacyField = foam1.g * 0.55 + foam2.g * 0.45;
+            float streamerTrigger = clamp(wakeFoam * 1.25 + hydFoam * 0.55, 0.0, 1.6);
+            float trailingStreamers = smoothstep(0.58 - streamerTrigger * 0.40, 1.02 - streamerTrigger * 0.20, lacyField) * smoothstep(0.04, 0.40, depth);
 
-            // Trailing wake streamers dissolving downstream
-            float trailingStreamers = smoothstep(0.38, 0.85, streamers) * smoothstep(0.06, 0.60, wakeFoam) * smoothstep(0.04, 0.35, depth);
+            // Effervescent micro-bubble flecks around edges (channel B):
+            float microBubbles = (foam1.b * 0.5 + foam2.b * 0.5) * smoothstep(0.12, 0.80, rapidTrigger) * 0.40;
 
-            float totalFoam = clamp((rapidFroth * 0.88 + trailingStreamers * 0.45) * uFoamScale, 0.0, 1.0);
+            float totalFoam = clamp((rapidFroth * 0.85 + trailingStreamers * 0.55 + microBubbles * 0.35) * uFoamScale, 0.0, 1.0);
 
-            if (totalFoam > 0.01) {
+            if (totalFoam > 0.008) {
               // 3D micro-relief normal perturbation
-              vec3 foamN = normalize(N + vec3((foam1.a - 0.5) * 0.22, 0.0, (foam2.a - 0.5) * 0.22) * totalFoam);
+              vec3 foamN = normalize(N + vec3((foam1.a - 0.5) * 0.30, 0.0, (foam2.a - 0.5) * 0.30) * totalFoam);
               float foamNdotL = max(dot(foamN, L), 0.0);
               float foamNdotH = max(dot(foamN, H), 0.0);
 
               // Soft forward-scattered sunlight & ambient alpine sky fill:
-              vec3 ambientSky = mix(vec3(0.50, 0.68, 0.82), vec3(0.85, 0.92, 0.98), max(foamN.y, 0.0));
-              vec3 directSun = uSunColor * (0.80 + 0.28 * foamNdotL);
-              vec3 litFoam = ambientSky * 0.50 + directSun * 0.60;
+              vec3 ambientSky = mix(vec3(0.50, 0.68, 0.82), vec3(0.88, 0.94, 0.99), max(foamN.y, 0.0));
+              vec3 directSun = uSunColor * (0.85 + 0.30 * foamNdotL);
+              vec3 litFoam = ambientSky * 0.45 + directSun * 0.65;
 
-              // Sparkling sun glints on aerated bubble crests:
-              float foamGlint = pow(foamNdotH, 32.0) * 1.6 * fresnel * NdotL;
+              // Crisp sparkling sun glints on aerated micro-bubbles:
+              float foamGlint = pow(foamNdotH, 36.0) * 1.8 * fresnel * NdotL;
               litFoam += uSunColor * foamGlint;
 
-              // Translucent subsurface blending (max 76% opacity):
-              // Preserves the luminous turquoise river body beneath the foam!
-              float foamOpacity = smoothstep(0.03, 0.75, totalFoam) * 0.76;
+              // Translucent subsurface blending:
+              // Dense core whitecaps reach 92% opacity, while trailing streamers remain translucent (20-60%)
+              // letting the luminous turquoise river body glow through!
+              float foamOpacity = smoothstep(0.015, 0.80, totalFoam) * mix(0.65, 0.92, totalFoam);
               finalColor = mix(finalColor, litFoam, foamOpacity);
             }
           }
