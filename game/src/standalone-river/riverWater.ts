@@ -78,6 +78,48 @@ function generateWaterNormalMap(size = 512): THREE.DataTexture {
 }
 
 function generateFoamTexture(size = 256): THREE.DataTexture {
+  const p = new Uint8Array(512);
+  let seed = 1337;
+  const rand = () => {
+    seed = (seed * 16807) % 2147483647;
+    return (seed - 1) / 2147483646;
+  };
+  const perm = Array.from({ length: 256 }, (_, i) => i);
+  for (let i = 255; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [perm[i], perm[j]] = [perm[j], perm[i]];
+  }
+  for (let i = 0; i < 512; i++) p[i] = perm[i & 255];
+
+  const fade = (t: number) => t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+  const lerp = (a: number, b: number, t: number) => a + t * (b - a);
+  const grad = (hash: number, x: number, y: number) => {
+    const h = hash & 7;
+    const u = h < 4 ? x : y;
+    const v = h < 4 ? y : x;
+    return ((h & 1) ? -u : u) + ((h & 2) ? -2.0 * v : 2.0 * v);
+  };
+
+  const noise = (x: number, y: number, freq: number) => {
+    const X0 = ((Math.floor(x) % freq) + freq) % freq;
+    const Y0 = ((Math.floor(y) % freq) + freq) % freq;
+    const X1 = (X0 + 1) % freq;
+    const Y1 = (Y0 + 1) % freq;
+    const xf = x - Math.floor(x);
+    const yf = y - Math.floor(y);
+    const u = fade(xf);
+    const v = fade(yf);
+    const aa = p[p[X0] + Y0];
+    const ab = p[p[X0] + Y1];
+    const ba = p[p[X1] + Y0];
+    const bb = p[p[X1] + Y1];
+    return lerp(
+      lerp(grad(aa, xf, yf), grad(ba, xf - 1.0, yf), u),
+      lerp(grad(ab, xf, yf - 1.0), grad(bb, xf - 1.0, yf - 1.0), u),
+      v
+    );
+  };
+
   const numPixels = size * size;
   const data = new Uint8Array(numPixels * 4);
 
@@ -87,28 +129,28 @@ function generateFoamTexture(size = 256): THREE.DataTexture {
       const u = x / size;
       const idx = (y * size + x) * 4;
 
-      // 1. Fine multi-octave micro-bubble aeration (millimeter-scale bubbles, zero hexagon polygons)
-      const a1 = Math.sin(u * 72.0 + Math.sin(v * 54.0) * 1.8) * 0.5 + 0.5;
-      const a2 = Math.cos(v * 96.0 + Math.cos(u * 72.0) * 2.2) * 0.5 + 0.5;
-      const a3 = Math.sin((u + v) * 140.0) * 0.5 + 0.5;
-      const micro = Math.pow(a1 * 0.45 + a2 * 0.35 + a3 * 0.20, 1.3);
+      // 4 Octaves with Golden Ratio rotation to eliminate ANY grid or net pattern:
+      const n1 = noise(u * 4.0, v * 4.0, 4) * 0.5 + 0.5;
+      const u2 = u * 0.798 - v * 0.602;
+      const v2 = u * 0.602 + v * 0.798;
+      const n2 = noise(u2 * 8.0, v2 * 8.0, 8) * 0.5 + 0.5;
+      const u3 = u * 0.292 - v * 0.956;
+      const v3 = u * 0.956 + v * 0.292;
+      const n3 = noise(u3 * 16.0, v3 * 16.0, 16) * 0.5 + 0.5;
+      const n4 = noise(u * 32.0, v * 32.0, 32) * 0.5 + 0.5;
 
-      // 2. Filamentary lace strings (stretched organic filaments trailing downstream)
-      const f1 = Math.sin(u * 28.0 + Math.sin(v * 40.0) * 2.8);
-      const f2 = Math.cos(v * 56.0 - Math.sin(u * 42.0) * 2.2);
-      const lace = Math.pow(Math.max(0.0, f1 * f2), 0.70);
+      // Channel R: Billowy aerated whitecap heads (organic fractal turbulence)
+      const whitecaps = Math.pow(n1 * 0.45 + n2 * 0.32 + n3 * 0.16 + n4 * 0.07, 1.25);
+      // Channel G: High-frequency effervescent bubble flecks
+      const bubbles = Math.pow(n2 * 0.40 + n3 * 0.38 + n4 * 0.22, 1.15);
+      // Channel B: Lacy curl turbulence (ragged fractal tear lines)
+      const lace = Math.pow(Math.abs(n2 - n3) * 2.0, 0.85);
+      // Channel A: 3D normal relief
+      const height = Math.min(1.0, whitecaps * 0.65 + bubbles * 0.35);
 
-      // 3. Flocculent foam clumps (soft natural clustering)
-      const c1 = Math.sin(u * 14.0) * Math.cos(v * 14.0) * 0.5 + 0.5;
-      const c2 = Math.sin(u * 24.0 + v * 20.0) * 0.5 + 0.5;
-      const clump = c1 * 0.60 + c2 * 0.40;
-
-      // 4. Height relief for grazing sunlight shading
-      const height = Math.min(1.0, micro * 0.65 + lace * 0.35);
-
-      data[idx] = Math.round(micro * 255);
-      data[idx + 1] = Math.round(lace * 255);
-      data[idx + 2] = Math.round(clump * 255);
+      data[idx] = Math.round(whitecaps * 255);
+      data[idx + 1] = Math.round(bubbles * 255);
+      data[idx + 2] = Math.round(lace * 255);
       data[idx + 3] = Math.round(height * 255);
     }
   }
@@ -469,24 +511,24 @@ export class RiverWater {
             float hydFoam = max(froudeFoam, max(speedFoam, cascadeFoam));
             float rapidTrigger = clamp(hydFoam + wakeFoam * 1.45, 0.0, 1.8);
 
-            // Multi-scale high-frequency aerated froth sampling (downstream advection with lateral drift):
-            vec2 fUv1 = vec2(latDrift1 * 2.5, flowDist1 * 2.2);
-            vec2 fUv2 = mat2(0.966, -0.259, 0.259, 0.966) * vec2(latDrift2 * 4.8, flowDist2 * 4.4);
+            // Multi-scale organic fractal foam sampling (downstream advection with lateral drift):
+            vec2 fUv1 = vec2(latDrift1 * 0.45, flowDist1 * 0.40);
+            vec2 fUv2 = mat2(0.92, -0.39, 0.39, 0.92) * vec2(latDrift2 * 1.15, flowDist2 * 1.05);
 
             vec4 foam1 = texture2D(uFoamTex, fUv1);
             vec4 foam2 = texture2D(uFoamTex, fUv2);
 
-            // Fine micro-bubble aeration + trailing filamentary lace:
-            float microFroth = foam1.r * 0.55 + foam2.r * 0.45;
-            float filamentLace = foam1.g * 0.60 + foam2.b * 0.40;
+            // Fluffy whitecap heads (organic fractal turbulence) + micro bubbles:
+            float whitecaps = foam1.r * 0.60 + foam2.g * 0.40;
+            float streamers = foam1.b * 0.50 + foam2.b * 0.50;
 
-            // Churning rapid whitecaps (smooth, non-blocky aeration density)
-            float rapidFroth = smoothstep(0.42, 0.92, microFroth * (0.55 + rapidTrigger * 0.85)) * smoothstep(0.12, 0.65, rapidTrigger);
+            // Organic boiling whitecaps: fluffy foam crests in rapids and boulder wakes
+            float rapidFroth = smoothstep(0.68 - rapidTrigger * 0.50, 1.05 - rapidTrigger * 0.25, whitecaps) * min(rapidTrigger, 1.25);
 
-            // Trailing wake filaments behind boulders & rapid crests
-            float trailingStreamers = filamentLace * smoothstep(0.08, 0.55, wakeFoam) * smoothstep(0.04, 0.35, depth);
+            // Trailing wake streamers dissolving downstream
+            float trailingStreamers = smoothstep(0.38, 0.85, streamers) * smoothstep(0.06, 0.60, wakeFoam) * smoothstep(0.04, 0.35, depth);
 
-            float totalFoam = clamp((rapidFroth * 0.82 + trailingStreamers * 0.48) * uFoamScale, 0.0, 1.0);
+            float totalFoam = clamp((rapidFroth * 0.88 + trailingStreamers * 0.45) * uFoamScale, 0.0, 1.0);
 
             if (totalFoam > 0.01) {
               // 3D micro-relief normal perturbation

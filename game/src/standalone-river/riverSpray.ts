@@ -19,10 +19,10 @@ function generateSpraySpriteTexture(size = 64): THREE.DataTexture {
         data[idx + 3] = 0;
         continue;
       }
-      // Razor-sharp liquid droplet nucleus (r < 0.22) + soft exponential droplet sheen
-      const core = Math.max(0, 1.0 - (r / 0.22) * (r / 0.22));
-      const halo = Math.exp(-r * r * 7.5);
-      const alpha = Math.min(1.0, core * 0.95 + halo * 0.45);
+      // Glowing liquid droplet nucleus (r < 0.45) with soft natural falloff
+      const core = Math.max(0, 1.0 - (r / 0.45) * (r / 0.45));
+      const halo = Math.exp(-r * r * 4.2);
+      const alpha = Math.min(1.0, core * 0.90 + halo * 0.55);
 
       data[idx] = 255;
       data[idx + 1] = 255;
@@ -39,7 +39,7 @@ function generateSpraySpriteTexture(size = 64): THREE.DataTexture {
 }
 
 export class RiverSpray {
-  readonly maxParticles = 1200;
+  readonly maxParticles = 1400;
   readonly mesh: THREE.Points;
   private geo: THREE.BufferGeometry;
   private mat: THREE.ShaderMaterial;
@@ -96,8 +96,8 @@ export class RiverSpray {
         void main() {
           vColor = aColor;
           vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-          // Crisp realistic droplet scale: clamped tightly to 1.5 - 28.0 pixels max (no giant balloons!)
-          gl_PointSize = clamp(aSize * (460.0 / -mvPos.z), 1.5, 28.0);
+          // Tangible, clearly visible spray scale (6 to 65 pixels across typical viewing distances)
+          gl_PointSize = clamp(aSize * (1200.0 / -mvPos.z), 3.0, 65.0);
           gl_Position = projectionMatrix * mvPos;
         }
       `,
@@ -110,11 +110,11 @@ export class RiverSpray {
         void main() {
           vec4 tex = texture2D(uSprite, gl_PointCoord);
           vec4 col = vColor * tex;
-          if (col.a < 0.015) discard;
+          if (col.a < 0.012) discard;
 
           // Sparkling liquid sun glint on droplet surface:
           vec2 p = gl_PointCoord * 2.0 - 1.0;
-          float glint = pow(max(0.0, 1.0 - length(p - vec2(0.25, 0.25)) * 2.4), 3.5) * 1.8;
+          float glint = pow(max(0.0, 1.0 - length(p - vec2(0.25, 0.25)) * 2.2), 3.0) * 1.6;
           col.rgb += vec3(glint) * col.a;
 
           gl_FragColor = col;
@@ -146,74 +146,91 @@ export class RiverSpray {
       const i4 = i * 4;
 
       if (life[i] <= 0) {
-        if (boulders.length > 0) {
+        const isMist = Math.random() < 0.20; // 80% sparkling ballistic droplets, 20% soft mist
+        type[i] = isMist ? 1 : 0;
+
+        // 80% of spray spawns around boulders; 20% spawns on supercritical rapid crests
+        if (Math.random() < 0.80 && boulders.length > 0) {
           const b = boulders[Math.floor(Math.random() * boulders.length)];
           const st = this.hydraulics.getStationAtZ(b.center.z);
+          const localV = st.velocity;
 
-          // Kinetic energy threshold: scales with velocity head Hv = v^2 / 2g and Froude
-          const spawnThreshold = Math.min(0.92, 0.18 + st.head * 0.40 + (st.froude > 1.0 ? 0.35 : 0.0));
+          const angle = (Math.random() - 0.5) * Math.PI * 0.85;
+          const rDist = b.radius * (0.78 + Math.random() * 0.22);
+          pos[i3] = b.center.x + Math.sin(angle) * rDist;
+          pos[i3 + 1] = st.waterY + 0.06 + Math.random() * 0.08;
+          pos[i3 + 2] = b.center.z - Math.cos(angle) * rDist;
 
-          if (Math.random() < spawnThreshold) {
-            const localV = st.velocity;
-            const isMist = Math.random() < 0.15; // 85% crisp ballistic droplets, 15% faint mist
-            type[i] = isMist ? 1 : 0;
+          const outDirX = Math.sin(angle);
 
-            // Semicircular bow-shock spawn wrapping around the upstream prow and flanks of the boulder
-            const angle = (Math.random() - 0.5) * Math.PI * 0.85;
-            const rDist = b.radius * (0.80 + Math.random() * 0.22);
-            pos[i3] = b.center.x + Math.sin(angle) * rDist;
-            pos[i3 + 1] = st.waterY + 0.02 + Math.random() * 0.06;
-            pos[i3 + 2] = b.center.z - Math.cos(angle) * rDist;
-
-            const outDirX = Math.sin(angle);
-
-            if (isMist) {
-              // Fine Hovering Mist Haze: subtle, faint, stays low to river surface
-              vel[i3] = outDirX * (localV * 0.28);
-              vel[i3 + 1] = 0.40 + Math.random() * 0.60;
-              vel[i3 + 2] = localV * (0.75 + Math.random() * 0.35);
-              const totalLife = 0.50 + Math.random() * 0.40;
-              life[i] = totalLife;
-              maxLife[i] = totalLife;
-              size[i] = 0.08;
-              col[i4] = 0.95;
-              col[i4 + 1] = 0.98;
-              col[i4 + 2] = 1.0;
-              col[i4 + 3] = 0.0;
-            } else {
-              // Ballistic Spray Droplet: realistic low-trajectory splash crest (10 to 30 cm rise max!)
-              vel[i3] = outDirX * localV * (0.35 + Math.random() * 0.45);
-              vel[i3 + 1] = 0.90 + Math.random() * 1.50; // Max height = vy^2/2g ~ 15-28 cm
-              vel[i3 + 2] = localV * (0.85 + Math.random() * 0.45); // Swept downstream by raging torrent
-              const totalLife = 0.22 + Math.random() * 0.24;
-              life[i] = totalLife;
-              maxLife[i] = totalLife;
-              size[i] = 0.035 + Math.random() * 0.035; // Tiny 3.5 - 7 cm droplets (2 - 5 px on screen)
-              col[i4] = 1.0;
-              col[i4 + 1] = 1.0;
-              col[i4 + 2] = 1.0;
-              col[i4 + 3] = 0.85;
-            }
+          if (isMist) {
+            // Soft billowy mist puff
+            vel[i3] = outDirX * (localV * 0.35);
+            vel[i3 + 1] = 0.80 + Math.random() * 0.90;
+            vel[i3 + 2] = localV * (0.70 + Math.random() * 0.40);
+            const totalLife = 0.60 + Math.random() * 0.45;
+            life[i] = totalLife;
+            maxLife[i] = totalLife;
+            size[i] = 0.35; // Clearly visible on screen
+            col[i4] = 0.95;
+            col[i4 + 1] = 0.98;
+            col[i4 + 2] = 1.0;
+            col[i4 + 3] = 0.0;
+          } else {
+            // Ballistic Spray Droplet: energetic arc curling over boulder (15 to 45 cm rise)
+            vel[i3] = outDirX * localV * (0.40 + Math.random() * 0.50);
+            vel[i3 + 1] = 1.60 + Math.random() * 2.20; // Flight time ~ 0.4 - 0.6s
+            vel[i3 + 2] = localV * (0.90 + Math.random() * 0.50);
+            const totalLife = 0.35 + Math.random() * 0.30;
+            life[i] = totalLife;
+            maxLife[i] = totalLife;
+            size[i] = 0.12 + Math.random() * 0.08; // 6 to 12 pixels on screen
+            col[i4] = 1.0;
+            col[i4 + 1] = 1.0;
+            col[i4 + 2] = 1.0;
+            col[i4 + 3] = 0.95;
           }
+        } else {
+          // Rapid chute crest spray
+          const zRand = -32.0 + Math.random() * 64.0;
+          const st = this.hydraulics.getStationAtZ(zRand);
+          const localV = st.velocity;
+          const xc = this.hydraulics.getRiverCenter(zRand);
+
+          pos[i3] = xc + (Math.random() - 0.5) * 3.5;
+          pos[i3 + 1] = st.waterY + 0.04 + Math.random() * 0.06;
+          pos[i3 + 2] = zRand;
+
+          vel[i3] = (Math.random() - 0.5) * (localV * 0.40);
+          vel[i3 + 1] = 1.40 + Math.random() * 1.80;
+          vel[i3 + 2] = localV * (1.05 + Math.random() * 0.40);
+
+          const totalLife = 0.30 + Math.random() * 0.25;
+          life[i] = totalLife;
+          maxLife[i] = totalLife;
+          size[i] = 0.10 + Math.random() * 0.06;
+          col[i4] = 1.0;
+          col[i4 + 1] = 1.0;
+          col[i4 + 2] = 1.0;
+          col[i4 + 3] = 0.90;
         }
       } else {
         life[i] -= clampedDt;
         const progress = Math.max(0, 1.0 - life[i] / maxLife[i]); // 0 -> 1
 
         if (type[i] === 1) {
-          // Subtle Mist Physics:
-          vel[i3 + 1] -= 1.8 * clampedDt;
-          vel[i3] *= (1.0 - 2.2 * clampedDt);
-          vel[i3 + 2] *= (1.0 - 1.6 * clampedDt);
+          // Mist Physics:
+          vel[i3 + 1] -= 1.2 * clampedDt;
+          vel[i3] *= (1.0 - 1.8 * clampedDt);
+          vel[i3 + 2] *= (1.0 - 1.2 * clampedDt);
 
           pos[i3] += vel[i3] * clampedDt;
           pos[i3 + 1] += vel[i3 + 1] * clampedDt;
           pos[i3 + 2] += vel[i3 + 2] * clampedDt;
 
-          // Expand puff gently: 0.08m -> 0.26m (subtle vapor puff, NOT 1-meter smoke ball)
-          size[i] = 0.08 + progress * 0.18;
-          // Faint, delicate bell-curve alpha: max 16% opacity
-          const bellAlpha = Math.sin(progress * Math.PI) * 0.16;
+          // Expand puff: 0.35m -> 0.75m
+          size[i] = 0.35 + progress * 0.40;
+          const bellAlpha = Math.sin(progress * Math.PI) * 0.28;
           col[i4 + 3] = bellAlpha;
         } else {
           // Ballistic Splash Droplet Physics:
@@ -223,12 +240,12 @@ export class RiverSpray {
           pos[i3 + 1] += vel[i3 + 1] * clampedDt;
           pos[i3 + 2] += vel[i3 + 2] * clampedDt;
 
-          col[i4 + 3] = Math.max(0, (life[i] / maxLife[i]) * 0.85);
+          col[i4 + 3] = Math.max(0, (life[i] / maxLife[i]) * 0.95);
 
-          // Kill droplet immediately upon plunging back into river surface or striking terrain
+          // Kill droplet upon plunging back into river surface or striking terrain
           const waterY = this.hydraulics.getWaterHeightAt(pos[i3 + 2]);
           const groundY = this.terrain ? this.terrain.getBedHeight(pos[i3], pos[i3 + 2]) : -999.0;
-          const hitY = Math.max(waterY - 0.02, groundY);
+          const hitY = Math.max(waterY - 0.03, groundY);
           if (pos[i3 + 1] < hitY && vel[i3 + 1] < 0) {
             life[i] = -1.0;
             pos[i3 + 1] = -999.0;
