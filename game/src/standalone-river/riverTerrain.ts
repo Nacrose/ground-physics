@@ -254,6 +254,21 @@ export class RiverTerrain {
       }
     }
 
+    // Carve physical 3D erosion gullies into valley bedrock along the 12 runoff paths
+    if (d > 3.8) {
+      const rillStations = [-32.0, -20.0, -8.0, 4.0, 16.0, 28.0];
+      for (const rz of rillStations) {
+        const dz = Math.abs(z - rz);
+        const rillRadius = 0.85;
+        if (dz < rillRadius) {
+          const t = dz / rillRadius;
+          const bankRamp = Math.min(1.0, (d - 3.8) / 2.0);
+          const gullyDip = 0.11 * (1.0 - t * t) * bankRamp;
+          bedDepth -= gullyDip;
+        }
+      }
+    }
+
     // Micro-rock roughness along channel
     const rockNoise = Math.sin(x * 1.5) * Math.cos(z * 1.5) * 0.08;
 

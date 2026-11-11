@@ -59,18 +59,37 @@ export class RiverRunoff {
   private rainPos: Float32Array;
   private rainVel: Float32Array;
 
-  // 2. Physical Gradient-Traced Runoff Streams (Manning Hydrodynamics)
+  // 2. True 3D Volumetric Runoff Flumes (7-point cross section, parabolic camber, rock-sealing skirts)
   private streamMeshes: THREE.Mesh[] = [];
   private streamMats: THREE.ShaderMaterial[] = [];
 
-  // 3. Permanent Puddles (Depression Basins on Gravel Bars)
+  // 3. 3D Kinetic Confluence Splash Droplet System (1,200 physical droplets)
+  readonly maxConfluenceParticles = 1200;
+  private confluenceMesh: THREE.InstancedMesh;
+  private confPos: Float32Array;
+  private confVel: Float32Array;
+  private confLife: Float32Array;
+  private confMaxLife: Float32Array;
+  private confOriginIdx: Int32Array;
+  private confluencePoints: { pos: THREE.Vector3; dir: THREE.Vector3; speed: number }[] = [];
+
+  // 4. 3D Rain Ground Impact Splashes (Directive: Rainfall becomes 3D water upon ground impact)
+  readonly maxGroundSplashes = 600;
+  private groundSplashMesh: THREE.InstancedMesh;
+  private gPos: Float32Array;
+  private gVel: Float32Array;
+  private gLife: Float32Array;
+  private gMaxLife: Float32Array;
+  private nextGroundSplashIdx = 0;
+
+  // 5. Permanent Puddles (Depression Basins on Gravel Bars)
   puddleFills: number[] = [0.35, 0.40, 0.35, 0.40];
   private puddleMeshes: THREE.Mesh[] = [];
   private puddleMats: THREE.ShaderMaterial[] = [];
   private puddleBaseY: number[] = [];
   private puddleRimY: number[] = [];
 
-  // 4. Overflow Spillway Chutes
+  // 6. Overflow Spillway Chutes
   private spillwayMeshes: THREE.Mesh[] = [];
   private spillwayMats: THREE.ShaderMaterial[] = [];
 
@@ -133,10 +152,10 @@ export class RiverRunoff {
         uniform float uRainAlpha;
 
         void main() {
-          vec4 tex = texture2D(uStreakTex, gl_PointCoord);
-          float a = tex.a * uRainAlpha * 0.65;
-          if (a < 0.015) discard;
-          gl_FragColor = vec4(0.88, 0.94, 1.0, a);
+          vec4 c = texture2D(uStreakTex, gl_PointCoord);
+          float alpha = c.a * uRainAlpha * 0.70;
+          if (alpha < 0.01) discard;
+          gl_FragColor = vec4(c.rgb, alpha);
         }
       `,
       transparent: true,
@@ -150,7 +169,7 @@ export class RiverRunoff {
     this.group.add(this.rainMesh);
 
     // =========================================================================
-    // PART 2: 12 PHYSICAL GRADIENT-TRACED RUNOFF STREAMS (MANNING EQUATION)
+    // PART 2: 12 TRUE 3D VOLUMETRIC RUNOFF FLUMES (PARABOLIC MENISCUS & SKIRTS)
     // =========================================================================
     const releaseConfigs: { startX: number; startZ: number; side: number }[] = [];
     RIDGE_RELEASE_Z.forEach((z) => {
@@ -162,17 +181,37 @@ export class RiverRunoff {
     });
 
     releaseConfigs.forEach((cfg) => {
-      // 1. Numerically trace the physical steepest descent path down the terrain:
+      // 1. Numerically trace physical steepest descent down the carved mountain gully:
       const path = this.traceStreamline(cfg.startX, cfg.startZ);
       if (path.length < 4) return;
 
-      // 2. Build 3D continuous fluid ribbon from traced physical points:
+      // Record confluence point for 3D kinetic plunge splash system:
+      const endPt = path[path.length - 1];
+      const prevPt = path[path.length - 2];
+      const plungeDir = new THREE.Vector3(endPt.x - prevPt.x, endPt.y - prevPt.y, endPt.z - prevPt.z).normalize();
+      this.confluencePoints.push({
+        pos: new THREE.Vector3(endPt.x, endPt.y, endPt.z),
+        dir: plungeDir,
+        speed: endPt.velocity,
+      });
+
+      // 2. Build 3D Volumetric Flume (7 lateral vertices per cross-section):
+      // j=0: Left bedrock anchor skirt
+      // j=1: Left waterline
+      // j=2: Quarter bank
+      // j=3: Center crest (8.5cm deep parabolic camber)
+      // j=4: Three-quarter bank
+      // j=5: Right waterline
+      // j=6: Right bedrock anchor skirt
       const segs = path.length - 1;
-      const ptsLeft: number[] = [];
-      const ptsRight: number[] = [];
-      const uvs: number[] = [];
-      const vels: number[] = [];
-      const slopes: number[] = [];
+      const numLateral = 7;
+      const totalVerts = (segs + 1) * numLateral;
+
+      const positions = new Float32Array(totalVerts * 3);
+      const uvs = new Float32Array(totalVerts * 2);
+      const vels = new Float32Array(totalVerts);
+      const slopes = new Float32Array(totalVerts);
+      const crests = new Float32Array(totalVerts);
       const indices: number[] = [];
 
       const totalDist = path[segs].dist || 1.0;
@@ -189,44 +228,92 @@ export class RiverRunoff {
           dir = new THREE.Vector2(pt.x - path[s - 1].x, pt.z - path[s - 1].z).normalize();
         }
         const cross = new THREE.Vector2(-dir.y, dir.x);
-
         const halfW = pt.width * 0.5;
+
+        // Lateral points across width:
+        // Column 0: Left anchor (embedded into bedrock)
+        // Column 1: Left bank waterline
+        // Column 2: Mid-left (parabolic rise)
+        // Column 3: Center crest (maximum depth)
+        // Column 4: Mid-right (parabolic rise)
+        // Column 5: Right bank waterline
+        // Column 6: Right anchor (embedded into bedrock)
+        const latCols: { x: number; y: number; z: number; u: number; crest: number }[] = [];
+
+        // Left coordinates
         const xL = pt.x - cross.x * halfW;
         const zL = pt.z - cross.y * halfW;
+        const yBedL = this.terrain.getBedHeight(xL, zL);
+
+        // Right coordinates
         const xR = pt.x + cross.x * halfW;
         const zR = pt.z + cross.y * halfW;
+        const yBedR = this.terrain.getBedHeight(xR, zR);
 
-        // Elevation strictly conforms to bed height + physical depth layer
-        const yL = this.terrain.getBedHeight(xL, zL) + 0.038;
-        const yR = this.terrain.getBedHeight(xR, zR) + 0.038;
+        // Center coordinates
+        const xC = pt.x;
+        const zC = pt.z;
+        const yBedC = this.terrain.getBedHeight(xC, zC);
 
-        const baseIdx = s * 2;
-        ptsLeft.push(xL, yL, zL);
-        ptsRight.push(xR, yR, zR);
-        uvs.push(0.0, vNorm, 1.0, vNorm);
-        vels.push(pt.velocity, pt.velocity);
-        slopes.push(pt.slope, pt.slope);
+        // Mid-left & mid-right coordinates
+        const xML = pt.x - cross.x * (halfW * 0.5);
+        const zML = pt.z - cross.y * (halfW * 0.5);
+        const yBedML = this.terrain.getBedHeight(xML, zML);
 
+        const xMR = pt.x + cross.x * (halfW * 0.5);
+        const zMR = pt.z + cross.y * (halfW * 0.5);
+        const yBedMR = this.terrain.getBedHeight(xMR, zMR);
+
+        // 0: Left skirt anchor
+        latCols.push({ x: xL, y: yBedL - 0.05, z: zL, u: 0.0, crest: 0.0 });
+        // 1: Left waterline
+        latCols.push({ x: xL, y: yBedL + 0.022, z: zL, u: 0.0, crest: 0.0 });
+        // 2: Mid-left surface
+        latCols.push({ x: xML, y: yBedML + 0.060, z: zML, u: 0.25, crest: 0.75 });
+        // 3: Center crest (8.5cm deep parabolic camber)
+        latCols.push({ x: xC, y: yBedC + 0.085, z: zC, u: 0.5, crest: 1.0 });
+        // 4: Mid-right surface
+        latCols.push({ x: xMR, y: yBedMR + 0.060, z: zMR, u: 0.75, crest: 0.75 });
+        // 5: Right waterline
+        latCols.push({ x: xR, y: yBedR + 0.022, z: zR, u: 1.0, crest: 0.0 });
+        // 6: Right skirt anchor
+        latCols.push({ x: xR, y: yBedR - 0.05, z: zR, u: 1.0, crest: 0.0 });
+
+        for (let j = 0; j < numLateral; j++) {
+          const vIdx = s * numLateral + j;
+          const col = latCols[j];
+          positions[vIdx * 3] = col.x;
+          positions[vIdx * 3 + 1] = col.y;
+          positions[vIdx * 3 + 2] = col.z;
+
+          uvs[vIdx * 2] = col.u;
+          uvs[vIdx * 2 + 1] = vNorm;
+
+          vels[vIdx] = pt.velocity;
+          slopes[vIdx] = pt.slope;
+          crests[vIdx] = col.crest;
+        }
+
+        // Indices connecting row s to row s+1:
         if (s < segs) {
-          indices.push(baseIdx, baseIdx + 1, baseIdx + 2);
-          indices.push(baseIdx + 1, baseIdx + 3, baseIdx + 2);
+          for (let j = 0; j < numLateral - 1; j++) {
+            const v0 = s * numLateral + j;
+            const v1 = s * numLateral + j + 1;
+            const v2 = (s + 1) * numLateral + j;
+            const v3 = (s + 1) * numLateral + j + 1;
+
+            indices.push(v0, v2, v1);
+            indices.push(v1, v2, v3);
+          }
         }
       }
 
       const streamGeo = new THREE.BufferGeometry();
-      const allVerts = new Float32Array((segs + 1) * 6);
-      for (let s = 0; s <= segs; s++) {
-        allVerts[s * 6] = ptsLeft[s * 3];
-        allVerts[s * 6 + 1] = ptsLeft[s * 3 + 1];
-        allVerts[s * 6 + 2] = ptsLeft[s * 3 + 2];
-        allVerts[s * 6 + 3] = ptsRight[s * 3];
-        allVerts[s * 6 + 4] = ptsRight[s * 3 + 1];
-        allVerts[s * 6 + 5] = ptsRight[s * 3 + 2];
-      }
-      streamGeo.setAttribute("position", new THREE.BufferAttribute(allVerts, 3));
-      streamGeo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
-      streamGeo.setAttribute("aVelocity", new THREE.Float32BufferAttribute(vels, 1));
-      streamGeo.setAttribute("aSlope", new THREE.Float32BufferAttribute(slopes, 1));
+      streamGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      streamGeo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+      streamGeo.setAttribute("aVelocity", new THREE.BufferAttribute(vels, 1));
+      streamGeo.setAttribute("aSlope", new THREE.BufferAttribute(slopes, 1));
+      streamGeo.setAttribute("aCrest", new THREE.BufferAttribute(crests, 1));
       streamGeo.setIndex(indices);
       streamGeo.computeVertexNormals();
 
@@ -239,24 +326,49 @@ export class RiverRunoff {
           uTime: { value: 0.0 },
           uRainIntensity: { value: 0.0 },
         },
+        side: THREE.DoubleSide,
         vertexShader: `
           attribute float aVelocity;
           attribute float aSlope;
+          attribute float aCrest;
 
           varying vec2 vUv;
           varying vec3 vWorldPos;
           varying vec3 vNormal;
           varying float vVelocity;
           varying float vSlope;
+          varying float vCrest;
+
+          uniform float uTime;
+          uniform float uRainIntensity;
 
           void main() {
             vUv = uv;
             vVelocity = aVelocity;
             vSlope = aSlope;
+            vCrest = aCrest;
 
-            vec4 wp = modelMatrix * vec4(position, 1.0);
+            vec3 pos = position;
+
+            // Real 3D Physical Vertex Wave Displacement:
+            // High velocity water on steep slopes physically churns and heaves in 3D:
+            float rainNorm = clamp(uRainIntensity / 50.0, 0.0, 1.0);
+            float localSpeed = aVelocity * (0.85 + rainNorm * 0.45);
+
+            float surgePhase = uv.y * 36.0 - uTime * (localSpeed * 1.6);
+            float waveAmp = clamp(aSlope * 0.08, 0.012, 0.055) * aCrest * (0.7 + rainNorm * 0.6);
+            float surge = sin(surgePhase) * waveAmp;
+            float chop = cos(uv.y * 72.0 - uTime * (localSpeed * 2.8)) * (waveAmp * 0.35);
+
+            pos.y += (surge + chop);
+
+            vec4 wp = modelMatrix * vec4(pos, 1.0);
             vWorldPos = wp.xyz;
-            vNormal = normalize(mat3(modelMatrix) * normal);
+
+            vec3 norm = normal;
+            norm.y += cos(surgePhase) * waveAmp * 3.5;
+            vNormal = normalize(mat3(modelMatrix) * norm);
+
             gl_Position = projectionMatrix * viewMatrix * wp;
           }
         `,
@@ -274,13 +386,13 @@ export class RiverRunoff {
           varying vec3 vNormal;
           varying float vVelocity;
           varying float vSlope;
+          varying float vCrest;
 
           void main() {
             float rainNorm = clamp(uRainIntensity / 50.0, 0.0, 1.0);
-            // In dry weather, a clear mountain brook; in rain, a roaring torrent!
             float streamIntensity = mix(0.40, 1.0, rainNorm);
 
-            // Flow advection is DRIVEN DIRECTLY by the physical Manning velocity vVelocity:
+            // Physical Manning wave advection:
             float localSpeed = vVelocity * (0.85 + rainNorm * 0.45);
             vec2 uvFlow1 = vec2(vUv.x * 1.6, vUv.y * 4.2 - uTime * localSpeed);
             vec2 uvFlow2 = vec2(vUv.x * 2.4 + 0.35, vUv.y * 7.5 - uTime * (localSpeed * 1.35));
@@ -295,34 +407,30 @@ export class RiverRunoff {
             vec3 H = normalize(L + V);
             vec3 R = reflect(-V, N);
 
-            // Optical Fresnel sky reflection
+            // Optical Fresnel reflection:
             float NdotV = clamp(dot(N, V), 0.0, 1.0);
             float fresnel = 0.06 + 0.94 * pow(1.0 - NdotV, 3.5);
             vec3 skyRefl = mix(vec3(0.35, 0.50, 0.65), vec3(0.80, 0.90, 1.0), max(R.y, 0.0));
 
-            // Shallow turquoise liquid body
-            vec3 waterBody = vec3(0.12, 0.32, 0.40);
+            // Deep turquoise liquid core + translucent banks:
+            vec3 waterBody = mix(vec3(0.18, 0.38, 0.46), vec3(0.10, 0.26, 0.34), vCrest);
             vec3 waterColor = mix(waterBody, skyRefl, fresnel);
 
-            // Dancing sun specular glints on racing waves
+            // Dancing specular glints:
             float NdotH = max(dot(N, H), 0.0);
             float NdotL = max(dot(N, L), 0.0);
             float spec = pow(NdotH, 36.0) * 3.5 * fresnel * NdotL;
             waterColor += uSunColor * spec;
 
-            // Physical Supercritical Froth:
-            // Where bed slope is steep (vSlope > 0.22), Froude number Fr > 1.0, generating whitecaps!
+            // Physical Supercritical Aeration (whitecap foam on steep drops Fr > 1):
             float foamNoise = texture2D(uFoamTex, vec2(vUv.x * 2.0, vUv.y * 5.0 - uTime * localSpeed)).r;
             float steepDropFoam = smoothstep(0.18, 0.35, vSlope) * smoothstep(0.35, 0.75, foamNoise) * (0.45 + 0.55 * rainNorm);
-
-            // Boiling white water splash plume at river entry confluence (vUv.y > 0.82)
             float riverPlunge = smoothstep(0.80, 0.98, vUv.y) * 0.85;
             float totalFoam = clamp(steepDropFoam + riverPlunge, 0.0, 1.0);
             waterColor = mix(waterColor, vec3(0.95, 0.98, 1.0) * (0.85 + 0.35 * NdotL), totalFoam * 0.90);
 
-            // Cross-stream natural parabolic profile (thick at center, soft shore)
-            float crossProfile = sin(vUv.x * 3.14159);
-            float alpha = pow(crossProfile, 0.55) * streamIntensity * 0.92;
+            // Alpha transparency: solid 3D water core (92%), smooth translucent banks (72%)
+            float alpha = mix(0.72, 0.94, vCrest) * streamIntensity;
 
             gl_FragColor = vec4(waterColor, alpha);
           }
@@ -339,7 +447,62 @@ export class RiverRunoff {
     });
 
     // =========================================================================
-    // PART 3: 4 PERMANENT NATURAL POOLS (GRAVEL BAR DEPRESSIONS)
+    // PART 3: 3D KINETIC CONFLUENCE SPLASH PARTICLES (1,200 PHYSICAL DROPLETS)
+    // =========================================================================
+    const dropGeo = new THREE.DodecahedronGeometry(0.042, 1);
+    const dropMat = new THREE.MeshStandardMaterial({
+      color: 0xbae6fd,
+      roughness: 0.12,
+      metalness: 0.1,
+      transparent: true,
+      opacity: 0.88,
+    });
+
+    this.confluenceMesh = new THREE.InstancedMesh(dropGeo, dropMat, this.maxConfluenceParticles);
+    this.confluenceMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.confluenceMesh.renderOrder = 22;
+    this.group.add(this.confluenceMesh);
+
+    this.confPos = new Float32Array(this.maxConfluenceParticles * 3);
+    this.confVel = new Float32Array(this.maxConfluenceParticles * 3);
+    this.confLife = new Float32Array(this.maxConfluenceParticles);
+    this.confMaxLife = new Float32Array(this.maxConfluenceParticles);
+    this.confOriginIdx = new Int32Array(this.maxConfluenceParticles);
+
+    for (let i = 0; i < this.maxConfluenceParticles; i++) {
+      this.confOriginIdx[i] = i % Math.max(1, this.confluencePoints.length);
+      this.resetConfluenceParticle(i);
+      this.confLife[i] = Math.random() * this.confMaxLife[i];
+    }
+
+    // =========================================================================
+    // PART 4: 3D RAIN GROUND IMPACT SPLASHES (600 PHYSICAL DROPLETS)
+    // =========================================================================
+    const gDropGeo = new THREE.DodecahedronGeometry(0.035, 1);
+    const gDropMat = new THREE.MeshStandardMaterial({
+      color: 0xdbeafe,
+      roughness: 0.15,
+      metalness: 0.1,
+      transparent: true,
+      opacity: 0.85,
+    });
+
+    this.groundSplashMesh = new THREE.InstancedMesh(gDropGeo, gDropMat, this.maxGroundSplashes);
+    this.groundSplashMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.groundSplashMesh.renderOrder = 23;
+    this.group.add(this.groundSplashMesh);
+
+    this.gPos = new Float32Array(this.maxGroundSplashes * 3);
+    this.gVel = new Float32Array(this.maxGroundSplashes * 3);
+    this.gLife = new Float32Array(this.maxGroundSplashes);
+    this.gMaxLife = new Float32Array(this.maxGroundSplashes);
+
+    for (let i = 0; i < this.maxGroundSplashes; i++) {
+      this.gLife[i] = -1.0; // Inactive until ground collision
+    }
+
+    // =========================================================================
+    // PART 5: 4 PERMANENT NATURAL POOLS (GRAVEL BAR DEPRESSIONS)
     // =========================================================================
     PUDDLE_BASINS.forEach((basin) => {
       const xc = this.terrain.getRiverCenter(basin.z);
@@ -363,8 +526,8 @@ export class RiverRunoff {
           uRainIntensity: { value: 0.0 },
         },
         vertexShader: `
-          varying vec3 vWorldPos;
           varying vec2 vUv;
+          varying vec3 vWorldPos;
           varying vec3 vNormal;
 
           void main() {
@@ -383,18 +546,16 @@ export class RiverRunoff {
           uniform float uFill;
           uniform float uRainIntensity;
 
-          varying vec3 vWorldPos;
           varying vec2 vUv;
+          varying vec3 vWorldPos;
           varying vec3 vNormal;
 
           void main() {
             vec2 p = vUv * 2.0 - 1.0;
             float rDist = length(p);
-            if (rDist > 1.0) discard;
 
-            // Concentric raindrop ripples on puddle mirror surface:
             float ripple = 0.0;
-            if (uRainIntensity > 0.5) {
+            if (uRainIntensity > 0.05) {
               for (int k = 0; k < 4; k++) {
                 float kF = float(k);
                 float tOff = kF * 0.285;
@@ -442,7 +603,7 @@ export class RiverRunoff {
       this.group.add(puddleMesh);
 
       // =======================================================================
-      // PART 4: OVERFLOW SPILLWAY CHUTE (CONNECTS PUDDLE TO MAIN RIVER)
+      // PART 6: OVERFLOW SPILLWAY CHUTE (CONNECTS PUDDLE TO MAIN RIVER)
       // =======================================================================
       const riverBankX = xc + (basin.xOffset < 0 ? -3.85 : 3.85);
       const riverZ = bz + 1.8;
@@ -530,11 +691,47 @@ export class RiverRunoff {
     });
   }
 
-  /**
-   * Numerically integrates the steepest descent streamline along -∇z_bed(x, z).
-   * Computes physical Manning velocity, slope, and drainage accumulation width.
-   */
-  private traceStreamline(startX: number, startZ: number, dtStep = 0.35, maxSteps = 55): StreamPoint[] {
+  private resetConfluenceParticle(i: number) {
+    if (this.confluencePoints.length === 0) return;
+    const oIdx = this.confOriginIdx[i] % this.confluencePoints.length;
+    const cPt = this.confluencePoints[oIdx];
+    const i3 = i * 3;
+
+    // Plunge point at river bank
+    this.confPos[i3] = cPt.pos.x + (Math.random() - 0.5) * 0.40;
+    this.confPos[i3 + 1] = cPt.pos.y + 0.04 + Math.random() * 0.08;
+    this.confPos[i3 + 2] = cPt.pos.z + (Math.random() - 0.5) * 0.40;
+
+    // Ballistic initial velocity: forward into river + upward explosion
+    const fwdSpeed = cPt.speed * (0.45 + Math.random() * 0.55);
+    this.confVel[i3] = cPt.dir.x * fwdSpeed + (Math.random() - 0.5) * 1.4;
+    this.confVel[i3 + 1] = 1.6 + Math.random() * 2.8; // Upward fountain arc
+    this.confVel[i3 + 2] = cPt.dir.z * fwdSpeed + (Math.random() - 0.5) * 1.4;
+
+    this.confMaxLife[i] = 0.28 + Math.random() * 0.42;
+    this.confLife[i] = this.confMaxLife[i];
+  }
+
+  private triggerGroundSplash(x: number, y: number, z: number) {
+    const i = this.nextGroundSplashIdx;
+    this.nextGroundSplashIdx = (this.nextGroundSplashIdx + 1) % this.maxGroundSplashes;
+    const i3 = i * 3;
+
+    this.gPos[i3] = x;
+    this.gPos[i3 + 1] = y + 0.03;
+    this.gPos[i3 + 2] = z;
+
+    // Kinetic 3D splatter arc upon ground impact
+    this.gVel[i3] = (Math.random() - 0.5) * 1.6;
+    this.gVel[i3 + 1] = 1.2 + Math.random() * 1.8;
+    this.gVel[i3 + 2] = (Math.random() - 0.5) * 1.6;
+
+    this.gMaxLife[i] = 0.16 + Math.random() * 0.18;
+    this.gLife[i] = this.gMaxLife[i];
+  }
+
+  // Numerical gradient-descent solver along negative terrain gradient -∇z / |∇z|
+  private traceStreamline(startX: number, startZ: number, maxSteps = 45, dtStep = 0.35): StreamPoint[] {
     let curX = startX;
     let curZ = startZ;
     const path: StreamPoint[] = [];
@@ -612,10 +809,10 @@ export class RiverRunoff {
 
   update(dt: number, cameraPos: THREE.Vector3, simTime: number) {
     const clampedDt = Math.min(dt, 0.033);
+    const rainNormalized = Math.min(1.0, this.rainIntensity / 65.0);
 
-    // 1. Advance Rain Streaks
-    const rainNormalized = this.rainIntensity / 65.0;
-    this.rainMat.uniforms.uRainAlpha.value = Math.min(1.0, rainNormalized);
+    // 1. Advance Falling Rain & Detect Ground Impact Collisions (Directive)
+    this.rainMat.uniforms.uRainAlpha.value = rainNormalized;
 
     if (this.rainIntensity > 0.01) {
       this.rainMesh.visible = true;
@@ -628,7 +825,13 @@ export class RiverRunoff {
         pos[i3 + 1] += vel[i3 + 1] * clampedDt;
         pos[i3 + 2] += vel[i3 + 2] * clampedDt;
 
-        if (pos[i3 + 1] < -2.0) {
+        // Ground Collision: Rainfall transitions into 3D ground water!
+        const groundY = this.terrain.getBedHeight(pos[i3], pos[i3 + 2]);
+        if (pos[i3 + 1] <= groundY) {
+          // Trigger kinetic 3D ground splatter burst
+          this.triggerGroundSplash(pos[i3], groundY, pos[i3 + 2]);
+
+          // Reset droplet back to cloud altitude
           pos[i3] = cameraPos.x + (Math.random() - 0.5) * 55.0;
           pos[i3 + 1] = cameraPos.y + 16.0 + Math.random() * 12.0;
           pos[i3 + 2] = cameraPos.z + (Math.random() - 0.5) * 65.0;
@@ -639,13 +842,71 @@ export class RiverRunoff {
       this.rainMesh.visible = false;
     }
 
-    // 2. Advance 3D Runoff Streams (physical Manning velocity driven)
+    // 2. Advance 3D Kinetic Confluence Splashes (Ballistic Gravity g = -9.81 m/s²)
+    const dummyMat = new THREE.Matrix4();
+    const dummyPos = new THREE.Vector3();
+    const dummyScale = new THREE.Vector3();
+    const splashScaleFactor = 0.65 + rainNormalized * 0.75;
+
+    for (let i = 0; i < this.maxConfluenceParticles; i++) {
+      this.confLife[i] -= clampedDt;
+      const i3 = i * 3;
+
+      if (this.confLife[i] <= 0) {
+        this.resetConfluenceParticle(i);
+      } else {
+        // Real gravity:
+        this.confVel[i3 + 1] -= 9.81 * clampedDt;
+        this.confPos[i3] += this.confVel[i3] * clampedDt;
+        this.confPos[i3 + 1] += this.confVel[i3 + 1] * clampedDt;
+        this.confPos[i3 + 2] += this.confVel[i3 + 2] * clampedDt;
+
+        // Reset if submerged into river surface
+        const riverWaterY = this.hydraulics.getWaterHeightAt(this.confPos[i3 + 2]);
+        if (this.confPos[i3 + 1] <= riverWaterY) {
+          this.resetConfluenceParticle(i);
+        }
+      }
+
+      const lifeFrac = Math.max(0.0, this.confLife[i] / this.confMaxLife[i]);
+      const s = Math.sin(lifeFrac * Math.PI) * splashScaleFactor;
+      dummyPos.set(this.confPos[i3], this.confPos[i3 + 1], this.confPos[i3 + 2]);
+      dummyScale.set(s, s, s);
+      dummyMat.makeScale(s, s, s).setPosition(dummyPos);
+      this.confluenceMesh.setMatrixAt(i, dummyMat);
+    }
+    this.confluenceMesh.instanceMatrix.needsUpdate = true;
+
+    // 3. Advance 3D Ground Impact Splashes
+    for (let i = 0; i < this.maxGroundSplashes; i++) {
+      if (this.gLife[i] > 0) {
+        this.gLife[i] -= clampedDt;
+        const i3 = i * 3;
+
+        this.gVel[i3 + 1] -= 9.81 * clampedDt;
+        this.gPos[i3] += this.gVel[i3] * clampedDt;
+        this.gPos[i3 + 1] += this.gVel[i3 + 1] * clampedDt;
+        this.gPos[i3 + 2] += this.gVel[i3 + 2] * clampedDt;
+
+        const lifeFrac = Math.max(0.0, this.gLife[i] / this.gMaxLife[i]);
+        const s = Math.sin(lifeFrac * Math.PI) * (0.75 + rainNormalized * 0.70);
+        dummyPos.set(this.gPos[i3], this.gPos[i3 + 1], this.gPos[i3 + 2]);
+        dummyScale.set(s, s, s);
+        dummyMat.makeScale(s, s, s).setPosition(dummyPos);
+      } else {
+        dummyMat.makeScale(0, 0, 0);
+      }
+      this.groundSplashMesh.setMatrixAt(i, dummyMat);
+    }
+    this.groundSplashMesh.instanceMatrix.needsUpdate = true;
+
+    // 4. Advance 3D Volumetric Runoff Flumes (vertex wave displacement + Manning flow)
     this.streamMats.forEach((mat) => {
       mat.uniforms.uTime.value = simTime;
       mat.uniforms.uRainIntensity.value = this.rainIntensity;
     });
 
-    // 3. Hydrological Infiltration & Puddle Elevation
+    // 5. Hydrological Infiltration & Puddle Elevation
     const fillRate = (this.rainIntensity / 50.0) * 0.22;
     const drainRate = 0.04;
 
@@ -671,7 +932,7 @@ export class RiverRunoff {
       spMat.uniforms.uRainIntensity.value = this.rainIntensity;
     });
 
-    // 4. Catchment Runoff River Swell
+    // 6. Catchment Runoff River Swell
     const targetRainQ = (this.rainIntensity / 65.0) * 28.0;
     this.currentRainQ += (targetRainQ - this.currentRainQ) * Math.min(clampedDt * 0.35, 0.08);
   }
@@ -681,7 +942,6 @@ export class RiverRunoff {
     let totalLiters = 0;
     PUDDLE_BASINS.forEach((basin, idx) => {
       const fill = this.puddleFills[idx] || 0;
-      // Parabolic depression volume: V = (π / 2) * R² * (fill * depth)
       const m3 = (Math.PI / 2.0) * basin.radius * basin.radius * (fill * basin.depth);
       totalLiters += m3 * 1000.0;
     });
@@ -690,8 +950,6 @@ export class RiverRunoff {
 
   // Real physical rainfall mass influx across the 4,800 m² catchment basin [kg/s]
   getRainfallMassFlux(): number {
-    // Catchment: 80m channel length x 60m valley width = 4800 m²
-    // Rain P in mm/h: 1 mm/h = 1 L / (m² · h) = 1 kg / (m² · 3600 s)
     return (4800.0 * this.rainIntensity) / 3600.0;
   }
 }
