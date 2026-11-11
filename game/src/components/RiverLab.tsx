@@ -55,6 +55,11 @@ export default function RiverLab() {
   const [sweWaveSpeed, setSweWaveSpeed] = useState(2.8);
   const [interactionMode, setInteractionMode] = useState<"dropper" | "sweeper" | "orbit">("dropper");
 
+  // Water physical model & SPH states
+  const [waterModel, setWaterModel] = useState<"sph" | "surface">("sph");
+  const [sphMode, setSphMode] = useState<"fluid" | "particles">("fluid");
+  const [sphParticleCount, setSphParticleCount] = useState(4500);
+
   const updateTelemetry = (lab: StandaloneRiverLab) => {
     const hyd = lab.hydraulics;
     setMinV(hyd.minVelocity);
@@ -88,6 +93,10 @@ export default function RiverLab() {
       setSweImpulseCount(lab.swe.impulseCount);
       setSweWaveSpeed(lab.swe.avgWaveSpeed);
     }
+
+    if (lab.sph) {
+      setSphParticleCount(lab.sph.activeParticles);
+    }
   };
 
   useEffect(() => {
@@ -109,6 +118,22 @@ export default function RiverLab() {
       labRef.current = null;
     };
   }, []);
+
+  const handleWaterModelChange = (model: "sph" | "surface") => {
+    setWaterModel(model);
+    if (labRef.current) {
+      labRef.current.setWaterModel(model);
+      updateTelemetry(labRef.current);
+    }
+  };
+
+  const handleSphModeChange = (mode: "fluid" | "particles") => {
+    setSphMode(mode);
+    if (labRef.current) {
+      labRef.current.setSphRenderMode(mode);
+      updateTelemetry(labRef.current);
+    }
+  };
 
   const handleDischarge = (val: number) => {
     setDischargeQ(val);
@@ -296,6 +321,123 @@ export default function RiverLab() {
         <p style={{ margin: "0 0 12px 0", fontSize: 11, color: "#a8a29e", lineHeight: 1.4 }}>
           Continuity equation ($Q = A \cdot v$) and Manning&apos;s formula solver across 80m. Channel constrictions by mid-stream boulders squeeze cross-sectional area, accelerating local velocity and triggering supercritical hydraulic jumps ($Fr &gt; 1$).
         </p>
+
+        {/* Unified Water Physical Model Selector */}
+        <div
+          style={{
+            background: "rgba(30, 41, 59, 0.85)",
+            border: "1px solid rgba(56, 189, 248, 0.4)",
+            borderRadius: 8,
+            padding: "10px 12px",
+            marginBottom: 14,
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+            <span style={{ fontWeight: 700, fontSize: 11, color: "#38bdf8", textTransform: "uppercase" }}>
+              Water Physical Model
+            </span>
+            <span
+              style={{
+                fontSize: 9.5,
+                background: waterModel === "sph" ? "#0284c7" : "rgba(255, 255, 255, 0.15)",
+                color: "#fff",
+                padding: "2px 6px",
+                borderRadius: 4,
+                fontWeight: 600,
+              }}
+            >
+              {waterModel === "sph" ? "3D NAVIER-STOKES SPH" : "2D SAINT-VENANT + SWE"}
+            </span>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
+            <button
+              onClick={() => handleWaterModelChange("sph")}
+              style={{
+                padding: "8px 6px",
+                borderRadius: 6,
+                border: waterModel === "sph" ? "1.5px solid #38bdf8" : "1px solid rgba(255,255,255,0.12)",
+                background: waterModel === "sph" ? "rgba(2, 132, 199, 0.45)" : "rgba(255,255,255,0.06)",
+                boxShadow: waterModel === "sph" ? "0 0 12px rgba(56, 189, 248, 0.4)" : "none",
+                color: waterModel === "sph" ? "#38bdf8" : "#fff",
+                fontSize: 10.5,
+                cursor: "pointer",
+                fontWeight: 700,
+                textAlign: "left",
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+              }}
+            >
+              <span>🌊 3D SPH Fluid (SSFR)</span>
+              <span style={{ fontSize: 8.5, color: "#94a3b8", fontWeight: 400 }}>
+                {sphParticleCount} 3D particles in river
+              </span>
+            </button>
+
+            <button
+              onClick={() => handleWaterModelChange("surface")}
+              style={{
+                padding: "8px 6px",
+                borderRadius: 6,
+                border: waterModel === "surface" ? "1.5px solid #34d399" : "1px solid rgba(255,255,255,0.12)",
+                background: waterModel === "surface" ? "rgba(16, 185, 129, 0.4)" : "rgba(255,255,255,0.06)",
+                boxShadow: waterModel === "surface" ? "0 0 12px rgba(52, 211, 153, 0.4)" : "none",
+                color: waterModel === "surface" ? "#34d399" : "#fff",
+                fontSize: 10.5,
+                cursor: "pointer",
+                fontWeight: 700,
+                textAlign: "left",
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+              }}
+            >
+              <span>🏄 Surface Mesh</span>
+              <span style={{ fontSize: 8.5, color: "#94a3b8", fontWeight: 400 }}>
+                2D SWE hydraulics ribbon
+              </span>
+            </button>
+          </div>
+
+          {waterModel === "sph" && (
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 6, borderTop: "1px dashed rgba(56, 189, 248, 0.25)" }}>
+              <span style={{ fontSize: 10, color: "#94a3b8" }}>Rendering Pipeline:</span>
+              <div style={{ display: "flex", gap: 4 }}>
+                <button
+                  onClick={() => handleSphModeChange("fluid")}
+                  style={{
+                    padding: "3px 8px",
+                    borderRadius: 4,
+                    border: "1px solid rgba(56,189,248,0.3)",
+                    background: sphMode === "fluid" ? "#0284c7" : "rgba(255,255,255,0.06)",
+                    color: "#fff",
+                    fontSize: 9.5,
+                    cursor: "pointer",
+                    fontWeight: 600,
+                  }}
+                >
+                  💧 Smooth Fluid (SSFR)
+                </button>
+                <button
+                  onClick={() => handleSphModeChange("particles")}
+                  style={{
+                    padding: "3px 8px",
+                    borderRadius: 4,
+                    border: "1px solid rgba(56,189,248,0.3)",
+                    background: sphMode === "particles" ? "#0284c7" : "rgba(255,255,255,0.06)",
+                    color: "#fff",
+                    fontSize: 9.5,
+                    cursor: "pointer",
+                    fontWeight: 600,
+                  }}
+                >
+                  🔵 Raw Particles
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
 
         {/* Live Hydraulic Telemetry Card */}
         <div

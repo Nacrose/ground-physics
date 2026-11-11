@@ -4,6 +4,18 @@ import { generateWaterNormalMap, generateFoamTexture } from "../standalone-river
 
 export type RenderMode = "fluid" | "particles";
 
+export interface SphPhysicsLike {
+  readonly maxParticles: number;
+  activeParticles: number;
+  pos: Float32Array;
+  vel: Float32Array;
+  density: Float32Array;
+  params: {
+    particleRadius: number;
+    smoothingRadius: number;
+  };
+}
+
 /**
  * 🌊 High-Fidelity Continuous Screen Space Fluid Renderer (SSFR)
  *
@@ -19,7 +31,7 @@ export type RenderMode = "fluid" | "particles";
 export class SphRenderer {
   readonly scene: THREE.Scene;
   readonly renderer: THREE.WebGLRenderer;
-  readonly physics: SphPhysics;
+  readonly physics: SphPhysicsLike;
 
   mode: RenderMode = "fluid";
 
@@ -62,7 +74,7 @@ export class SphRenderer {
   private targetW = 1;
   private targetH = 1;
 
-  constructor(scene: THREE.Scene, renderer: THREE.WebGLRenderer, physics: SphPhysics) {
+  constructor(scene: THREE.Scene, renderer: THREE.WebGLRenderer, physics: SphPhysicsLike) {
     this.scene = scene;
     this.renderer = renderer;
     this.physics = physics;
@@ -532,6 +544,16 @@ export class SphRenderer {
       this.pointsMesh.visible = false;
     } else {
       this.pointsMesh.visible = true;
+    }
+  }
+
+  setVisible(visible: boolean) {
+    if (!visible) {
+      this.pointsMesh.visible = false;
+      this.particleQuadMesh.visible = false;
+    } else {
+      this.setMode(this.mode);
+      this.particleQuadMesh.visible = true;
     }
   }
 

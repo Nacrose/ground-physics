@@ -8,8 +8,10 @@ import { RiverWater } from "./riverWater";
 import { RiverSpray } from "./riverSpray";
 import { RiverRunoff } from "./riverRunoff";
 import { RiverSWE } from "./riverSWE";
+import { RiverSph } from "./riverSph";
 
 export type RiverInteractionMode = "dropper" | "sweeper" | "orbit";
+export type RiverWaterModel = "sph" | "surface";
 
 export class StandaloneRiverLab {
   readonly container: HTMLElement;
@@ -25,6 +27,10 @@ export class StandaloneRiverLab {
   water: RiverWater;
   spray: RiverSpray;
   runoff: RiverRunoff;
+  sph: RiverSph;
+
+  waterModel: RiverWaterModel = "sph";
+  sphRenderMode: "fluid" | "particles" = "fluid";
 
   sunLight: THREE.DirectionalLight;
   sunDir = new THREE.Vector3(0.55, 0.75, 0.35).normalize();
@@ -191,6 +197,10 @@ export class StandaloneRiverLab {
     // 13. Setup Interactive Pointer Raycasting for Physical SWE Ripples
     this.setupPointerEvents();
 
+    // 14. 3D SPH Navier-Stokes Fluid Particles & SSFR Continuous Surface Pipeline
+    this.sph = new RiverSph(this.scene, this.renderer, this.terrain, this.rocks, this.hydraulics);
+    this.setWaterModel("sph");
+
     window.addEventListener("resize", this.onResize);
 
     this.lastTime = performance.now();
@@ -217,12 +227,19 @@ export class StandaloneRiverLab {
     this.updatePointerCoord(e);
     this.raycaster.setFromCamera(this.pointer, this.camera);
 
-    const hits = this.raycaster.intersectObject(this.water.mesh);
+    const targetObjs = this.waterModel === "surface" ? [this.water.mesh] : [this.terrain.mesh, this.water.mesh];
+    const hits = this.raycaster.intersectObjects(targetObjs);
     if (hits.length > 0 && (this.interactionMode !== "orbit" || e.shiftKey)) {
       this.isPointerDown = true;
       const p = hits[0].point;
       const strength = this.interactionMode === "sweeper" ? 0.28 : 0.45;
       this.swe.addImpulse(p.x, p.z, 0.95, strength, true);
+      if (this.sph) {
+        this.sph.addImpulse(p.x, p.z, 2.0, strength * 2.2);
+        if (this.interactionMode === "dropper") {
+          this.sph.dropParticlesAt(p.x, p.z, 16);
+        }
+      }
       this.lastImpulseTime = performance.now();
 
       // Trigger visual reticle impulse expansion
@@ -233,7 +250,8 @@ export class StandaloneRiverLab {
   private onPointerMove = (e: PointerEvent) => {
     this.updatePointerCoord(e);
     this.raycaster.setFromCamera(this.pointer, this.camera);
-    const hits = this.raycaster.intersectObject(this.water.mesh);
+    const targetObjs = this.waterModel === "surface" ? [this.water.mesh] : [this.terrain.mesh, this.water.mesh];
+    const hits = this.raycaster.intersectObjects(targetObjs);
 
     if (hits.length > 0) {
       this.isHoveringWater = true;
@@ -251,6 +269,9 @@ export class StandaloneRiverLab {
           const strength = this.interactionMode === "sweeper" ? 0.32 : 0.20;
           const radius = this.interactionMode === "sweeper" ? 0.85 : 0.65;
           this.swe.addImpulse(p.x, p.z, radius, strength, false);
+          if (this.sph) {
+            this.sph.addImpulse(p.x, p.z, radius * 1.5, strength * 1.8);
+          }
           this.lastImpulseTime = now;
         }
       }
@@ -290,19 +311,54 @@ export class StandaloneRiverLab {
     const z = this.controls.target.z;
     const xc = this.terrain.getRiverCenter(z);
     this.swe.addImpulse(xc, z, 1.1, 0.50, true);
+    if (this.sph) {
+      this.sph.addImpulse(xc, z, 2.2, 1.2);
+      this.sph.dropParticlesAt(xc, z, 24);
+    }
     this.pulseProgress = 0.0;
   }
 
   triggerSurgeWave() {
     this.swe.triggerSurgeWave();
+    if (this.sph) {
+      this.sph.addImpulse(this.terrain.getRiverCenter(-30), -30, 4.5, 2.0);
+    }
   }
 
   triggerBoulderShock() {
     this.swe.triggerBoulderShock();
+    if (this.sph) {
+      for (const b of this.rocks.boulders) {
+        this.sph.addImpulse(b.center.x, b.center.z, b.radius * 2.2, 1.8);
+      }
+    }
   }
 
   clearWaves() {
     this.swe.clear();
+  }
+
+  setWaterModel(model: RiverWaterModel) {
+    this.waterModel = model;
+    if (model === "surface") {
+      this.water.mesh.visible = true;
+      if (this.sph) {
+        this.sph.setVisible(false);
+      }
+    } else {
+      this.water.mesh.visible = false;
+      if (this.sph) {
+        this.sph.setVisible(true);
+        this.sph.setRenderMode(this.sphRenderMode);
+      }
+    }
+  }
+
+  setSphRenderMode(mode: "fluid" | "particles") {
+    this.sphRenderMode = mode;
+    if (this.waterModel === "sph") {
+      this.sph.renderer.setMode(mode);
+    }
   }
 
   private onResize = () => {
@@ -312,6 +368,9 @@ export class StandaloneRiverLab {
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
     this.screenTarget.setSize(w, h);
+    if (this.sph) {
+      this.sph.resize(w, h);
+    }
   };
 
   private animate = (now: number) => {
@@ -328,6 +387,11 @@ export class StandaloneRiverLab {
       this.spray.update(delta);
       this.runoff.update(delta, this.camera.position, this.simTime);
       this.rocks.update(delta, this.hydraulics, this.terrain);
+
+      if (this.waterModel === "sph") {
+        this.sph.step(delta);
+        this.sph.update();
+      }
 
       // Animate 3D Reticle
       if (this.interactionMode !== "orbit") {
@@ -346,6 +410,9 @@ export class StandaloneRiverLab {
 
       // Dynamic catchment runoff swelling river discharge:
       this.hydraulics.setDischarge(this.baseQ + this.runoff.currentRainQ);
+      if (this.sph) {
+        this.sph.setDischarge(this.baseQ + this.runoff.currentRainQ);
+      }
 
       if (this.cameraFollowRiver) {
         this.cameraProgress = (this.cameraProgress + delta * 0.022) % 1.0;
@@ -360,23 +427,33 @@ export class StandaloneRiverLab {
 
     this.controls.update();
 
-    // Two-pass rendering for screen refraction:
-    // Pass 1: Render terrain, rocks, and spray into screenTarget (hide water and reticle)
-    this.water.mesh.visible = false;
-    this.reticleGroup.visible = false;
-    this.renderer.setRenderTarget(this.screenTarget);
-    this.renderer.render(this.scene, this.camera);
+    if (this.waterModel === "sph") {
+      // 3D SPH Fluid with Screen Space Fluid Rendering (SSFR)
+      this.water.mesh.visible = false;
+      this.reticleGroup.visible = false;
+      this.sph.render(this.camera, this.sunDir);
+    } else {
+      // Two-pass rendering for screen refraction:
+      // Pass 1: Render terrain, rocks, and spray into screenTarget (hide water and reticle)
+      this.water.mesh.visible = false;
+      this.reticleGroup.visible = false;
+      this.renderer.setRenderTarget(this.screenTarget);
+      this.renderer.render(this.scene, this.camera);
 
-    // Pass 2: Show water mesh and 3D reticle, render complete scene to canvas
-    this.water.mesh.visible = true;
-    this.reticleGroup.visible = this.isHoveringWater && this.interactionMode !== "orbit";
-    this.renderer.setRenderTarget(null);
-    this.renderer.render(this.scene, this.camera);
+      // Pass 2: Show water mesh and 3D reticle, render complete scene to canvas
+      this.water.mesh.visible = true;
+      this.reticleGroup.visible = this.isHoveringWater && this.interactionMode !== "orbit";
+      this.renderer.setRenderTarget(null);
+      this.renderer.render(this.scene, this.camera);
+    }
   };
 
   setDischarge(q: number) {
     this.baseQ = q;
     this.hydraulics.setDischarge(this.baseQ + this.runoff.currentRainQ);
+    if (this.sph) {
+      this.sph.setDischarge(this.baseQ + this.runoff.currentRainQ);
+    }
   }
 
   setRainIntensity(intensity: number) {
@@ -446,6 +523,9 @@ export class StandaloneRiverLab {
     window.removeEventListener("pointerup", this.onPointerUp);
     window.removeEventListener("pointercancel", this.onPointerUp);
 
+    if (this.sph) {
+      this.sph.dispose();
+    }
     this.swe.texture.dispose();
     this.renderer.dispose();
     this.screenTarget.dispose();
