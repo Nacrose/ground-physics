@@ -65,8 +65,8 @@ export class RiverHydraulics {
       THREE.RGBAFormat,
       THREE.FloatType
     );
-    this.texture.minFilter = THREE.LinearFilter;
-    this.texture.magFilter = THREE.LinearFilter;
+    this.texture.minFilter = THREE.NearestFilter;
+    this.texture.magFilter = THREE.NearestFilter;
     this.texture.wrapS = THREE.ClampToEdgeWrapping;
     this.texture.wrapT = THREE.ClampToEdgeWrapping;
 

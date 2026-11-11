@@ -378,8 +378,12 @@ export class RiverWater {
 
           float wave = (wDown + wChevron + wCross + wLap) * baseAmp + bowRooster + sweHeight;
 
-          // Instantaneous water surface elevation:
-          float waterSurf = hyd.g + wave;
+          // Instantaneous water surface elevation with robust fallback:
+          float waterSurf = hyd.g;
+          if (waterSurf <= 0.01) {
+            waterSurf = getBedElevation(wp.z) + 0.85;
+          }
+          waterSurf += wave;
 
           // Dynamic shoreline swash: water surges freely up sloping banks during wave crests,
           // and conforms cleanly to terrain when the wave retreats (zero dipping under ground).
@@ -461,9 +465,13 @@ export class RiverWater {
           float localHead = vHydraulics.a;
 
           float bedY = getBedHeight(vWorldPos.x, vWorldPos.z);
-          float depth = vWorldPos.y - bedY;
+          float waterSurf = vHydraulics.g;
+          if (waterSurf <= 0.01) {
+            waterSurf = getBedElevation(vWorldPos.z) + 0.85;
+          }
+          float depth = max(0.0, vWorldPos.y - bedY);
 
-          if (depth <= 0.0005) {
+          if (depth <= 0.002) {
             discard;
           }
 
