@@ -41,6 +41,9 @@ export class RiverHydraulics {
   minFroude = 0;
   maxFroude = 0;
   avgDepth = 0;
+  totalVolume = 0;      // m³ (instantaneous reach water volume)
+  totalMassTonnes = 0;  // metric tonnes (ρ = 1000 kg/m³)
+  massFlowRate = 0;     // kg/s (longitudinal conserved flux ρ * Q)
 
   constructor() {
     this.texData = new Float32Array(this.numStations * 4);
@@ -228,6 +231,7 @@ export class RiverHydraulics {
     let minFr = 999;
     let maxFr = 0;
     let totalD = 0;
+    let reachVolume = 0;
 
     for (let i = 0; i < this.numStations; i++) {
       const st = this.stations[i];
@@ -236,6 +240,7 @@ export class RiverHydraulics {
       minFr = Math.min(minFr, st.froude);
       maxFr = Math.max(maxFr, st.froude);
       totalD += st.depth;
+      reachVolume += st.area * dz;
 
       const idx = i * 4;
       this.texData[idx] = st.velocity;
@@ -249,6 +254,9 @@ export class RiverHydraulics {
     this.minFroude = minFr;
     this.maxFroude = maxFr;
     this.avgDepth = totalD / this.numStations;
+    this.totalVolume = reachVolume;
+    this.totalMassTonnes = reachVolume; // 1 m³ water = 1 tonne = 1000 kg
+    this.massFlowRate = this.dischargeQ * 1000.0; // kg/s (continuous conservation along reach)
 
     this.texture.needsUpdate = true;
   }

@@ -675,4 +675,23 @@ export class RiverRunoff {
     const targetRainQ = (this.rainIntensity / 65.0) * 28.0;
     this.currentRainQ += (targetRainQ - this.currentRainQ) * Math.min(clampedDt * 0.35, 0.08);
   }
+
+  // Exact stored puddle water volume in Liters across all 4 depression basins
+  getPuddleStorageVolume(): number {
+    let totalLiters = 0;
+    PUDDLE_BASINS.forEach((basin, idx) => {
+      const fill = this.puddleFills[idx] || 0;
+      // Parabolic depression volume: V = (π / 2) * R² * (fill * depth)
+      const m3 = (Math.PI / 2.0) * basin.radius * basin.radius * (fill * basin.depth);
+      totalLiters += m3 * 1000.0;
+    });
+    return totalLiters;
+  }
+
+  // Real physical rainfall mass influx across the 4,800 m² catchment basin [kg/s]
+  getRainfallMassFlux(): number {
+    // Catchment: 80m channel length x 60m valley width = 4800 m²
+    // Rain P in mm/h: 1 mm/h = 1 L / (m² · h) = 1 kg / (m² · 3600 s)
+    return (4800.0 * this.rainIntensity) / 3600.0;
+  }
 }

@@ -25,6 +25,11 @@ export default function RiverLab() {
   const [minFr, setMinFr] = useState(0.5);
   const [maxFr, setMaxFr] = useState(1.4);
   const [avgDepth, setAvgDepth] = useState(0.85);
+  const [channelVolume, setChannelVolume] = useState(460);
+  const [channelMass, setChannelMass] = useState(460);
+  const [massFlux, setMassFlux] = useState(22000);
+  const [puddleStorage, setPuddleStorage] = useState(1200);
+  const [rainFlux, setRainFlux] = useState(0);
 
   const updateTelemetry = (lab: StandaloneRiverLab) => {
     const hyd = lab.hydraulics;
@@ -34,6 +39,11 @@ export default function RiverLab() {
     setMaxFr(hyd.maxFroude);
     setAvgDepth(hyd.avgDepth);
     setCatchmentRunoffQ(lab.runoff.currentRainQ);
+    setChannelVolume(hyd.totalVolume);
+    setChannelMass(hyd.totalMassTonnes);
+    setMassFlux(hyd.massFlowRate);
+    setPuddleStorage(lab.runoff.getPuddleStorageVolume());
+    setRainFlux(lab.runoff.getRainfallMassFlux());
   };
 
   useEffect(() => {
@@ -251,6 +261,31 @@ export default function RiverLab() {
               <strong style={{ color: maxFr > 1.0 ? "#f97316" : "#4ade80" }}>
                 {minFr.toFixed(2)} – {maxFr.toFixed(2)} {maxFr > 1.0 ? "(Supercritical)" : "(Subcritical)"}
               </strong>
+            </div>
+          </div>
+
+          {/* Real-time Mass & Volume Accounting */}
+          <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px dashed rgba(56, 189, 248, 0.25)" }}>
+            <div style={{ fontWeight: 600, color: "#38bdf8", marginBottom: 5, fontSize: 10.5, letterSpacing: "0.04em", textTransform: "uppercase" }}>
+              ⚖️ Mass & Volume Accounting
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 8px", fontSize: 10 }}>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Channel Storage:</span>{" "}
+                <strong style={{ color: "#f8fafc" }}>{channelVolume.toFixed(1)} m³ ({channelMass.toFixed(0)} t)</strong>
+              </div>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Mass Flux (ρQ):</span>{" "}
+                <strong style={{ color: "#38bdf8" }}>{(massFlux / 1000).toFixed(1)} t/s ({massFlux.toFixed(0)} kg/s)</strong>
+              </div>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Terrace Pools:</span>{" "}
+                <strong style={{ color: "#f8fafc" }}>{puddleStorage.toFixed(0)} Litres</strong>
+              </div>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Rainfall Inflow:</span>{" "}
+                <strong style={{ color: rainFlux > 0 ? "#38bdf8" : "#94a3b8" }}>{rainFlux.toFixed(1)} kg/s</strong>
+              </div>
             </div>
           </div>
         </div>
