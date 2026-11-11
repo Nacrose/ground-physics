@@ -4,7 +4,7 @@ import { RiverHydraulics } from "./riverHydraulics";
 import { RiverRocks } from "./riverRocks";
 import { RiverSWE } from "./riverSWE";
 
-function generateWaterNormalMap(size = 512): THREE.DataTexture {
+export function generateWaterNormalMap(size = 512): THREE.DataTexture {
   let seed = 42;
   const rand = () => {
     seed = (seed * 16807) % 2147483647;
@@ -78,7 +78,7 @@ function generateWaterNormalMap(size = 512): THREE.DataTexture {
   return tex;
 }
 
-function generateFoamTexture(size = 256): THREE.DataTexture {
+export function generateFoamTexture(size = 256): THREE.DataTexture {
   const perm = new Uint8Array(512);
   let seed = 424242;
   const rand = () => {

@@ -1,21 +1,20 @@
 import * as THREE from "three";
 import { SphPhysics } from "./sphPhysics";
+import { generateWaterNormalMap, generateFoamTexture } from "../standalone-river/riverWater";
 
 export type RenderMode = "fluid" | "particles";
 
 /**
- * 🌊 High-Fidelity Screen Space Fluid Renderer (SSFR)
+ * 🌊 High-Fidelity Continuous Screen Space Fluid Renderer (SSFR)
  *
- * Transforms discrete 3D SPH particles into a seamless, continuous,
- * glass-like liquid surface with realistic meniscus, caustics,
- * Beer-Lambert light absorption, Fresnel reflection, and white-water foam.
- *
- * Pipeline:
- *  1. Scene Color & Depth Pre-Pass (records terrain, boulders, sky)
- *  2. Fluid Depth Rasterization (view-space billboard sphere mathematics)
- *  3. Fluid Thickness Pass (additive optical absorption volume)
- *  4. 2-Pass Separable Bilateral Depth-Aware Smoothing (melts particles together without blurring edges)
- *  5. Fullscreen Composite Shader (normal reconstruction, refraction, Beer-Lambert, Fresnel, sun glints, foam)
+ * Replaces discrete balloon-like spheres with a truly continuous,
+ * glass-smooth liquid volume featuring:
+ *  - C1 Wendland polynomial metaballs (zero boundary slope)
+ *  - 6-pass multi-scale hierarchical bilateral blur (75+ pixel coverage)
+ *  - Screen-space normal reconstruction with Kolmogorov wave micro-ripples
+ *  - Beer-Lambert physical light absorption & optical refraction
+ *  - Shoreline bedrock contact foam (zero per-particle rim outlines)
+ *  - Feathered depth-weighted isosurface blending
  */
 export class SphRenderer {
   readonly scene: THREE.Scene;
@@ -33,10 +32,15 @@ export class SphRenderer {
   private sceneTarget: THREE.WebGLRenderTarget;
   private fluidDepthTarget: THREE.WebGLRenderTarget;
   private fluidThicknessTarget: THREE.WebGLRenderTarget;
-  private tempBlurTarget: THREE.WebGLRenderTarget;
+  private tempBlur1: THREE.WebGLRenderTarget;
+  private tempBlur2: THREE.WebGLRenderTarget;
   private smoothedDepthTarget: THREE.WebGLRenderTarget;
 
-  // --- Particle Instanced Quads for Depth & Thickness ---
+  // --- Textures ---
+  private waterNormalMap: THREE.DataTexture;
+  private foamTex: THREE.DataTexture;
+
+  // --- Particle Instanced Quads ---
   private particleGeo: THREE.InstancedBufferGeometry;
   private posAttr: THREE.InstancedBufferAttribute;
   private velAttr: THREE.InstancedBufferAttribute;
@@ -49,13 +53,9 @@ export class SphRenderer {
 
   // --- Fullscreen Post-Processing Passes ---
   private postCam: THREE.OrthographicCamera;
-  private blurQuadMesh: THREE.Mesh;
-  private blurHMat: THREE.ShaderMaterial;
-  private blurVMat: THREE.ShaderMaterial;
-  private blurHScene: THREE.Scene;
-  private blurVScene: THREE.Scene;
+  private blurMat: THREE.ShaderMaterial;
+  private blurScene: THREE.Scene;
 
-  private compositeQuadMesh: THREE.Mesh;
   private compositeMat: THREE.ShaderMaterial;
   private compositeScene: THREE.Scene;
 
@@ -75,7 +75,9 @@ export class SphRenderer {
     this.targetW = w;
     this.targetH = h;
 
-    const max = physics.maxParticles;
+    // Shared Unified Textures (same as River Lab)
+    this.waterNormalMap = generateWaterNormalMap(512);
+    this.foamTex = generateFoamTexture(256);
 
     // 1. Scene Target with Hardware Depth Texture
     this.sceneTarget = new THREE.WebGLRenderTarget(w, h, {
@@ -103,15 +105,21 @@ export class SphRenderer {
       type: THREE.HalfFloatType,
     });
 
-    // 4. Temporary Target for Horizontal Bilateral Blur
-    this.tempBlurTarget = new THREE.WebGLRenderTarget(w, h, {
+    // 4. Ping-Pong Targets for Multi-Pass Bilateral Depth Smoothing
+    this.tempBlur1 = new THREE.WebGLRenderTarget(w, h, {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       format: THREE.RGBAFormat,
       type: THREE.HalfFloatType,
     });
 
-    // 5. Smoothed Depth Target (Bilateral Blur Output)
+    this.tempBlur2 = new THREE.WebGLRenderTarget(w, h, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.HalfFloatType,
+    });
+
     this.smoothedDepthTarget = new THREE.WebGLRenderTarget(w, h, {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
@@ -134,10 +142,10 @@ export class SphRenderer {
     this.particleGeo.setAttribute("aInstanceVel", this.velAttr);
     this.particleGeo.setAttribute("aDensity", this.densityAttr);
 
-    // Particle Visual Radius (tuned for seamless isosurface fusion)
-    const fluidVisualRadius = physics.params.particleRadius * 1.85;
+    // Particle Visual Radius (increased to span the full SPH smoothing radius H = 0.72)
+    const fluidVisualRadius = physics.params.smoothingRadius * 0.95;
 
-    // --- Particle Depth Shader ---
+    // --- Particle Depth Shader (Wendland C1 Continuous Kernel) ---
     this.particleDepthMat = new THREE.ShaderMaterial({
       transparent: false,
       depthWrite: true,
@@ -153,16 +161,14 @@ export class SphRenderer {
 
         varying vec2 vUv;
         varying vec3 vViewCenter;
-        varying vec3 vVelocity;
 
         void main() {
           vUv = uv;
-          vVelocity = aInstanceVel;
           vec4 viewCenter = modelViewMatrix * vec4(aInstancePos, 1.0);
           vViewCenter = viewCenter.xyz;
 
           // Camera-facing billboard quad in view space
-          vec3 viewPos = viewCenter.xyz + vec3((uv - 0.5) * (uRadius * 2.2), 0.0);
+          vec3 viewPos = viewCenter.xyz + vec3((uv - 0.5) * (uRadius * 2.8), 0.0);
           gl_Position = projectionMatrix * vec4(viewPos, 1.0);
         }
       `,
@@ -176,8 +182,10 @@ export class SphRenderer {
           float r2 = dot(n, n);
           if (r2 > 1.0) discard;
 
-          // Spherical depth displacement in view space
-          float zOffset = sqrt(1.0 - r2) * uRadius;
+          // Smooth Wendland C1 polynomial surface function:
+          // w(r) = (1 - r^2)^2 * (1 + 2 * r^2). Zero slope at boundary!
+          float w = 1.0 - r2;
+          float zOffset = w * w * (1.0 + 1.6 * r2) * uRadius * 0.88;
           float linearZ = -(vViewCenter.z + zOffset);
           gl_FragColor = vec4(linearZ, 0.0, 0.0, 1.0);
         }
@@ -201,7 +209,7 @@ export class SphRenderer {
         void main() {
           vUv = uv;
           vec4 viewCenter = modelViewMatrix * vec4(aInstancePos, 1.0);
-          vec3 viewPos = viewCenter.xyz + vec3((uv - 0.5) * (uRadius * 2.2), 0.0);
+          vec3 viewPos = viewCenter.xyz + vec3((uv - 0.5) * (uRadius * 2.8), 0.0);
           gl_Position = projectionMatrix * vec4(viewPos, 1.0);
         }
       `,
@@ -214,8 +222,8 @@ export class SphRenderer {
           float r2 = dot(n, n);
           if (r2 > 1.0) discard;
 
-          // Chord thickness through particle sphere
-          float thickness = sqrt(1.0 - r2) * uRadius * 1.8;
+          float w = 1.0 - r2;
+          float thickness = w * w * uRadius * 1.85;
           gl_FragColor = vec4(thickness, thickness, thickness, 1.0);
         }
       `,
@@ -231,80 +239,60 @@ export class SphRenderer {
     this.postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     const fullscreenPlane = new THREE.PlaneGeometry(2, 2);
 
-    // --- Bilateral Depth Smoothing Shaders (Separable 2-Pass) ---
-    const blurVertexShader = /* glsl */ `
-      varying vec2 vUv;
-      void main() {
-        vUv = uv;
-        gl_Position = vec4(position.xy, 0.0, 1.0);
-      }
-    `;
-
-    const blurFragmentShader = (isVertical: boolean) => /* glsl */ `
-      uniform sampler2D uDepthTex;
-      uniform vec2 uTexelSize;
-      varying vec2 vUv;
-
-      void main() {
-        float centerZ = texture2D(uDepthTex, vUv).r;
-        if (centerZ <= 0.001) {
-          gl_FragColor = vec4(0.0);
-          return;
-        }
-
-        float sum = 0.0;
-        float totalW = 0.0;
-        vec2 dir = ${isVertical ? "vec2(0.0, 1.0)" : "vec2(1.0, 0.0)"};
-
-        // 9-tap 1D bilateral kernel (R = 4)
-        const int R = 4;
-        for (int i = -R; i <= R; i++) {
-          vec2 off = dir * float(i) * uTexelSize * 1.25;
-          float sampleZ = texture2D(uDepthTex, vUv + off).r;
-          if (sampleZ > 0.001) {
-            float dist2 = float(i * i);
-            float spatialW = exp(-dist2 / 8.0);
-            float depthDiff = abs(sampleZ - centerZ);
-            // Silhouette edge preservation (discontinuity threshold)
-            float depthW = exp(-depthDiff * depthDiff / 0.16);
-            float w = spatialW * depthW;
-            sum += sampleZ * w;
-            totalW += w;
-          }
-        }
-
-        float res = totalW > 0.0 ? sum / totalW : centerZ;
-        gl_FragColor = vec4(res, 0.0, 0.0, 1.0);
-      }
-    `;
-
-    this.blurHMat = new THREE.ShaderMaterial({
+    // --- Configurable Bilateral Blur Material ---
+    this.blurMat = new THREE.ShaderMaterial({
       depthWrite: false,
       depthTest: false,
       uniforms: {
         uDepthTex: { value: this.fluidDepthTarget.texture },
-        uTexelSize: { value: new THREE.Vector2(1 / w, 1 / h) },
+        uStep: { value: new THREE.Vector2(1 / w, 0) },
       },
-      vertexShader: blurVertexShader,
-      fragmentShader: blurFragmentShader(false),
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform sampler2D uDepthTex;
+        uniform vec2 uStep;
+        varying vec2 vUv;
+
+        void main() {
+          float centerZ = texture2D(uDepthTex, vUv).r;
+          if (centerZ <= 0.001) {
+            gl_FragColor = vec4(0.0);
+            return;
+          }
+
+          float sum = 0.0;
+          float totalW = 0.0;
+          const int R = 5;
+
+          for (int i = -R; i <= R; i++) {
+            vec2 off = uStep * float(i);
+            float sampleZ = texture2D(uDepthTex, vUv + off).r;
+            if (sampleZ > 0.001) {
+              float dist2 = float(i * i);
+              float spatialW = exp(-dist2 / 12.0);
+              float depthDiff = abs(sampleZ - centerZ);
+              // Generous threshold to merge particles smoothly across SPH kernel width (up to 2.2m)
+              float depthW = exp(-depthDiff * depthDiff / 2.8);
+              float w = spatialW * depthW;
+              sum += sampleZ * w;
+              totalW += w;
+            }
+          }
+
+          float res = totalW > 0.0 ? sum / totalW : centerZ;
+          gl_FragColor = vec4(res, 0.0, 0.0, 1.0);
+        }
+      `,
     });
 
-    this.blurVMat = new THREE.ShaderMaterial({
-      depthWrite: false,
-      depthTest: false,
-      uniforms: {
-        uDepthTex: { value: this.tempBlurTarget.texture },
-        uTexelSize: { value: new THREE.Vector2(1 / w, 1 / h) },
-      },
-      vertexShader: blurVertexShader,
-      fragmentShader: blurFragmentShader(true),
-    });
-
-    this.blurHScene = new THREE.Scene();
-    this.blurHScene.add(new THREE.Mesh(fullscreenPlane, this.blurHMat));
-
-    this.blurVScene = new THREE.Scene();
-    this.blurVScene.add(new THREE.Mesh(fullscreenPlane, this.blurVMat));
+    this.blurScene = new THREE.Scene();
+    this.blurScene.add(new THREE.Mesh(fullscreenPlane, this.blurMat));
 
     // --- Fullscreen Composite SSFR Shader ---
     this.compositeMat = new THREE.ShaderMaterial({
@@ -315,14 +303,18 @@ export class SphRenderer {
         uSceneDepth: { value: this.sceneTarget.depthTexture },
         uSmoothedDepth: { value: this.smoothedDepthTarget.texture },
         uThickness: { value: this.fluidThicknessTarget.texture },
+        uWaterNormalMap: { value: this.waterNormalMap },
+        uFoamTex: { value: this.foamTex },
         uTexelSize: { value: new THREE.Vector2(1 / w, 1 / h) },
         uInvProj: { value: new THREE.Matrix4() },
+        uInvView: { value: new THREE.Matrix4() },
+        uViewMatrix: { value: new THREE.Matrix4() },
         uCameraNear: { value: 0.1 },
         uCameraFar: { value: 200.0 },
         uViewSunDir: { value: new THREE.Vector3(0.5, 0.8, 0.4) },
         uSkyColor: { value: new THREE.Color(0x38bdf8) },
         uSunColor: { value: new THREE.Color(0xfff7ed) },
-        uWaterDeepColor: { value: new THREE.Color(0x03497d) },
+        uWaterDeepColor: { value: new THREE.Color(0x023e73) },
         uWaterShallowColor: { value: new THREE.Color(0x22d3ee) },
         uTime: { value: 0 },
       },
@@ -338,8 +330,12 @@ export class SphRenderer {
         uniform sampler2D uSceneDepth;
         uniform sampler2D uSmoothedDepth;
         uniform sampler2D uThickness;
+        uniform sampler2D uWaterNormalMap;
+        uniform sampler2D uFoamTex;
         uniform vec2 uTexelSize;
         uniform mat4 uInvProj;
+        uniform mat4 uInvView;
+        uniform mat4 uViewMatrix;
         uniform float uCameraNear;
         uniform float uCameraFar;
         uniform vec3 uViewSunDir;
@@ -377,80 +373,95 @@ export class SphRenderer {
           float rawSceneD = texture2D(uSceneDepth, vUv).r;
           float sceneZ = linearizeDepth(rawSceneD);
 
-          // Fluid occluded by solid scene geometry (e.g. terrain ridges, boulders)
-          if (fluidZ > sceneZ - 0.02) {
+          // Occlusion: fluid occluded by solid scene geometry (terrain ridges, boulders)
+          if (fluidZ > sceneZ - 0.03) {
             gl_FragColor = bgCol;
             return;
           }
 
           float thickness = texture2D(uThickness, vUv).r;
-          if (thickness < 0.008) {
+          if (thickness < 0.035) {
             gl_FragColor = bgCol;
             return;
           }
 
-          // Reconstruct view-space surface position and normal from smoothed depth
+          // 1. Reconstruct view position and smooth surface normal
           vec3 posC = reconstructViewPos(vUv, fluidZ);
 
-          float zR = texture2D(uSmoothedDepth, vUv + vec2(uTexelSize.x, 0.0)).r;
-          float zL = texture2D(uSmoothedDepth, vUv - vec2(uTexelSize.x, 0.0)).r;
-          float zT = texture2D(uSmoothedDepth, vUv + vec2(0.0, uTexelSize.y)).r;
-          float zB = texture2D(uSmoothedDepth, vUv - vec2(0.0, uTexelSize.y)).r;
+          float zR = texture2D(uSmoothedDepth, vUv + vec2(uTexelSize.x * 2.0, 0.0)).r;
+          float zL = texture2D(uSmoothedDepth, vUv - vec2(uTexelSize.x * 2.0, 0.0)).r;
+          float zT = texture2D(uSmoothedDepth, vUv + vec2(0.0, uTexelSize.y * 2.0)).r;
+          float zB = texture2D(uSmoothedDepth, vUv - vec2(0.0, uTexelSize.y * 2.0)).r;
 
-          if (zR <= 0.001 || abs(zR - fluidZ) > 0.4) zR = fluidZ;
-          if (zL <= 0.001 || abs(zL - fluidZ) > 0.4) zL = fluidZ;
-          if (zT <= 0.001 || abs(zT - fluidZ) > 0.4) zT = fluidZ;
-          if (zB <= 0.001 || abs(zB - fluidZ) > 0.4) zB = fluidZ;
+          if (zR <= 0.001 || abs(zR - fluidZ) > 1.2) zR = fluidZ;
+          if (zL <= 0.001 || abs(zL - fluidZ) > 1.2) zL = fluidZ;
+          if (zT <= 0.001 || abs(zT - fluidZ) > 1.2) zT = fluidZ;
+          if (zB <= 0.001 || abs(zB - fluidZ) > 1.2) zB = fluidZ;
 
-          vec3 posR = reconstructViewPos(vUv + vec2(uTexelSize.x, 0.0), zR);
-          vec3 posL = reconstructViewPos(vUv - vec2(uTexelSize.x, 0.0), zL);
-          vec3 posT = reconstructViewPos(vUv + vec2(0.0, uTexelSize.y), zT);
-          vec3 posB = reconstructViewPos(vUv - vec2(0.0, uTexelSize.y), zB);
+          vec3 posR = reconstructViewPos(vUv + vec2(uTexelSize.x * 2.0, 0.0), zR);
+          vec3 posL = reconstructViewPos(vUv - vec2(uTexelSize.x * 2.0, 0.0), zL);
+          vec3 posT = reconstructViewPos(vUv + vec2(0.0, uTexelSize.y * 2.0), zT);
+          vec3 posB = reconstructViewPos(vUv - vec2(0.0, uTexelSize.y * 2.0), zB);
 
           vec3 dX = posR - posL;
           vec3 dY = posT - posB;
-          vec3 N = normalize(cross(dX, dY));
-          if (N.z < 0.0) N = -N;
+          vec3 macroN = normalize(cross(dX, dY));
+          if (macroN.z < 0.0) macroN = -macroN;
 
-          // View vector in view space
+          // 2. Add realistic Kolmogorov surface capillary waves
+          vec3 worldPos = (uInvView * vec4(posC, 1.0)).xyz;
+          vec2 waveUv = worldPos.xz * 0.35;
+          vec3 ripple1 = texture2D(uWaterNormalMap, waveUv + vec2(uTime * 0.07, uTime * 0.04)).rgb * 2.0 - 1.0;
+          vec3 ripple2 = texture2D(uWaterNormalMap, waveUv * 1.7 - vec2(uTime * 0.05, -uTime * 0.06)).rgb * 2.0 - 1.0;
+          vec3 rippleWorld = normalize(vec3(ripple1.x + ripple2.x, 3.2, ripple1.z + ripple2.z));
+          vec3 rippleView = normalize((uViewMatrix * vec4(rippleWorld, 0.0)).xyz);
+
+          // Combine macro SPH curvature + subtle micro-ripples
+          vec3 N = normalize(macroN + rippleView * 0.22);
           vec3 V = normalize(-posC);
 
-          // Optical Screen-Space Refraction
-          vec2 refrOffset = N.xy * 0.025 * clamp(thickness * 2.0, 0.0, 1.0);
+          // 3. Screen-Space Optical Refraction (distort background)
+          vec2 refrOffset = N.xy * 0.035 * clamp(thickness * 1.5, 0.0, 1.0);
           vec2 refrUv = vUv + refrOffset;
           float refrSceneZ = linearizeDepth(texture2D(uSceneDepth, refrUv).r);
           if (refrSceneZ < fluidZ) refrUv = vUv; // Reject foreground occlusion bleeding
 
           vec3 sceneSample = texture2D(uSceneColor, refrUv).rgb;
 
-          // Beer-Lambert Light Absorption Law (Red light absorbs first -> Caribbean teal)
-          vec3 absorption = vec3(1.35, 0.45, 0.16);
-          vec3 transmission = exp(-absorption * thickness * 2.2);
+          // 4. Physical Beer-Lambert Light Absorption Law
+          // I = I0 * exp(-alpha * thickness)
+          vec3 alphaAbsorb = vec3(1.35, 0.45, 0.16);
+          vec3 transmission = exp(-alphaAbsorb * thickness * 1.8);
           vec3 waterCol = sceneSample * transmission;
 
-          // Gradient color tinting (turquoise shallow -> deep oceanic navy)
-          vec3 waterTint = mix(uWaterShallowColor, uWaterDeepColor, smoothstep(0.05, 0.85, thickness));
-          waterCol = mix(waterCol, waterTint, clamp(thickness * 0.85, 0.0, 0.82));
+          // Gradient tinting (turquoise Caribbean shallows -> deep navy river depths)
+          vec3 waterTint = mix(uWaterShallowColor, uWaterDeepColor, smoothstep(0.1, 1.2, thickness));
+          waterCol = mix(waterCol, waterTint, clamp(thickness * 0.75, 0.0, 0.85));
 
-          // Schlick's Fresnel Reflection
-          float R0 = 0.0204; // Index of Refraction n = 1.333 for water
+          // 5. Schlick's Fresnel Sky Reflection
+          float R0 = 0.0204; // Refractive index of water = 1.333
           float cosTheta = max(dot(N, V), 0.0);
           float fresnel = R0 + (1.0 - R0) * pow(1.0 - cosTheta, 5.0);
-          waterCol = mix(waterCol, uSkyColor * 1.12, fresnel * 0.72);
+          waterCol = mix(waterCol, uSkyColor * 1.15, fresnel * 0.75);
 
-          // Sun Specular Highlight (Blinn-Phong)
+          // 6. Blinn-Phong Sun Specular Highlight
           vec3 L = normalize(uViewSunDir);
           vec3 H = normalize(L + V);
           float NdotH = max(dot(N, H), 0.0);
-          float spec = pow(NdotH, 96.0);
-          waterCol += uSunColor * spec * 0.95;
+          float spec = pow(NdotH, 128.0);
+          waterCol += uSunColor * spec * 1.1;
 
-          // Stylized contact edge foam and aeration
-          float edgeFoam = smoothstep(0.12, 0.02, thickness) * smoothstep(0.005, 0.02, thickness);
-          vec3 foamColor = vec3(0.95, 0.98, 1.0);
-          waterCol = mix(waterCol, foamColor, edgeFoam * 0.45);
+          // 7. Shoreline / Bedrock Contact Foam (where water meets land, zero per-particle rim foam)
+          float depthToBed = max(sceneZ - fluidZ, 0.0);
+          float shorelineContact = smoothstep(0.20, 0.02, depthToBed);
+          vec2 foamUv = worldPos.xz * 0.5 + vec2(uTime * 0.03, uTime * 0.02);
+          float foamSample = texture2D(uFoamTex, foamUv).r;
+          float shoreFoam = shorelineContact * smoothstep(0.35, 0.75, foamSample);
+          waterCol = mix(waterCol, vec3(0.95, 0.98, 1.0), shoreFoam * 0.65);
 
-          gl_FragColor = vec4(waterCol, 1.0);
+          // 8. Soft alpha feathering at outer boundary
+          float alpha = smoothstep(0.03, 0.14, thickness);
+          gl_FragColor = vec4(mix(bgCol.rgb, waterCol, alpha), 1.0);
         }
       `,
     });
@@ -552,35 +563,72 @@ export class SphRenderer {
       return;
     }
 
-    // Pass 1: Render background world (terrain, sky, bottles, reticles) into scene target with depth texture
+    const tx = 1.0 / this.targetW;
+    const ty = 1.0 / this.targetH;
+
+    // Pass 1: Render background world into scene target with hardware depth
     this.renderer.setRenderTarget(this.sceneTarget);
     this.renderer.render(this.scene, cam);
 
-    // Pass 2: Render fluid particle depth buffer (view-space linear Z)
+    // Pass 2: Render fluid particle depth buffer (view-space linear Z with Wendland kernel)
     this.renderer.setRenderTarget(this.fluidDepthTarget);
     this.renderer.clear();
     this.particleQuadMesh.material = this.particleDepthMat;
     this.renderer.render(this.fluidScene, cam);
 
-    // Pass 3: Render fluid optical thickness buffer (additive chord accumulation)
+    // Pass 3: Render fluid optical thickness buffer (additive accumulation)
     this.renderer.setRenderTarget(this.fluidThicknessTarget);
     this.renderer.clear();
     this.particleQuadMesh.material = this.particleThicknessMat;
     this.renderer.render(this.fluidScene, cam);
 
-    // Pass 4a: Horizontal Bilateral Depth Blur
-    this.renderer.setRenderTarget(this.tempBlurTarget);
+    // Pass 4: 6-Pass Multi-Scale Hierarchical Bilateral Depth Blur (covers 75+ screen pixels)
+    // Pass 4a: Horizontal Step 1.0 (from fluidDepthTarget to tempBlur1)
+    this.blurMat.uniforms.uDepthTex.value = this.fluidDepthTarget.texture;
+    this.blurMat.uniforms.uStep.value.set(tx * 1.0, 0);
+    this.renderer.setRenderTarget(this.tempBlur1);
     this.renderer.clear();
-    this.renderer.render(this.blurHScene, this.postCam);
+    this.renderer.render(this.blurScene, this.postCam);
 
-    // Pass 4b: Vertical Bilateral Depth Blur -> Smoothed Depth Target
+    // Pass 4b: Vertical Step 1.0 (from tempBlur1 to tempBlur2)
+    this.blurMat.uniforms.uDepthTex.value = this.tempBlur1.texture;
+    this.blurMat.uniforms.uStep.value.set(0, ty * 1.0);
+    this.renderer.setRenderTarget(this.tempBlur2);
+    this.renderer.clear();
+    this.renderer.render(this.blurScene, this.postCam);
+
+    // Pass 4c: Horizontal Step 2.5 (from tempBlur2 to tempBlur1)
+    this.blurMat.uniforms.uDepthTex.value = this.tempBlur2.texture;
+    this.blurMat.uniforms.uStep.value.set(tx * 2.5, 0);
+    this.renderer.setRenderTarget(this.tempBlur1);
+    this.renderer.clear();
+    this.renderer.render(this.blurScene, this.postCam);
+
+    // Pass 4d: Vertical Step 2.5 (from tempBlur1 to tempBlur2)
+    this.blurMat.uniforms.uDepthTex.value = this.tempBlur1.texture;
+    this.blurMat.uniforms.uStep.value.set(0, ty * 2.5);
+    this.renderer.setRenderTarget(this.tempBlur2);
+    this.renderer.clear();
+    this.renderer.render(this.blurScene, this.postCam);
+
+    // Pass 4e: Horizontal Step 5.0 (from tempBlur2 to tempBlur1)
+    this.blurMat.uniforms.uDepthTex.value = this.tempBlur2.texture;
+    this.blurMat.uniforms.uStep.value.set(tx * 5.0, 0);
+    this.renderer.setRenderTarget(this.tempBlur1);
+    this.renderer.clear();
+    this.renderer.render(this.blurScene, this.postCam);
+
+    // Pass 4f: Vertical Step 5.0 (from tempBlur1 into smoothedDepthTarget)
+    this.blurMat.uniforms.uDepthTex.value = this.tempBlur1.texture;
+    this.blurMat.uniforms.uStep.value.set(0, ty * 5.0);
     this.renderer.setRenderTarget(this.smoothedDepthTarget);
     this.renderer.clear();
-    this.renderer.render(this.blurVScene, this.postCam);
+    this.renderer.render(this.blurScene, this.postCam);
 
     // Pass 5: Fullscreen Composite SSFR Shading to Canvas
-    // Update camera uniforms
     this.compositeMat.uniforms.uInvProj.value.copy(cam.projectionMatrixInverse);
+    this.compositeMat.uniforms.uInvView.value.copy(cam.matrixWorld);
+    this.compositeMat.uniforms.uViewMatrix.value.copy(cam.matrixWorldInverse);
     this.compositeMat.uniforms.uCameraNear.value = cam.near;
     this.compositeMat.uniforms.uCameraFar.value = cam.far;
     this.compositeMat.uniforms.uTime.value = performance.now() * 0.001;
@@ -602,12 +650,11 @@ export class SphRenderer {
     this.sceneTarget.setSize(w, h);
     this.fluidDepthTarget.setSize(w, h);
     this.fluidThicknessTarget.setSize(w, h);
-    this.tempBlurTarget.setSize(w, h);
+    this.tempBlur1.setSize(w, h);
+    this.tempBlur2.setSize(w, h);
     this.smoothedDepthTarget.setSize(w, h);
 
     const ts = new THREE.Vector2(1 / w, 1 / h);
-    this.blurHMat.uniforms.uTexelSize.value.copy(ts);
-    this.blurVMat.uniforms.uTexelSize.value.copy(ts);
     this.compositeMat.uniforms.uTexelSize.value.copy(ts);
   }
 
@@ -615,16 +662,19 @@ export class SphRenderer {
     this.sceneTarget.dispose();
     this.fluidDepthTarget.dispose();
     this.fluidThicknessTarget.dispose();
-    this.tempBlurTarget.dispose();
+    this.tempBlur1.dispose();
+    this.tempBlur2.dispose();
     this.smoothedDepthTarget.dispose();
 
     this.particleGeo.dispose();
     this.particleDepthMat.dispose();
     this.particleThicknessMat.dispose();
 
-    this.blurHMat.dispose();
-    this.blurVMat.dispose();
+    this.blurMat.dispose();
     this.compositeMat.dispose();
+
+    this.waterNormalMap.dispose();
+    this.foamTex.dispose();
 
     this.pointsGeo.dispose();
     this.pointsMat.dispose();
