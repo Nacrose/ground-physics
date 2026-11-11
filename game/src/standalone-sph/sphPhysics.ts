@@ -13,7 +13,7 @@ export interface SphParams {
   xsphFactor: number;      // Monaghan 1992 XSPH artificial viscosity (0.28)
 }
 
-export type SimPreset = "wave" | "rain" | "crater" | "jet" | "ditch" | "bottle" | "tanker";
+export type SimPreset = "wave" | "rain" | "crater" | "jet" | "ditch" | "bottle" | "tanker" | "river";
 export type InteractionMode = "orbit" | "vortex" | "attract" | "repel" | "emit";
 
 export class SphPhysics {
@@ -233,6 +233,35 @@ export class SphPhysics {
         // High-volume dump from an overhead tanker outlet above the slope
         this.terrain.holeEnabled = false;
         this.activeParticles = 0;
+        break;
+      }
+
+      case "river": {
+        // Continuous Mountain River:
+        // Prefill river channel from mountain summit (x = -12.5) to downstream lake (x = 9.0)
+        this.terrain.holeEnabled = false;
+        const count = Math.min(this.params.particleCount, 5500);
+        let idx = 0;
+        const spacing = this.params.particleRadius * 1.65;
+
+        for (let x = -12.5; x <= 9.0 && idx < count; x += spacing * 1.1) {
+          const xc = 3.2 * Math.sin(x * 0.22) + 1.2 * Math.cos(x * 0.45);
+          for (let z = xc - 2.8; z <= xc + 2.8 && idx < count; z += spacing) {
+            const bedY = this.terrain.getHeight(x, z);
+            for (let y = bedY + 0.15; y <= bedY + 1.25 && idx < count; y += spacing) {
+              const i3 = idx * 3;
+              this.pos[i3] = x + (Math.random() - 0.5) * 0.05;
+              this.pos[i3 + 1] = y;
+              this.pos[i3 + 2] = z + (Math.random() - 0.5) * 0.05;
+              // Forward downstream velocity
+              this.vel[i3] = 4.2 + (Math.random() - 0.5) * 0.6;
+              this.vel[i3 + 1] = -1.2;
+              this.vel[i3 + 2] = (Math.random() - 0.5) * 0.4;
+              idx++;
+            }
+          }
+        }
+        this.activeParticles = idx;
         break;
       }
 
@@ -695,6 +724,47 @@ export class SphPhysics {
           this.vel[i3] = 3.5 + (Math.random() - 0.5) * 1.5; // forward dump trajectory
           this.vel[i3 + 1] = -12.0 - Math.random() * 2.0;  // high downward velocity
           this.vel[i3 + 2] = (Math.random() - 0.5) * 1.5;
+        }
+      }
+    }
+
+    // 2b. Mountain River Mode: Continuous upstream spring inflow & perpetual downstream recycling!
+    else if (this.currentPreset === "river") {
+      this.rainTimer += dt;
+      // Spring discharge at mountain summit gorge (x = -12.8)
+      if (this.rainTimer >= 0.025 && this.activeParticles < this.params.particleCount) {
+        this.rainTimer = 0;
+        const springDrops = 10;
+        const xSpring = -12.8;
+        const zcSpring = 3.2 * Math.sin(xSpring * 0.22) + 1.2 * Math.cos(xSpring * 0.45);
+        const bedYSpring = this.terrain.getHeight(xSpring, zcSpring);
+
+        for (let k = 0; k < springDrops && this.activeParticles < this.params.particleCount; k++) {
+          const idx = this.activeParticles++;
+          const i3 = idx * 3;
+          this.pos[i3] = xSpring + (Math.random() - 0.5) * 0.6;
+          this.pos[i3 + 1] = bedYSpring + 0.6 + Math.random() * 0.8;
+          this.pos[i3 + 2] = zcSpring + (Math.random() - 0.5) * 2.2;
+          this.vel[i3] = 4.8 + Math.random() * 1.2; // rushing downstream
+          this.vel[i3 + 1] = -1.4;
+          this.vel[i3 + 2] = (Math.random() - 0.5) * 0.6;
+        }
+      }
+
+      // Perpetual Conservation Loop: Recycle particles reaching downstream lake boundary (x > 12.0)
+      for (let i = 0; i < this.activeParticles; i++) {
+        const i3 = i * 3;
+        if (this.pos[i3] > 12.2) {
+          const xSpring = -12.8;
+          const zcSpring = 3.2 * Math.sin(xSpring * 0.22) + 1.2 * Math.cos(xSpring * 0.45);
+          const bedYSpring = this.terrain.getHeight(xSpring, zcSpring);
+
+          this.pos[i3] = xSpring + (Math.random() - 0.5) * 0.6;
+          this.pos[i3 + 1] = bedYSpring + 0.6 + Math.random() * 0.8;
+          this.pos[i3 + 2] = zcSpring + (Math.random() - 0.5) * 2.2;
+          this.vel[i3] = 4.8 + Math.random() * 1.2;
+          this.vel[i3 + 1] = -1.4;
+          this.vel[i3 + 2] = (Math.random() - 0.5) * 0.6;
         }
       }
     }

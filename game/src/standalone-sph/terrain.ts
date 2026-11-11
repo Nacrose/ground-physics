@@ -99,6 +99,49 @@ export class SphTerrain {
     for (const bm of this.boulderMeshes) {
       bm.visible = !isBottle;
     }
+
+    if (preset === "river") {
+      // Position boulders directly in the active river meander channel to create rapids & wakes
+      if (this.boulders[0]) {
+        const z0 = 3.2 * Math.sin(-4.0 * 0.22) + 1.2 * Math.cos(-4.0 * 0.45) + 0.3;
+        const y0 = this.getHeight(-4.0, z0) + 0.75;
+        this.boulders[0].center.set(-4.0, y0, z0);
+        this.boulders[0].radius = 1.35;
+        if (this.boulderMeshes[0]) {
+          this.boulderMeshes[0].position.copy(this.boulders[0].center);
+          this.boulderMeshes[0].scale.setScalar(1.35 / 1.85);
+        }
+      }
+      if (this.boulders[1]) {
+        const z1 = 3.2 * Math.sin(2.5 * 0.22) + 1.2 * Math.cos(2.5 * 0.45) - 0.35;
+        const y1 = this.getHeight(2.5, z1) + 0.70;
+        this.boulders[1].center.set(2.5, y1, z1);
+        this.boulders[1].radius = 1.55;
+        if (this.boulderMeshes[1]) {
+          this.boulderMeshes[1].position.copy(this.boulders[1].center);
+          this.boulderMeshes[1].scale.setScalar(1.55 / 1.50);
+        }
+      }
+    } else {
+      // Default boulder positions in crater/ditch
+      if (this.boulders[0]) {
+        this.boulders[0].center.set(2.6, -2.4, 1.4);
+        this.boulders[0].radius = 1.85;
+        if (this.boulderMeshes[0]) {
+          this.boulderMeshes[0].position.copy(this.boulders[0].center);
+          this.boulderMeshes[0].scale.setScalar(1.0);
+        }
+      }
+      if (this.boulders[1]) {
+        this.boulders[1].center.set(-3.2, -1.8, -1.6);
+        this.boulders[1].radius = 1.50;
+        if (this.boulderMeshes[1]) {
+          this.boulderMeshes[1].position.copy(this.boulders[1].center);
+          this.boulderMeshes[1].scale.setScalar(1.0);
+        }
+      }
+    }
+
     this.rebuildGeometry();
   }
 
@@ -118,6 +161,43 @@ export class SphTerrain {
     if (this.currentPreset === "bottle") {
       // Flat pedestal floor under the bottle
       return -3.4 + Math.sin(x * 0.4) * Math.cos(z * 0.4) * 0.15;
+    }
+
+    if (this.currentPreset === "river") {
+      // Mountain River Valley with Winding Canyon & Rapids:
+      // Flow runs from -X (upstream mountain summit, x = -13.5) to +X (downstream lake, x = 12.0)
+      const xc = 3.2 * Math.sin(x * 0.22) + 1.2 * Math.cos(x * 0.45);
+      const crossDist = Math.abs(z - xc);
+      const channelW = 4.2;
+
+      // Steady downhill slope from mountain headwaters to valley floor
+      const tX = Math.max(0.0, Math.min(1.0, (x + 13.5) / 24.0));
+      let valleySlope = 4.0 * (1.0 - tX) - 3.4 * tX;
+
+      // Parabolic riverbed carving
+      let channelDepth = 0.0;
+      if (crossDist < channelW) {
+        const u = crossDist / channelW;
+        channelDepth = -1.75 * (1.0 - u * u);
+      } else {
+        const bankDist = crossDist - channelW;
+        channelDepth = 0.50 * bankDist + 0.60 * Math.log(1.0 + 1.8 * bankDist);
+      }
+
+      // Downstream lake basin for x > 8.0
+      if (x > 8.0) {
+        const lakeT = Math.min((x - 8.0) / 4.0, 1.0);
+        const lakeDist = Math.hypot((x - 10.5) / 3.2, z / 4.8);
+        let lakeBed = -3.8;
+        if (lakeDist < 1.0) {
+          lakeBed = -3.8 - 0.9 * (1.0 - lakeDist * lakeDist);
+        } else {
+          lakeBed = -3.8 + 0.5 * Math.log(1.0 + (lakeDist - 1.0));
+        }
+        return valleySlope * (1.0 - lakeT) + (channelDepth * (1.0 - lakeT * 0.8)) + lakeBed * lakeT;
+      }
+
+      return valleySlope + channelDepth;
     }
 
     if (this.currentPreset === "ditch") {

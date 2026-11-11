@@ -380,7 +380,30 @@ export default function SphLab() {
           </div>
 
           {/* User Requested Scenarios */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 6 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 6 }}>
+            <button
+              onClick={() => handlePreset("river")}
+              style={{
+                gridColumn: "span 2",
+                padding: "9px 8px",
+                fontSize: 11.5,
+                background: preset === "river" ? "linear-gradient(135deg, rgba(6, 182, 212, 0.35), rgba(59, 130, 246, 0.35))" : "rgba(255,255,255,0.06)",
+                border: preset === "river" ? "1.5px solid #38bdf8" : "1px solid rgba(255,255,255,0.1)",
+                boxShadow: preset === "river" ? "0 0 16px rgba(56, 189, 248, 0.45)" : "none",
+                borderRadius: 7,
+                color: preset === "river" ? "#38bdf8" : "#fff",
+                fontWeight: preset === "river" ? 700 : 500,
+                cursor: "pointer",
+                textAlign: "center",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 8,
+              }}
+            >
+              <span>🏞️ 3D Mountain River (Continuous Flow & Rapids)</span>
+            </button>
+
             <button
               onClick={() => handlePreset("ditch")}
               style={{
@@ -428,6 +451,7 @@ export default function SphLab() {
             <button
               onClick={() => handlePreset("tanker")}
               style={{
+                gridColumn: "span 2",
                 padding: "8px 6px",
                 fontSize: 10.5,
                 background: preset === "tanker" ? "rgba(245, 158, 11, 0.28)" : "rgba(255,255,255,0.06)",
@@ -439,12 +463,12 @@ export default function SphLab() {
                 cursor: "pointer",
                 textAlign: "center",
                 display: "flex",
-                flexDirection: "column",
-                gap: 2,
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 6,
               }}
             >
-              <span>🚛 Tanker Dump</span>
-              <span style={{ fontSize: 8, color: "#94a3b8" }}>Torrential Spout</span>
+              <span>🚛 Tanker Dump (Torrential Spout Impact)</span>
             </button>
           </div>
 
@@ -475,6 +499,13 @@ export default function SphLab() {
               <div style={{ fontSize: 8.5, color: "#c084fc", marginTop: 4, textAlign: "center" }}>
                 Applies 3D oscillatory acceleration a_shake(t) inside 6-wall glass bottle
               </div>
+            </div>
+          )}
+
+          {/* River description */}
+          {preset === "river" && (
+            <div style={{ marginBottom: 8, padding: "8px 10px", background: "rgba(6, 182, 212, 0.12)", border: "1px solid rgba(6, 182, 212, 0.35)", borderRadius: 6, fontSize: 9.5, color: "#67e8f9", lineHeight: 1.4 }}>
+              <strong>🏞️ 3D Mountain River:</strong> Continuous upstream springhead inflow (x = -12.8) surges down a winding bedrock canyon, splits into turbulent rapids around mid-stream boulders, and settles into a downstream tarn lake before recycling via physical catchment conservation.
             </div>
           )}
 

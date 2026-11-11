@@ -402,6 +402,9 @@ export class StandaloneSphLab {
     } else if (preset === "tanker") {
       this.camera.position.set(12.0, 12.0, 16.0);
       this.controls.target.set(-2.0, 0.0, 0);
+    } else if (preset === "river") {
+      this.camera.position.set(-4.0, 10.5, 15.5);
+      this.controls.target.set(0.5, -0.5, 0.5);
     }
     this.controls.update();
   }
