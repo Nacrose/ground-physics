@@ -23,12 +23,14 @@ export class StandaloneSphLab {
 
   // Interactive 3D Cursor Forces (deni10000/Godot-3D-SPH-Fluid-Simulation)
   interactionMode: InteractionMode = "vortex";
-  interactionRadius = 4.2;
-  interactionStrength = 55.0;
+  interactionRadius = 5.5;
+  interactionStrength = 65.0;
   private raycaster = new THREE.Raycaster();
   private pointer = new THREE.Vector2();
   private isPointerDown = false;
   private hitPoint = new THREE.Vector3(0, -2.5, 0);
+  private tempVec = new THREE.Vector3();
+  private fallbackPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 2.0);
 
   // Dynamic 3D Interaction Gizmo Reticle
   private gizmoGroup = new THREE.Group();
@@ -37,6 +39,10 @@ export class StandaloneSphLab {
   private gizmoArrows: THREE.Group;
   private gizmoMat: THREE.LineBasicMaterial;
   private gizmoArrowMat: THREE.MeshBasicMaterial;
+
+  // Bottle Mode 3D Glass Container
+  private bottleMesh: THREE.Mesh;
+  private tankerMesh: THREE.Group;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -54,7 +60,7 @@ export class StandaloneSphLab {
     container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x111827);
+    this.scene.background = new THREE.Color(0x0f172a);
 
     // 2. Camera & OrbitControls overlooking the crater basin
     this.camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 150);
@@ -66,8 +72,13 @@ export class StandaloneSphLab {
     this.controls.dampingFactor = 0.05;
     this.controls.maxPolarAngle = Math.PI / 2 - 0.02;
 
+    // Configure controls so that tool dragging NEVER conflicts with camera orbit
+    this.controls.enableRotate = (this.interactionMode === "orbit");
+    this.controls.enablePan = true;
+    this.controls.enableZoom = true;
+
     // 3. Environment & Lighting
-    const hemiLight = new THREE.HemisphereLight(0x8faecc, 0x1f2429, 0.55);
+    const hemiLight = new THREE.HemisphereLight(0x93c5fd, 0x1e293b, 0.55);
     this.scene.add(hemiLight);
 
     this.sunLight = new THREE.DirectionalLight(0xffeedd, 3.5);
@@ -123,7 +134,7 @@ export class StandaloneSphLab {
 
     this.gizmoArrows = new THREE.Group();
     for (let k = 0; k < 4; k++) {
-      const cone = new THREE.Mesh(new THREE.ConeGeometry(0.25, 0.6, 6), this.gizmoArrowMat);
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(0.28, 0.65, 6), this.gizmoArrowMat);
       cone.rotateX(Math.PI / 2);
       this.gizmoArrows.add(cone);
     }
@@ -131,13 +142,47 @@ export class StandaloneSphLab {
     this.gizmoGroup.visible = false;
     this.scene.add(this.gizmoGroup);
 
-    // 8. Setup Interactive Pointer Events
+    // 8. 3D Transparent Glass Bottle Mesh for Bottle Sloshing Mode
+    const bottleGeo = new THREE.BoxGeometry(5.3, 6.5, 5.3);
+    const bottleMat = new THREE.MeshPhysicalMaterial({
+      color: 0x94a3b8,
+      transparent: true,
+      opacity: 0.35,
+      roughness: 0.1,
+      metalness: 0.1,
+      transmission: 0.85,
+      ior: 1.52,
+      thickness: 0.4,
+    });
+    this.bottleMesh = new THREE.Mesh(bottleGeo, bottleMat);
+    this.bottleMesh.position.set(0, 0.4, 0);
+    this.bottleMesh.visible = false;
+    this.scene.add(this.bottleMesh);
+
+    // 9. 3D Overhead Tanker Spout Mesh for Tanker Dump Mode
+    this.tankerMesh = new THREE.Group();
+    const tankCyl = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.4, 1.4, 5.0, 16),
+      new THREE.MeshStandardMaterial({ color: 0x475569, metalness: 0.8, roughness: 0.25 })
+    );
+    tankCyl.rotateZ(Math.PI / 2);
+    tankCyl.position.set(-8.5, 8.8, 0);
+    this.tankerMesh.add(tankCyl);
+
+    const spout = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.5, 0.65, 1.8, 12),
+      new THREE.MeshStandardMaterial({ color: 0xf97316, metalness: 0.5, roughness: 0.4 })
+    );
+    spout.position.set(-6.5, 7.8, 0);
+    this.tankerMesh.add(spout);
+    this.tankerMesh.visible = false;
+    this.scene.add(this.tankerMesh);
+
+    // 10. Setup Interactive Pointer Events
     this.setupPointerEvents();
 
-    // Window resize
     window.addEventListener("resize", this.onResize);
 
-    // Animation loop
     this.lastTime = performance.now();
     this.animate(this.lastTime);
   }
@@ -156,27 +201,44 @@ export class StandaloneSphLab {
     this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
   }
 
+  private find3DHitPoint(): boolean {
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const targets = [this.terrain.mesh];
+    if (this.terrain.currentPreset !== "bottle") {
+      targets.push(...this.terrain.boulderMeshes);
+    }
+    const hits = this.raycaster.intersectObjects(targets);
+
+    if (hits.length > 0) {
+      this.hitPoint.copy(hits[0].point);
+      return true;
+    }
+
+    // Fallback: intersect plane passing through crater center
+    const planeHit = this.raycaster.ray.intersectPlane(this.fallbackPlane, this.tempVec);
+    if (planeHit) {
+      this.hitPoint.copy(this.tempVec);
+      return true;
+    }
+    return false;
+  }
+
   private onPointerDown = (e: PointerEvent) => {
     if (e.button !== 0) return;
     this.updatePointerCoord(e);
-    this.raycaster.setFromCamera(this.pointer, this.camera);
 
-    const hits = this.raycaster.intersectObject(this.terrain.mesh);
-    if (hits.length > 0 && (this.interactionMode !== "orbit" || e.shiftKey)) {
+    if (this.interactionMode !== "orbit" || e.shiftKey) {
       this.isPointerDown = true;
-      this.controls.enabled = false;
-      this.hitPoint.copy(hits[0].point);
-      this.physics.setInteraction(true, this.interactionMode, this.hitPoint, this.interactionRadius, this.interactionStrength);
+      if (this.find3DHitPoint()) {
+        this.physics.setInteraction(true, this.interactionMode, this.hitPoint, this.interactionRadius, this.interactionStrength);
+      }
     }
   };
 
   private onPointerMove = (e: PointerEvent) => {
     this.updatePointerCoord(e);
-    this.raycaster.setFromCamera(this.pointer, this.camera);
-    const hits = this.raycaster.intersectObject(this.terrain.mesh);
 
-    if (hits.length > 0) {
-      this.hitPoint.copy(hits[0].point);
+    if (this.find3DHitPoint()) {
       this.gizmoGroup.position.copy(this.hitPoint);
 
       if (this.interactionMode !== "orbit") {
@@ -200,45 +262,54 @@ export class StandaloneSphLab {
 
   private onPointerUp = () => {
     this.isPointerDown = false;
-    this.controls.enabled = true;
     this.physics.setInteraction(false, this.interactionMode, this.hitPoint);
   };
 
   setInteractionMode(mode: InteractionMode) {
     this.interactionMode = mode;
-    this.controls.enabled = true;
     this.physics.interactionMode = mode;
 
-    // Dynamically re-theme 3D Gizmo visuals based on mode
+    // Cleanly manage camera rotation: OrbitControls rotates camera ONLY in orbit mode
+    this.controls.enableRotate = (mode === "orbit");
+
     if (mode === "vortex") {
       this.gizmoMat.color.setHex(0x10b981); // Emerald Green
       this.gizmoArrowMat.color.setHex(0x10b981);
       this.gizmoArrows.visible = true;
+      this.renderer.domElement.style.cursor = "crosshair";
     } else if (mode === "attract") {
       this.gizmoMat.color.setHex(0x06b6d4); // Radiant Cyan
       this.gizmoArrowMat.color.setHex(0x06b6d4);
       this.gizmoArrows.visible = true;
+      this.renderer.domElement.style.cursor = "crosshair";
     } else if (mode === "repel") {
       this.gizmoMat.color.setHex(0xf97316); // Blazing Orange
       this.gizmoArrowMat.color.setHex(0xf97316);
       this.gizmoArrows.visible = true;
+      this.renderer.domElement.style.cursor = "crosshair";
     } else if (mode === "emit") {
       this.gizmoMat.color.setHex(0x3b82f6); // Royal Blue
       this.gizmoArrowMat.color.setHex(0x3b82f6);
       this.gizmoArrows.visible = false;
+      this.renderer.domElement.style.cursor = "crosshair";
     } else {
       this.gizmoGroup.visible = false;
+      this.renderer.domElement.style.cursor = "default";
     }
   }
 
   setInteractionRadius(r: number) {
     this.interactionRadius = r;
-    this.gizmoOuterRing.scale.set(r / 4.2, 1, r / 4.2);
-    this.gizmoInnerRing.scale.set(r / 4.2, 1, r / 4.2);
+    this.gizmoOuterRing.scale.set(r / 5.5, 1, r / 5.5);
+    this.gizmoInnerRing.scale.set(r / 5.5, 1, r / 5.5);
   }
 
   setInteractionStrength(s: number) {
     this.interactionStrength = s;
+  }
+
+  shakeBottle() {
+    this.physics.shakeBottle(2.2);
   }
 
   private onResize = () => {
@@ -278,7 +349,7 @@ export class StandaloneSphLab {
             const dist = 1.2 + (1.0 - pulse) * (this.interactionRadius - 1.2);
             const cone = this.gizmoArrows.children[k] as THREE.Mesh;
             cone.position.set(Math.cos(a) * dist, 0.1, Math.sin(a) * dist);
-            cone.rotation.y = -a + Math.PI / 2; // Point inward
+            cone.rotation.y = -a + Math.PI / 2;
           }
         } else if (this.interactionMode === "repel") {
           const pulse = (Math.sin(now * 0.009) * 0.5 + 0.5);
@@ -288,9 +359,20 @@ export class StandaloneSphLab {
             const dist = 0.8 + pulse * (this.interactionRadius - 1.0);
             const cone = this.gizmoArrows.children[k] as THREE.Mesh;
             cone.position.set(Math.cos(a) * dist, 0.1, Math.sin(a) * dist);
-            cone.rotation.y = -a - Math.PI / 2; // Point outward
+            cone.rotation.y = -a - Math.PI / 2;
           }
         }
+      }
+
+      // Bottle vibration during shaking
+      if (this.physics.isShakingBottle) {
+        const shakeT = now * 0.02;
+        this.bottleMesh.position.x = Math.sin(shakeT * 1.5) * 0.15;
+        this.bottleMesh.position.y = 0.4 + Math.cos(shakeT * 2.2) * 0.10;
+        this.bottleMesh.rotation.z = Math.sin(shakeT * 1.1) * 0.08;
+      } else {
+        this.bottleMesh.position.set(0, 0.4, 0);
+        this.bottleMesh.rotation.set(0, 0, 0);
       }
     }
 
@@ -301,6 +383,23 @@ export class StandaloneSphLab {
   setPreset(preset: SimPreset) {
     this.physics.applyPreset(preset);
     this.fluidRenderer.update();
+
+    // Toggle custom 3D mode props
+    this.bottleMesh.visible = (preset === "bottle");
+    this.tankerMesh.visible = (preset === "tanker");
+
+    // Camera viewpoints for special presets
+    if (preset === "bottle") {
+      this.camera.position.set(0, 2.5, 11.0);
+      this.controls.target.set(0, 0.5, 0);
+    } else if (preset === "ditch") {
+      this.camera.position.set(-1.0, 9.5, 14.5);
+      this.controls.target.set(-0.5, -1.5, 0);
+    } else if (preset === "tanker") {
+      this.camera.position.set(12.0, 12.0, 16.0);
+      this.controls.target.set(-2.0, 0.0, 0);
+    }
+    this.controls.update();
   }
 
   setRenderMode(mode: RenderMode) {

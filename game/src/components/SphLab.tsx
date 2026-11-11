@@ -375,15 +375,130 @@ export default function SphLab() {
 
         {/* Simulation Presets */}
         <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", marginBottom: 6 }}>
-            Simulation Presets
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#38bdf8", textTransform: "uppercase", marginBottom: 6 }}>
+            Simulation Scenarios & Physics Presets
           </div>
+
+          {/* User Requested Scenarios */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 6 }}>
+            <button
+              onClick={() => handlePreset("ditch")}
+              style={{
+                padding: "8px 6px",
+                fontSize: 10.5,
+                background: preset === "ditch" ? "rgba(56, 189, 248, 0.28)" : "rgba(255,255,255,0.06)",
+                border: preset === "ditch" ? "1.5px solid #38bdf8" : "1px solid rgba(255,255,255,0.1)",
+                boxShadow: preset === "ditch" ? "0 0 12px rgba(56, 189, 248, 0.35)" : "none",
+                borderRadius: 6,
+                color: preset === "ditch" ? "#38bdf8" : "#fff",
+                fontWeight: preset === "ditch" ? 700 : 500,
+                cursor: "pointer",
+                textAlign: "center",
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+              }}
+            >
+              <span>🥣 Ditch Overflow</span>
+              <span style={{ fontSize: 8, color: "#94a3b8" }}>Rain & Weir Spill</span>
+            </button>
+
+            <button
+              onClick={() => handlePreset("bottle")}
+              style={{
+                padding: "8px 6px",
+                fontSize: 10.5,
+                background: preset === "bottle" ? "rgba(168, 85, 247, 0.28)" : "rgba(255,255,255,0.06)",
+                border: preset === "bottle" ? "1.5px solid #a855f7" : "1px solid rgba(255,255,255,0.1)",
+                boxShadow: preset === "bottle" ? "0 0 12px rgba(168, 85, 247, 0.35)" : "none",
+                borderRadius: 6,
+                color: preset === "bottle" ? "#c084fc" : "#fff",
+                fontWeight: preset === "bottle" ? 700 : 500,
+                cursor: "pointer",
+                textAlign: "center",
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+              }}
+            >
+              <span>🧴 Bottle Slosh</span>
+              <span style={{ fontSize: 8, color: "#94a3b8" }}>Glass Enclosure</span>
+            </button>
+
+            <button
+              onClick={() => handlePreset("tanker")}
+              style={{
+                padding: "8px 6px",
+                fontSize: 10.5,
+                background: preset === "tanker" ? "rgba(245, 158, 11, 0.28)" : "rgba(255,255,255,0.06)",
+                border: preset === "tanker" ? "1.5px solid #f59e0b" : "1px solid rgba(255,255,255,0.1)",
+                boxShadow: preset === "tanker" ? "0 0 12px rgba(245, 158, 11, 0.35)" : "none",
+                borderRadius: 6,
+                color: preset === "tanker" ? "#fbbf24" : "#fff",
+                fontWeight: preset === "tanker" ? 700 : 500,
+                cursor: "pointer",
+                textAlign: "center",
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+              }}
+            >
+              <span>🚛 Tanker Dump</span>
+              <span style={{ fontSize: 8, color: "#94a3b8" }}>Torrential Spout</span>
+            </button>
+          </div>
+
+          {/* Bottle Shake Action Button */}
+          {preset === "bottle" && (
+            <div style={{ marginBottom: 8, animation: "fadeIn 0.2s ease" }}>
+              <button
+                onClick={() => labRef.current?.shakeBottle()}
+                style={{
+                  width: "100%",
+                  padding: "9px 12px",
+                  background: "linear-gradient(135deg, #7c3aed, #a855f7)",
+                  border: "1.5px solid #c084fc",
+                  borderRadius: 7,
+                  color: "#fff",
+                  fontWeight: 700,
+                  fontSize: 12,
+                  cursor: "pointer",
+                  boxShadow: "0 0 16px rgba(168, 85, 247, 0.5)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 8,
+                }}
+              >
+                <span>📳 Shake Bottle (Slosh & Atomize)</span>
+              </button>
+              <div style={{ fontSize: 8.5, color: "#c084fc", marginTop: 4, textAlign: "center" }}>
+                Applies 3D oscillatory acceleration a_shake(t) inside 6-wall glass bottle
+              </div>
+            </div>
+          )}
+
+          {/* Ditch description */}
+          {preset === "ditch" && (
+            <div style={{ marginBottom: 8, padding: "6px 8px", background: "rgba(56, 189, 248, 0.1)", border: "1px solid rgba(56, 189, 248, 0.25)", borderRadius: 6, fontSize: 9, color: "#bae6fd" }}>
+              Rain drops fall into the upper ditch bowl (y = -0.5). When depth exceeds the weir lip (x = -1.2, y = -0.8), water cascades down the cliff into the lower terrace basin (y = -3.2).
+            </div>
+          )}
+
+          {/* Tanker description */}
+          {preset === "tanker" && (
+            <div style={{ marginBottom: 8, padding: "6px 8px", background: "rgba(245, 158, 11, 0.1)", border: "1px solid rgba(245, 158, 11, 0.25)", borderRadius: 6, fontSize: 9, color: "#fef08a" }}>
+              High-volume overhead tanker spout dumping 18 drops/frame at 12 m/s impact velocity. Watch the radial shockwave crown, circular hydraulic jump, and downhill runoff stream incision.
+            </div>
+          )}
+
+          {/* Additional classic benchmarks */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
             <button
               onClick={() => handlePreset("wave")}
               style={{
-                padding: "7px 8px",
-                fontSize: 11,
+                padding: "6px 8px",
+                fontSize: 10.5,
                 background: preset === "wave" ? "#0284c7" : "rgba(255,255,255,0.06)",
                 border: "1px solid rgba(255,255,255,0.1)",
                 borderRadius: 6,
@@ -397,8 +512,8 @@ export default function SphLab() {
             <button
               onClick={() => handlePreset("crater")}
               style={{
-                padding: "7px 8px",
-                fontSize: 11,
+                padding: "6px 8px",
+                fontSize: 10.5,
                 background: preset === "crater" ? "#0284c7" : "rgba(255,255,255,0.06)",
                 border: "1px solid rgba(255,255,255,0.1)",
                 borderRadius: 6,
@@ -412,8 +527,8 @@ export default function SphLab() {
             <button
               onClick={() => handlePreset("rain")}
               style={{
-                padding: "7px 8px",
-                fontSize: 11,
+                padding: "6px 8px",
+                fontSize: 10.5,
                 background: preset === "rain" ? "#0284c7" : "rgba(255,255,255,0.06)",
                 border: "1px solid rgba(255,255,255,0.1)",
                 borderRadius: 6,
@@ -427,8 +542,8 @@ export default function SphLab() {
             <button
               onClick={() => handlePreset("jet")}
               style={{
-                padding: "7px 8px",
-                fontSize: 11,
+                padding: "6px 8px",
+                fontSize: 10.5,
                 background: preset === "jet" ? "#0284c7" : "rgba(255,255,255,0.06)",
                 border: "1px solid rgba(255,255,255,0.1)",
                 borderRadius: 6,

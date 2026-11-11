@@ -86,6 +86,9 @@ export class StandaloneRiverLab {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.05;
     this.controls.maxPolarAngle = Math.PI / 2 - 0.02;
+    this.controls.enableRotate = (this.interactionMode === "orbit");
+    this.controls.enablePan = true;
+    this.controls.enableZoom = true;
 
     // 3. Screen Refraction Target
     this.screenTarget = new THREE.WebGLRenderTarget(width, height, {
@@ -217,7 +220,6 @@ export class StandaloneRiverLab {
     const hits = this.raycaster.intersectObject(this.water.mesh);
     if (hits.length > 0 && (this.interactionMode !== "orbit" || e.shiftKey)) {
       this.isPointerDown = true;
-      this.controls.enabled = false; // suspend orbit while interacting with water
       const p = hits[0].point;
       const strength = this.interactionMode === "sweeper" ? 0.28 : 0.45;
       this.swe.addImpulse(p.x, p.z, 0.95, strength, true);

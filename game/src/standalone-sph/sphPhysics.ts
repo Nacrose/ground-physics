@@ -10,10 +10,10 @@ export interface SphParams {
   viscosity: number;       // mu
   gravity: number;         // g = 9.81
   restitution: number;     // collision energy keep (0.3)
-  xsphFactor: number;      // Monaghan 1992 XSPH artificial viscosity (0.25)
+  xsphFactor: number;      // Monaghan 1992 XSPH artificial viscosity (0.28)
 }
 
-export type SimPreset = "wave" | "rain" | "crater" | "jet";
+export type SimPreset = "wave" | "rain" | "crater" | "jet" | "ditch" | "bottle" | "tanker";
 export type InteractionMode = "orbit" | "vortex" | "attract" | "repel" | "emit";
 
 export class SphPhysics {
@@ -54,9 +54,14 @@ export class SphPhysics {
   // Interactive Cursor Forces (deni10000/Godot-3D-SPH-Fluid-Simulation)
   interactionMode: InteractionMode = "vortex";
   interactionPos = new THREE.Vector3(0, -1.0, 0);
-  interactionRadius = 4.2;
-  interactionStrength = 55.0;
+  interactionRadius = 5.5;
+  interactionStrength = 65.0;
   isInteracting = false;
+
+  // Bottle Sloshing Simulation State
+  isShakingBottle = false;
+  private shakeTimer = 0;
+  private shakeIntensity = 0;
 
   // Live Telemetry
   avgDensity = 12.0;
@@ -66,6 +71,8 @@ export class SphPhysics {
   private rainTimer = 0;
   private jetTimer = 0;
   private emitTimer = 0;
+  private ditchRainTimer = 0;
+  private tankerTimer = 0;
   currentPreset: SimPreset = "wave";
 
   constructor(terrain: SphTerrain, maxParticles = 16000, options: Partial<SphParams> = {}) {
@@ -117,24 +124,38 @@ export class SphPhysics {
     active: boolean,
     mode: InteractionMode,
     pos: THREE.Vector3,
-    radius = 4.2,
-    strength = 55.0
+    radius = 5.5,
+    strength = 65.0
   ) {
     this.isInteracting = active;
     this.interactionMode = mode;
     this.interactionPos.copy(pos);
     this.interactionRadius = radius;
     this.interactionStrength = strength;
+
+    // In bottle mode, dragging also shakes the bottle!
+    if (this.currentPreset === "bottle" && active) {
+      this.shakeIntensity = Math.min(1.5, this.shakeIntensity + 0.15);
+    }
+  }
+
+  shakeBottle(durationSec = 2.0) {
+    this.isShakingBottle = true;
+    this.shakeTimer = durationSec;
+    this.shakeIntensity = 1.0;
   }
 
   applyPreset(preset: SimPreset) {
     this.currentPreset = preset;
+    this.terrain.setPreset(preset);
     this.activeParticles = 0;
+    this.isShakingBottle = false;
+    this.shakeIntensity = 0;
 
     switch (preset) {
       case "wave": {
         this.terrain.holeEnabled = false;
-        // Spawn a rectangular block of water on the upper slope (X: -11 to -6)
+        // Rectangular dam-break block of water on upper slope (X: -11 to -6)
         const count = Math.min(this.params.particleCount, 5500);
         let idx = 0;
         const spacing = this.params.particleRadius * 1.85;
@@ -146,7 +167,6 @@ export class SphPhysics {
               this.pos[i3] = x + (Math.random() - 0.5) * 0.05;
               this.pos[i3 + 1] = y;
               this.pos[i3 + 2] = z + (Math.random() - 0.5) * 0.05;
-              // Initial forward momentum down the ramp
               this.vel[i3] = 4.5;
               this.vel[i3 + 1] = -1.0;
               this.vel[i3 + 2] = (Math.random() - 0.5) * 0.5;
@@ -158,6 +178,64 @@ export class SphPhysics {
         break;
       }
 
+      case "ditch": {
+        // Ditch Pooling & Lower Elevation Overflow Mode:
+        // Initial small puddle in upper ditch; continuous rain fills and overflows across weir notch into lower terrace!
+        this.terrain.holeEnabled = false;
+        const count = Math.min(this.params.particleCount, 800);
+        let idx = 0;
+        const spacing = this.params.particleRadius * 1.8;
+
+        for (let x = -5.8; x <= -3.2 && idx < count; x += spacing) {
+          for (let y = -1.7; y <= -0.5 && idx < count; y += spacing) {
+            for (let z = -2.2; z <= 2.2 && idx < count; z += spacing) {
+              const i3 = idx * 3;
+              this.pos[i3] = x + (Math.random() - 0.5) * 0.04;
+              this.pos[i3 + 1] = y;
+              this.pos[i3 + 2] = z + (Math.random() - 0.5) * 0.04;
+              this.vel[i3] = 0;
+              this.vel[i3 + 1] = 0;
+              this.vel[i3 + 2] = 0;
+              idx++;
+            }
+          }
+        }
+        this.activeParticles = idx;
+        break;
+      }
+
+      case "bottle": {
+        // Water in an enclosed bottle with rigid walls (sloshing & shaking)
+        this.terrain.holeEnabled = false;
+        const count = Math.min(this.params.particleCount, 3800);
+        let idx = 0;
+        const spacing = this.params.particleRadius * 1.8;
+
+        for (let x = -2.0; x <= 2.0 && idx < count; x += spacing) {
+          for (let y = -2.5; y <= 0.6 && idx < count; y += spacing) {
+            for (let z = -2.0; z <= 2.0 && idx < count; z += spacing) {
+              const i3 = idx * 3;
+              this.pos[i3] = x + (Math.random() - 0.5) * 0.03;
+              this.pos[i3 + 1] = y;
+              this.pos[i3 + 2] = z + (Math.random() - 0.5) * 0.03;
+              this.vel[i3] = 0;
+              this.vel[i3 + 1] = 0;
+              this.vel[i3 + 2] = 0;
+              idx++;
+            }
+          }
+        }
+        this.activeParticles = idx;
+        break;
+      }
+
+      case "tanker": {
+        // High-volume dump from an overhead tanker outlet above the slope
+        this.terrain.holeEnabled = false;
+        this.activeParticles = 0;
+        break;
+      }
+
       case "rain": {
         this.terrain.holeEnabled = false;
         this.activeParticles = 0;
@@ -165,7 +243,6 @@ export class SphPhysics {
       }
 
       case "crater": {
-        // Fill the crater basin with water, ready for hole drain
         const count = Math.min(this.params.particleCount, 6000);
         let idx = 0;
         const spacing = this.params.particleRadius * 1.8;
@@ -249,7 +326,6 @@ export class SphPhysics {
       const [cgx, cgy, cgz] = this.getCellCoord(px, py, pz);
       let rho = 0;
 
-      // Iterate 27 neighboring cells
       for (let dx = -1; dx <= 1; dx++) {
         const gx = cgx + dx;
         if (gx < 0 || gx >= this.gridW) continue;
@@ -284,7 +360,6 @@ export class SphPhysics {
 
       this.density[i] = Math.max(rho, rho0 * 0.5);
       rhoSum += this.density[i];
-      // Tait / linear equation of state
       this.pressure[i] = Math.max(k * (this.density[i] - rho0), 0.0);
     }
 
@@ -307,6 +382,15 @@ export class SphPhysics {
     const iRad = this.interactionRadius;
     const iStr = this.interactionStrength;
     const iMode = this.interactionMode;
+
+    // Bottle shaking dynamic body force acceleration
+    let aShakeX = 0, aShakeY = 0, aShakeZ = 0;
+    if (this.currentPreset === "bottle" && this.shakeIntensity > 0.01) {
+      const t = performance.now() * 0.012;
+      aShakeX = Math.sin(t * 1.7) * 38.0 * this.shakeIntensity;
+      aShakeY = Math.cos(t * 2.3) * 22.0 * this.shakeIntensity;
+      aShakeZ = Math.cos(t * 1.3) * 32.0 * this.shakeIntensity;
+    }
 
     for (let i = 0; i < this.activeParticles; i++) {
       const i3 = i * 3;
@@ -391,30 +475,26 @@ export class SphPhysics {
           const falloff = 1.0 - dist / iRad;
 
           if (iMode === "attract") {
-            // Inward gravitational suction toward cursor
             uFx = -dx * invD * iStr * falloff;
             uFy = -dy * invD * (iStr * 0.7) * falloff;
             uFz = -dz * invD * iStr * falloff;
           } else if (iMode === "repel") {
-            // Outward blast wave pushing particles away
-            uFx = dx * invD * iStr * 1.3 * falloff;
-            uFy = Math.max(0.0, dy * invD) * iStr * 0.8 * falloff;
-            uFz = dz * invD * iStr * 1.3 * falloff;
+            uFx = dx * invD * iStr * 1.35 * falloff;
+            uFy = Math.max(0.0, dy * invD) * iStr * 0.9 * falloff;
+            uFz = dz * invD * iStr * 1.35 * falloff;
           } else if (iMode === "vortex") {
-            // Rotational swirl around vertical Y axis
             const swirlX = -dz * invD;
             const swirlZ = dx * invD;
-            uFx = swirlX * iStr * falloff - dx * invD * (iStr * 0.35) * falloff; // slight inward funnel
+            uFx = swirlX * iStr * falloff - dx * invD * (iStr * 0.35) * falloff;
             uFz = swirlZ * iStr * falloff - dz * invD * (iStr * 0.35) * falloff;
             uFy = (Math.random() - 0.5) * iStr * 0.2 * falloff;
           }
         }
       }
 
-      // Acceleration summation
-      this.acc[i3] = fpx + fvx + uFx;
-      this.acc[i3 + 1] = fpy + fvy + uFy - g;
-      this.acc[i3 + 2] = fpz + fvz + uFz;
+      this.acc[i3] = fpx + fvx + uFx + aShakeX;
+      this.acc[i3 + 1] = fpy + fvy + uFy - g + aShakeY;
+      this.acc[i3 + 2] = fpz + fvz + uFz + aShakeZ;
     }
   }
 
@@ -422,6 +502,13 @@ export class SphPhysics {
     const bound = 13.5;
     const r = this.params.particleRadius;
     const cr = this.params.restitution;
+
+    // Bottle mode dimensions
+    const isBottle = this.currentPreset === "bottle";
+    const bW = 2.65;
+    const bYMin = -2.85;
+    const bYMax = 3.65;
+    const bD = 2.65;
 
     let maxV = 0;
     let sumKE = 0;
@@ -442,54 +529,56 @@ export class SphPhysics {
       let py = this.pos[i3 + 1];
       let pz = this.pos[i3 + 2];
 
-      // 3D SDF Terrain & Boulder Collision Check
-      const col = this.terrain.checkCollision(px, py, pz, r);
+      if (isBottle) {
+        // Enclosed Rigid Bottle Walls Collision (6-sided box with glass rebound)
+        if (px < -bW) { this.pos[i3] = -bW; this.vel[i3] = -this.vel[i3] * cr; this.vel[i3 + 1] *= 0.94; this.vel[i3 + 2] *= 0.94; }
+        if (px > bW)  { this.pos[i3] = bW;  this.vel[i3] = -this.vel[i3] * cr; this.vel[i3 + 1] *= 0.94; this.vel[i3 + 2] *= 0.94; }
+        if (pz < -bD) { this.pos[i3 + 2] = -bD; this.vel[i3 + 2] = -this.vel[i3 + 2] * cr; this.vel[i3] *= 0.94; this.vel[i3 + 1] *= 0.94; }
+        if (pz > bD)  { this.pos[i3 + 2] = bD;  this.vel[i3 + 2] = -this.vel[i3 + 2] * cr; this.vel[i3] *= 0.94; this.vel[i3 + 1] *= 0.94; }
+        if (py < bYMin) { this.pos[i3 + 1] = bYMin; this.vel[i3 + 1] = -this.vel[i3 + 1] * cr; this.vel[i3] *= 0.94; this.vel[i3 + 2] *= 0.94; }
+        if (py > bYMax) { this.pos[i3 + 1] = bYMax; this.vel[i3 + 1] = -this.vel[i3 + 1] * cr; this.vel[i3] *= 0.94; this.vel[i3 + 2] *= 0.94; }
+      } else {
+        // 3D SDF Terrain & Boulder Collision Check
+        const col = this.terrain.checkCollision(px, py, pz, r);
 
-      if (col.isInHole) {
-        // Particle entered drain hole: accelerate downwards and recycle if fell below -9.5
-        if (py < -9.5) {
-          this.pos[i3] = (Math.random() - 0.5) * 8.0;
-          this.pos[i3 + 1] = 7.0 + Math.random() * 2.0;
-          this.pos[i3 + 2] = (Math.random() - 0.5) * 8.0;
-          this.vel[i3] = 0;
-          this.vel[i3 + 1] = -2.0;
-          this.vel[i3 + 2] = 0;
+        if (col.isInHole) {
+          if (py < -9.5) {
+            this.pos[i3] = (Math.random() - 0.5) * 8.0;
+            this.pos[i3 + 1] = 7.0 + Math.random() * 2.0;
+            this.pos[i3 + 2] = (Math.random() - 0.5) * 8.0;
+            this.vel[i3] = 0;
+            this.vel[i3 + 1] = -2.0;
+            this.vel[i3 + 2] = 0;
+          }
+        } else if (col.isColliding) {
+          if (col.isBoulder && col.penetration) {
+            this.pos[i3] += col.normal.x * col.penetration;
+            this.pos[i3 + 1] += col.normal.y * col.penetration;
+            this.pos[i3 + 2] += col.normal.z * col.penetration;
+          } else {
+            this.pos[i3 + 1] = col.terrainY + r;
+          }
+
+          const nx = col.normal.x;
+          const ny = col.normal.y;
+          const nz = col.normal.z;
+          const vDotN = this.vel[i3] * nx + this.vel[i3 + 1] * ny + this.vel[i3 + 2] * nz;
+
+          if (vDotN < 0) {
+            this.vel[i3] -= (1.0 + cr) * vDotN * nx;
+            this.vel[i3 + 1] -= (1.0 + cr) * vDotN * ny;
+            this.vel[i3 + 2] -= (1.0 + cr) * vDotN * nz;
+            this.vel[i3] *= 0.94;
+            this.vel[i3 + 2] *= 0.94;
+          }
         }
-      } else if (col.isColliding) {
-        if (col.isBoulder && col.penetration) {
-          // True 3D SDF Boulder Overhang Rebound: push out along 3D normal vector
-          this.pos[i3] += col.normal.x * col.penetration;
-          this.pos[i3 + 1] += col.normal.y * col.penetration;
-          this.pos[i3 + 2] += col.normal.z * col.penetration;
-        } else {
-          // Terrain surface projection
-          this.pos[i3 + 1] = col.terrainY + r;
-        }
 
-        // Normal and tangential velocity decomposition
-        const nx = col.normal.x;
-        const ny = col.normal.y;
-        const nz = col.normal.z;
-
-        const vDotN = this.vel[i3] * nx + this.vel[i3 + 1] * ny + this.vel[i3 + 2] * nz;
-
-        if (vDotN < 0) {
-          // Rebound normal velocity with restitution
-          this.vel[i3] -= (1.0 + cr) * vDotN * nx;
-          this.vel[i3 + 1] -= (1.0 + cr) * vDotN * ny;
-          this.vel[i3 + 2] -= (1.0 + cr) * vDotN * nz;
-
-          // Tangential friction
-          this.vel[i3] *= 0.94;
-          this.vel[i3 + 2] *= 0.94;
-        }
+        // Domain outer walls
+        if (this.pos[i3] < -bound) { this.pos[i3] = -bound; this.vel[i3] *= -cr; }
+        if (this.pos[i3] > bound)  { this.pos[i3] = bound;  this.vel[i3] *= -cr; }
+        if (this.pos[i3 + 2] < -bound) { this.pos[i3 + 2] = -bound; this.vel[i3 + 2] *= -cr; }
+        if (this.pos[i3 + 2] > bound)  { this.pos[i3 + 2] = bound;  this.vel[i3 + 2] *= -cr; }
       }
-
-      // Outer domain bounding box
-      if (this.pos[i3] < -bound) { this.pos[i3] = -bound; this.vel[i3] *= -cr; }
-      if (this.pos[i3] > bound)  { this.pos[i3] = bound;  this.vel[i3] *= -cr; }
-      if (this.pos[i3 + 2] < -bound) { this.pos[i3 + 2] = -bound; this.vel[i3 + 2] *= -cr; }
-      if (this.pos[i3 + 2] > bound)  { this.pos[i3 + 2] = bound;  this.vel[i3 + 2] *= -cr; }
 
       const spd = Math.hypot(this.vel[i3], this.vel[i3 + 1], this.vel[i3 + 2]);
       if (spd > maxV) maxV = spd;
@@ -502,8 +591,6 @@ export class SphPhysics {
 
   /**
    * XSPH Artificial Viscosity (Monaghan 1992)
-   * Enforces cohesive surface tension and smooth velocity alignment,
-   * eliminating particle clumping and chaotic micro-scattering.
    */
   private computeXSPH() {
     const eps = this.params.xsphFactor;
@@ -570,9 +657,50 @@ export class SphPhysics {
     }
   }
 
-  // Dynamic emitters for Rain, Jet, and User Cursor Emitter modes
+  // Dynamic emitters for Rain, Jet, Ditch Inflow, Tanker Dump, and User Cursor
   private updateEmitters(dt: number) {
-    if (this.currentPreset === "rain") {
+    // 1. Ditch Inflow Rain Mode: Pours into upper ditch; spills over weir notch when full!
+    if (this.currentPreset === "ditch") {
+      this.ditchRainTimer += dt;
+      if (this.ditchRainTimer >= 0.04 && this.activeParticles < this.params.particleCount) {
+        this.ditchRainTimer = 0;
+        const drops = 10;
+        for (let k = 0; k < drops && this.activeParticles < this.params.particleCount; k++) {
+          const idx = this.activeParticles++;
+          const i3 = idx * 3;
+          // Spawn rain over upper ditch catchment area
+          this.pos[i3] = -4.5 + (Math.random() - 0.5) * 2.8;
+          this.pos[i3 + 1] = 4.5 + Math.random() * 1.5;
+          this.pos[i3 + 2] = (Math.random() - 0.5) * 2.8;
+          this.vel[i3] = (Math.random() - 0.5) * 0.3;
+          this.vel[i3 + 1] = -10.0 - Math.random() * 3.0;
+          this.vel[i3 + 2] = (Math.random() - 0.5) * 0.3;
+        }
+      }
+    }
+
+    // 2. Tanker Dump Mode: Massive overhead deluge pouring from tanker spout onto slope!
+    else if (this.currentPreset === "tanker") {
+      this.tankerTimer += dt;
+      if (this.tankerTimer >= 0.02 && this.activeParticles < this.params.particleCount) {
+        this.tankerTimer = 0;
+        const perTick = 18; // Massive volumetric dump
+        for (let k = 0; k < perTick && this.activeParticles < this.params.particleCount; k++) {
+          const idx = this.activeParticles++;
+          const i3 = idx * 3;
+          // Tanker spout at (-6.5, 7.5, 0.0)
+          this.pos[i3] = -6.5 + (Math.random() - 0.5) * 0.8;
+          this.pos[i3 + 1] = 7.5 + (Math.random() - 0.5) * 0.4;
+          this.pos[i3 + 2] = (Math.random() - 0.5) * 0.8;
+          this.vel[i3] = 3.5 + (Math.random() - 0.5) * 1.5; // forward dump trajectory
+          this.vel[i3 + 1] = -12.0 - Math.random() * 2.0;  // high downward velocity
+          this.vel[i3 + 2] = (Math.random() - 0.5) * 1.5;
+        }
+      }
+    }
+
+    // 3. Regular Crater Rain
+    else if (this.currentPreset === "rain") {
       this.rainTimer += dt;
       if (this.rainTimer >= 0.05 && this.activeParticles < this.params.particleCount) {
         this.rainTimer = 0;
@@ -590,7 +718,10 @@ export class SphPhysics {
           this.vel[i3 + 2] = (Math.random() - 0.5) * 0.4;
         }
       }
-    } else if (this.currentPreset === "jet") {
+    }
+
+    // 4. Jet Mode
+    else if (this.currentPreset === "jet") {
       this.jetTimer += dt;
       if (this.jetTimer >= 0.025 && this.activeParticles < this.params.particleCount) {
         this.jetTimer = 0;
@@ -608,7 +739,7 @@ export class SphPhysics {
       }
     }
 
-    // User Cursor Fluid Emitter Mode
+    // 5. User Cursor Fluid Emitter Mode
     if (this.isInteracting && this.interactionMode === "emit") {
       this.emitTimer += dt;
       if (this.emitTimer >= 0.035 && this.activeParticles < this.params.particleCount) {
@@ -632,6 +763,17 @@ export class SphPhysics {
     const clampedDt = Math.min(dt, 0.033);
     const subSteps = 3;
     const subDt = clampedDt / subSteps;
+
+    // Decay bottle shaking timer
+    if (this.isShakingBottle) {
+      this.shakeTimer -= clampedDt;
+      if (this.shakeTimer <= 0) {
+        this.isShakingBottle = false;
+        this.shakeIntensity = 0;
+      }
+    } else {
+      this.shakeIntensity = Math.max(0.0, this.shakeIntensity - clampedDt * 1.5);
+    }
 
     for (let s = 0; s < subSteps; s++) {
       this.updateEmitters(subDt);
