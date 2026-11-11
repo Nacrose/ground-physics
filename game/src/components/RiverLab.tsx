@@ -56,7 +56,7 @@ export default function RiverLab() {
   const [interactionMode, setInteractionMode] = useState<"dropper" | "sweeper" | "orbit">("dropper");
 
   // Water physical model & SPH states
-  const [waterModel, setWaterModel] = useState<"sph" | "surface">("sph");
+  const [waterModel, setWaterModel] = useState<"sph" | "surface">("surface");
   const [sphMode, setSphMode] = useState<"fluid" | "particles">("fluid");
   const [sphParticleCount, setSphParticleCount] = useState(4500);
 
@@ -339,18 +339,42 @@ export default function RiverLab() {
             <span
               style={{
                 fontSize: 9.5,
-                background: waterModel === "sph" ? "#0284c7" : "rgba(255, 255, 255, 0.15)",
+                background: waterModel === "surface" ? "#059669" : "#0284c7",
                 color: "#fff",
                 padding: "2px 6px",
                 borderRadius: 4,
                 fontWeight: 600,
               }}
             >
-              {waterModel === "sph" ? "3D NAVIER-STOKES SPH" : "2D SAINT-VENANT + SWE"}
+              {waterModel === "surface" ? "2D SAINT-VENANT + SWE (ACTIVE)" : "3D NAVIER-STOKES SPH"}
             </span>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
+            <button
+              onClick={() => handleWaterModelChange("surface")}
+              style={{
+                padding: "8px 6px",
+                borderRadius: 6,
+                border: waterModel === "surface" ? "1.5px solid #34d399" : "1px solid rgba(255,255,255,0.12)",
+                background: waterModel === "surface" ? "rgba(16, 185, 129, 0.45)" : "rgba(255,255,255,0.06)",
+                boxShadow: waterModel === "surface" ? "0 0 12px rgba(52, 211, 153, 0.45)" : "none",
+                color: waterModel === "surface" ? "#34d399" : "#fff",
+                fontSize: 10.5,
+                cursor: "pointer",
+                fontWeight: 700,
+                textAlign: "left",
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+              }}
+            >
+              <span>🏄 Continuous Surface Mesh</span>
+              <span style={{ fontSize: 8.5, color: "#94a3b8", fontWeight: 400 }}>
+                High-fidelity 2D SWE + Saint-Venant
+              </span>
+            </button>
+
             <button
               onClick={() => handleWaterModelChange("sph")}
               style={{
@@ -369,33 +393,9 @@ export default function RiverLab() {
                 gap: 2,
               }}
             >
-              <span>🌊 3D SPH Fluid (SSFR)</span>
+              <span>🌊 3D SPH Particles</span>
               <span style={{ fontSize: 8.5, color: "#94a3b8", fontWeight: 400 }}>
-                {sphParticleCount} 3D particles in river
-              </span>
-            </button>
-
-            <button
-              onClick={() => handleWaterModelChange("surface")}
-              style={{
-                padding: "8px 6px",
-                borderRadius: 6,
-                border: waterModel === "surface" ? "1.5px solid #34d399" : "1px solid rgba(255,255,255,0.12)",
-                background: waterModel === "surface" ? "rgba(16, 185, 129, 0.4)" : "rgba(255,255,255,0.06)",
-                boxShadow: waterModel === "surface" ? "0 0 12px rgba(52, 211, 153, 0.4)" : "none",
-                color: waterModel === "surface" ? "#34d399" : "#fff",
-                fontSize: 10.5,
-                cursor: "pointer",
-                fontWeight: 700,
-                textAlign: "left",
-                display: "flex",
-                flexDirection: "column",
-                gap: 2,
-              }}
-            >
-              <span>🏄 Surface Mesh</span>
-              <span style={{ fontSize: 8.5, color: "#94a3b8", fontWeight: 400 }}>
-                2D SWE hydraulics ribbon
+                {sphParticleCount} SPH particles (Experimental)
               </span>
             </button>
           </div>

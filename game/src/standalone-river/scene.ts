@@ -29,7 +29,7 @@ export class StandaloneRiverLab {
   runoff: RiverRunoff;
   sph: RiverSph;
 
-  waterModel: RiverWaterModel = "sph";
+  waterModel: RiverWaterModel = "surface";
   sphRenderMode: "fluid" | "particles" = "fluid";
 
   sunLight: THREE.DirectionalLight;
@@ -199,7 +199,7 @@ export class StandaloneRiverLab {
 
     // 14. 3D SPH Navier-Stokes Fluid Particles & SSFR Continuous Surface Pipeline
     this.sph = new RiverSph(this.scene, this.renderer, this.terrain, this.rocks, this.hydraulics);
-    this.setWaterModel("sph");
+    this.setWaterModel("surface");
 
     window.addEventListener("resize", this.onResize);
 
