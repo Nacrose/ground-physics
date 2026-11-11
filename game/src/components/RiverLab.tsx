@@ -48,6 +48,13 @@ export default function RiverLab() {
   const [qInterflow, setQInterflow] = useState(0.0);
   const [qBaseflow, setQBaseflow] = useState(15.0);
 
+  // 2D Shallow Water Equations (SWE) Interactive Waves telemetry (Chentanez & Müller 2010)
+  const [sweWaveEnergy, setSweWaveEnergy] = useState(0.0);
+  const [sweMaxWave, setSweMaxWave] = useState(0.0);
+  const [sweImpulseCount, setSweImpulseCount] = useState(0);
+  const [sweWaveSpeed, setSweWaveSpeed] = useState(2.8);
+  const [interactionMode, setInteractionMode] = useState<"dropper" | "orbit">("dropper");
+
   const updateTelemetry = (lab: StandaloneRiverLab) => {
     const hyd = lab.hydraulics;
     setMinV(hyd.minVelocity);
@@ -74,6 +81,13 @@ export default function RiverLab() {
     setQSurface(lab.runoff.surfaceRunoffQ);
     setQInterflow(lab.runoff.subsurfaceInterflowQ);
     setQBaseflow(lab.runoff.baseflowQ);
+
+    if (lab.swe) {
+      setSweWaveEnergy(lab.swe.waveEnergy);
+      setSweMaxWave(lab.swe.maxWaveHeight);
+      setSweImpulseCount(lab.swe.impulseCount);
+      setSweWaveSpeed(lab.swe.avgWaveSpeed);
+    }
   };
 
   useEffect(() => {
@@ -147,6 +161,39 @@ export default function RiverLab() {
     const next = !isPaused;
     setIsPaused(next);
     if (labRef.current) labRef.current.isPaused = next;
+  };
+
+  const handleInteractionMode = (mode: "dropper" | "orbit") => {
+    setInteractionMode(mode);
+    if (labRef.current) labRef.current.setInteractionMode(mode);
+  };
+
+  const handleDropPebble = () => {
+    if (labRef.current) {
+      labRef.current.dropPebbleAtCenter();
+      updateTelemetry(labRef.current);
+    }
+  };
+
+  const handleSurgeWave = () => {
+    if (labRef.current) {
+      labRef.current.triggerSurgeWave();
+      updateTelemetry(labRef.current);
+    }
+  };
+
+  const handleBoulderShock = () => {
+    if (labRef.current) {
+      labRef.current.triggerBoulderShock();
+      updateTelemetry(labRef.current);
+    }
+  };
+
+  const handleClearWaves = () => {
+    if (labRef.current) {
+      labRef.current.clearWaves();
+      updateTelemetry(labRef.current);
+    }
   };
 
   return (
@@ -392,6 +439,150 @@ export default function RiverLab() {
                 <span style={{ color: "#94a3b8" }}>Bank Interflow:</span>{" "}
                 <strong style={{ color: qInterflow > 0.2 ? "#38bdf8" : "#94a3b8" }}>{qInterflow.toFixed(1)} m³/s</strong>
               </div>
+            </div>
+          </div>
+
+          {/* Chentanez & Müller 2010 2D Shallow Water Equations (SWE) */}
+          <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px dashed rgba(56, 189, 248, 0.25)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+              <span style={{ fontWeight: 600, color: "#38bdf8", fontSize: 10.5, letterSpacing: "0.04em", textTransform: "uppercase" }}>
+                🌊 2D SWE // Interactive Waves
+              </span>
+              <span style={{ fontSize: 9.5, padding: "1px 6px", borderRadius: 3, background: sweWaveEnergy > 0.015 ? "rgba(56, 189, 248, 0.3)" : "rgba(255, 255, 255, 0.1)", color: sweWaveEnergy > 0.015 ? "#38bdf8" : "#94a3b8", fontWeight: 600 }}>
+                {sweWaveEnergy > 0.05 ? "Turbulent Waves" : sweWaveEnergy > 0.01 ? "Active Ripples" : "Calm Surface"}
+              </span>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 8px", fontSize: 10, marginBottom: 8 }}>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Wave Grid:</span>{" "}
+                <strong style={{ color: "#f8fafc" }}>128 × 256 (32k cells)</strong>
+              </div>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Wave Speed ($c$):</span>{" "}
+                <strong style={{ color: "#38bdf8" }}>{sweWaveSpeed.toFixed(1)} m/s (√(gh))</strong>
+              </div>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Wave RMS:</span>{" "}
+                <strong style={{ color: "#f8fafc" }}>{(sweWaveEnergy * 100).toFixed(1)} cm</strong>
+              </div>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Peak Crest:</span>{" "}
+                <strong style={{ color: sweMaxWave > 0.08 ? "#38bdf8" : "#f8fafc" }}>+{(sweMaxWave * 100).toFixed(1)} cm</strong>
+              </div>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Impulses Fired:</span>{" "}
+                <strong style={{ color: "#38bdf8" }}>{sweImpulseCount}</strong>
+              </div>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Boundaries:</span>{" "}
+                <strong style={{ color: "#4ade80" }}>Sommerfeld Open</strong>
+              </div>
+            </div>
+
+            {/* Interactive Tool Mode Switcher */}
+            <div style={{ marginBottom: 6 }}>
+              <div style={{ fontSize: 9.5, color: "#94a3b8", marginBottom: 3, fontWeight: 500 }}>
+                Interaction Mode:
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5 }}>
+                <button
+                  onClick={() => handleInteractionMode("dropper")}
+                  style={{
+                    padding: "5px 4px",
+                    borderRadius: 5,
+                    border: interactionMode === "dropper" ? "1px solid #38bdf8" : "1px solid rgba(255,255,255,0.12)",
+                    background: interactionMode === "dropper" ? "rgba(2, 132, 199, 0.45)" : "rgba(255,255,255,0.06)",
+                    color: interactionMode === "dropper" ? "#38bdf8" : "#fff",
+                    fontSize: 10,
+                    cursor: "pointer",
+                    fontWeight: 600,
+                  }}
+                >
+                  💧 Ripple Dropper
+                </button>
+                <button
+                  onClick={() => handleInteractionMode("orbit")}
+                  style={{
+                    padding: "5px 4px",
+                    borderRadius: 5,
+                    border: interactionMode === "orbit" ? "1px solid #38bdf8" : "1px solid rgba(255,255,255,0.12)",
+                    background: interactionMode === "orbit" ? "rgba(2, 132, 199, 0.45)" : "rgba(255,255,255,0.06)",
+                    color: interactionMode === "orbit" ? "#38bdf8" : "#fff",
+                    fontSize: 10,
+                    cursor: "pointer",
+                    fontWeight: 600,
+                  }}
+                >
+                  🎥 Orbit Camera
+                </button>
+              </div>
+            </div>
+
+            {/* Physical Wave Trigger Buttons */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5 }}>
+              <button
+                onClick={handleDropPebble}
+                style={{
+                  padding: "4px 6px",
+                  borderRadius: 5,
+                  border: "1px solid rgba(56, 189, 248, 0.3)",
+                  background: "rgba(56, 189, 248, 0.12)",
+                  color: "#7dd3fc",
+                  fontSize: 9.5,
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                💧 Drop Pebble
+              </button>
+              <button
+                onClick={handleSurgeWave}
+                style={{
+                  padding: "4px 6px",
+                  borderRadius: 5,
+                  border: "1px solid rgba(56, 189, 248, 0.3)",
+                  background: "rgba(56, 189, 248, 0.12)",
+                  color: "#7dd3fc",
+                  fontSize: 9.5,
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                🌊 Surge Bore Wave
+              </button>
+              <button
+                onClick={handleBoulderShock}
+                style={{
+                  padding: "4px 6px",
+                  borderRadius: 5,
+                  border: "1px solid rgba(56, 189, 248, 0.3)",
+                  background: "rgba(56, 189, 248, 0.12)",
+                  color: "#7dd3fc",
+                  fontSize: 9.5,
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                💥 Boulder Shock
+              </button>
+              <button
+                onClick={handleClearWaves}
+                style={{
+                  padding: "4px 6px",
+                  borderRadius: 5,
+                  border: "1px solid rgba(255, 255, 255, 0.15)",
+                  background: "rgba(255, 255, 255, 0.06)",
+                  color: "#94a3b8",
+                  fontSize: 9.5,
+                  cursor: "pointer",
+                }}
+              >
+                🔄 Calm River
+              </button>
+            </div>
+            <div style={{ fontSize: 8.5, color: "#64748b", marginTop: 4, fontStyle: "italic" }}>
+              *Click or drag anywhere on the river to create physical 2D SWE wave rings & 3D ballistic splashes.
             </div>
           </div>
         </div>
@@ -752,6 +943,8 @@ export default function RiverLab() {
           <div>Energy: <strong style={{ color: "#d6d3d1" }}>E = h + v²/2g</strong></div>
           <div>Water Shading: <strong style={{ color: "#d6d3d1" }}>Beer-Lambert + SSR</strong></div>
           <div>Spray System: <strong style={{ color: "#d6d3d1" }}>Kinetic SPH Droplets</strong></div>
+          <div>2D Waves: <strong style={{ color: "#d6d3d1" }}>Chentanez & Müller SWE</strong></div>
+          <div>SWE Boundary: <strong style={{ color: "#d6d3d1" }}>Sommerfeld Radiation</strong></div>
         </div>
       </div>
     </div>

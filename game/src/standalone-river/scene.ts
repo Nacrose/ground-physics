@@ -7,6 +7,7 @@ import { RiverRocks } from "./riverRocks";
 import { RiverWater } from "./riverWater";
 import { RiverSpray } from "./riverSpray";
 import { RiverRunoff } from "./riverRunoff";
+import { RiverSWE } from "./riverSWE";
 
 export class StandaloneRiverLab {
   readonly container: HTMLElement;
@@ -18,6 +19,7 @@ export class StandaloneRiverLab {
   hydraulics: RiverHydraulics;
   terrain: RiverTerrain;
   rocks: RiverRocks;
+  swe: RiverSWE;
   water: RiverWater;
   spray: RiverSpray;
   runoff: RiverRunoff;
@@ -32,6 +34,13 @@ export class StandaloneRiverLab {
   isPaused = false;
   cameraFollowRiver = false;
   private cameraProgress = 0.15; // [0, 1] along river
+
+  // Interactive 2D SWE Pointer Interaction
+  interactionMode: "dropper" | "orbit" = "dropper";
+  private raycaster = new THREE.Raycaster();
+  private pointer = new THREE.Vector2();
+  private isPointerDown = false;
+  private lastImpulseTime = 0;
 
   private animId = 0;
   private lastTime = 0;
@@ -111,15 +120,19 @@ export class StandaloneRiverLab {
     this.rocks = new RiverRocks(this.terrain, texLoader, this.sunDir, this.sunColor, this.hydraulics);
     this.scene.add(this.rocks.group);
 
-    // 8. Dynamic Flowing Water Ribbon
-    this.water = new RiverWater(this.terrain, this.sunDir, this.sunColor, this.screenTarget, this.hydraulics, this.rocks);
+    // 8. 2D Shallow Water Equations (SWE) Wave & Impulse Solver (Chentanez & Müller 2010)
+    this.swe = new RiverSWE(this.terrain, this.hydraulics, this.rocks);
+    this.scene.add(this.swe.splashGroup);
+
+    // 9. Dynamic Flowing Water Ribbon with 2D SWE Height Perturbations
+    this.water = new RiverWater(this.terrain, this.sunDir, this.sunColor, this.screenTarget, this.hydraulics, this.rocks, this.swe);
     this.scene.add(this.water.mesh);
 
-    // 9. 3D Spray & Atomized Mist Particle System
+    // 10. 3D Spray & Atomized Mist Particle System
     this.spray = new RiverSpray(this.rocks, this.hydraulics, this.sunDir, this.terrain);
     this.scene.add(this.spray.mesh);
 
-    // 10. Dynamic Rain, Hillslope Runoff & Depression Pooling
+    // 11. Dynamic Rain, Hillslope Runoff & Depression Pooling
     this.runoff = new RiverRunoff(
       this.terrain,
       this.hydraulics,
@@ -130,10 +143,96 @@ export class StandaloneRiverLab {
     );
     this.scene.add(this.runoff.group);
 
+    // 12. Setup Interactive Pointer Raycasting for Physical SWE Ripples
+    this.setupPointerEvents();
+
     window.addEventListener("resize", this.onResize);
 
     this.lastTime = performance.now();
     this.animate(this.lastTime);
+  }
+
+  private setupPointerEvents() {
+    const dom = this.renderer.domElement;
+
+    dom.addEventListener("pointerdown", this.onPointerDown);
+    dom.addEventListener("pointermove", this.onPointerMove);
+    window.addEventListener("pointerup", this.onPointerUp);
+    window.addEventListener("pointercancel", this.onPointerUp);
+  }
+
+  private updatePointerCoord(e: PointerEvent) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  }
+
+  private onPointerDown = (e: PointerEvent) => {
+    if (e.button !== 0) return; // only left click
+    this.updatePointerCoord(e);
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+
+    const hits = this.raycaster.intersectObject(this.water.mesh);
+    if (hits.length > 0 && (this.interactionMode === "dropper" || e.shiftKey)) {
+      this.isPointerDown = true;
+      this.controls.enabled = false; // suspend orbit while interacting with water
+      const p = hits[0].point;
+      this.swe.addImpulse(p.x, p.z, 0.95, 0.42, true);
+      this.lastImpulseTime = performance.now();
+    }
+  };
+
+  private onPointerMove = (e: PointerEvent) => {
+    this.updatePointerCoord(e);
+
+    if (this.isPointerDown && (this.interactionMode === "dropper" || e.shiftKey)) {
+      this.raycaster.setFromCamera(this.pointer, this.camera);
+      const hits = this.raycaster.intersectObject(this.water.mesh);
+      if (hits.length > 0) {
+        const now = performance.now();
+        if (now - this.lastImpulseTime > 45) { // throttle continuous fluid drag
+          const p = hits[0].point;
+          this.swe.addImpulse(p.x, p.z, 0.65, 0.22, false);
+          this.lastImpulseTime = now;
+        }
+      }
+    } else if (this.interactionMode === "dropper") {
+      this.raycaster.setFromCamera(this.pointer, this.camera);
+      const hits = this.raycaster.intersectObject(this.water.mesh);
+      this.renderer.domElement.style.cursor = hits.length > 0 ? "crosshair" : "default";
+    } else {
+      this.renderer.domElement.style.cursor = "default";
+    }
+  };
+
+  private onPointerUp = () => {
+    this.isPointerDown = false;
+    this.controls.enabled = true;
+  };
+
+  setInteractionMode(mode: "dropper" | "orbit") {
+    this.interactionMode = mode;
+    this.controls.enabled = true;
+    this.renderer.domElement.style.cursor = mode === "dropper" ? "crosshair" : "default";
+  }
+
+  dropPebbleAtCenter() {
+    // Drop impulse near the camera target
+    const z = this.controls.target.z;
+    const xc = this.terrain.getRiverCenter(z);
+    this.swe.addImpulse(xc, z, 1.1, 0.50, true);
+  }
+
+  triggerSurgeWave() {
+    this.swe.triggerSurgeWave();
+  }
+
+  triggerBoulderShock() {
+    this.swe.triggerBoulderShock();
+  }
+
+  clearWaves() {
+    this.swe.clear();
   }
 
   private onResize = () => {
@@ -154,6 +253,7 @@ export class StandaloneRiverLab {
     if (!this.isPaused) {
       this.simTime += delta;
       this.terrain.material.uniforms.uTime.value = this.simTime;
+      this.swe.update(delta, this.runoff.rainIntensity, this.simTime);
       this.water.update(this.simTime);
       this.spray.update(delta);
       this.runoff.update(delta, this.camera.position, this.simTime);
@@ -253,6 +353,14 @@ export class StandaloneRiverLab {
   dispose() {
     cancelAnimationFrame(this.animId);
     window.removeEventListener("resize", this.onResize);
+
+    const dom = this.renderer.domElement;
+    dom.removeEventListener("pointerdown", this.onPointerDown);
+    dom.removeEventListener("pointermove", this.onPointerMove);
+    window.removeEventListener("pointerup", this.onPointerUp);
+    window.removeEventListener("pointercancel", this.onPointerUp);
+
+    this.swe.texture.dispose();
     this.renderer.dispose();
     this.screenTarget.dispose();
     this.container.innerHTML = "";

@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { RiverTerrain } from "./riverTerrain";
 import { RiverHydraulics } from "./riverHydraulics";
 import { RiverRocks } from "./riverRocks";
+import { RiverSWE } from "./riverSWE";
 
 function generateWaterNormalMap(size = 512): THREE.DataTexture {
   let seed = 42;
@@ -209,7 +210,8 @@ export class RiverWater {
     sunColor: THREE.Color,
     screenTarget: THREE.WebGLRenderTarget,
     hydraulics: RiverHydraulics,
-    rocks: RiverRocks
+    rocks: RiverRocks,
+    swe?: RiverSWE
   ) {
     this.terrain = terrain;
     this.hydraulics = hydraulics;
@@ -250,10 +252,15 @@ export class RiverWater {
     const dummyEnv = new THREE.DataTexture(new Uint8Array([120, 160, 210, 255]), 1, 1, THREE.RGBAFormat);
     dummyEnv.needsUpdate = true;
 
+    const dummySwe = new THREE.DataTexture(new Float32Array(4), 1, 1, THREE.RGBAFormat, THREE.FloatType);
+    dummySwe.needsUpdate = true;
+
     this.material = new THREE.ShaderMaterial({
       uniforms: {
         uHydraulicsTex: { value: hydraulics.texture },
         uScreenTex: { value: screenTarget.texture },
+        uSweTex: { value: swe ? swe.texture : dummySwe },
+        uSweEnabled: { value: swe ? 1.0 : 0.0 },
         uWaterNormalMap: { value: waterNormalMap },
         uFoamTex: { value: foamMap },
         uEnvMap: { value: dummyEnv },
@@ -271,6 +278,8 @@ export class RiverWater {
       depthWrite: false,
       vertexShader: `
         uniform sampler2D uHydraulicsTex;
+        uniform sampler2D uSweTex;
+        uniform float uSweEnabled;
         uniform float uTime;
         uniform float uFlowSpeed;
         uniform vec4 uBoulders[10];
@@ -362,7 +371,12 @@ export class RiverWater {
             }
           }
 
-          float wave = (wDown + wChevron + wCross + wLap) * baseAmp + bowRooster;
+          // Chentanez & Müller 2010 2D Shallow Water Equations (SWE) Wave Displacement:
+          vec2 sweUv = vec2(uv.x, uv.y);
+          vec4 swe = texture2D(uSweTex, sweUv);
+          float sweHeight = swe.r * uSweEnabled;
+
+          float wave = (wDown + wChevron + wCross + wLap) * baseAmp + bowRooster + sweHeight;
 
           // Instantaneous water surface elevation:
           float waterSurf = hyd.g + wave;
@@ -389,6 +403,8 @@ export class RiverWater {
         precision highp float;
         uniform sampler2D uHydraulicsTex;
         uniform sampler2D uScreenTex;
+        uniform sampler2D uSweTex;
+        uniform float uSweEnabled;
         uniform sampler2D uWaterNormalMap;
         uniform sampler2D uFoamTex;
         uniform sampler2D uEnvMap;
@@ -510,6 +526,13 @@ export class RiverWater {
           float rippleDamping = smoothstep(0.001, 0.025, depth);
           vec3 normalPerturb = (nSwell.xzy * 0.48 + nRipple.xzy * 0.36 + nChop.xzy * 0.16) * rippleDamping;
 
+          // Chentanez & Müller 2D SWE Physical Wave Surface Gradient Normal:
+          vec2 sweUv = vec2(vRiverUv.x, vRiverUv.y);
+          vec4 swe = texture2D(uSweTex, sweUv);
+          vec3 sweNormal = vec3(-swe.g * 2.2, 0.0, -swe.b * 2.2) * uSweEnabled;
+          normalPerturb += sweNormal * rippleDamping;
+          float sweFoam = clamp(swe.a * 3.5, 0.0, 1.0) * uSweEnabled;
+
           // Dynamic Raindrop Impact Rings across the river surface:
           if (uRainIntensity > 0.5) {
             vec2 rainGrid = vWorldPos.xz * 3.6;
@@ -531,9 +554,9 @@ export class RiverWater {
           vec3 R = reflect(-V, N);
 
           // VISIBLE DANCING SUNLIGHT CAUSTICS ON RIVERBED:
-          // Sunlight focused by racing surface waves onto pebbles
-          vec2 cUv1 = vec2(crossDist * 0.90, (streamDist - uTime * uFlowSpeed * 1.08) * 0.90);
-          vec2 cUv2 = vec2(crossDist * 1.35 + 0.35, (streamDist - uTime * uFlowSpeed * 1.32) * 1.35);
+          // Sunlight focused by racing surface waves and SWE physical ripples onto pebbles
+          vec2 cUv1 = vec2(crossDist * 0.90 + swe.g * 1.2 * uSweEnabled, (streamDist - uTime * uFlowSpeed * 1.08) * 0.90 + swe.b * 1.2 * uSweEnabled);
+          vec2 cUv2 = vec2(crossDist * 1.35 + 0.35 + swe.g * 1.8 * uSweEnabled, (streamDist - uTime * uFlowSpeed * 1.32) * 1.35 + swe.b * 1.8 * uSweEnabled);
           float cWave1 = texture2D(uWaterNormalMap, cUv1).r;
           float cWave2 = texture2D(uWaterNormalMap, cUv2).g;
           float caustics = pow(cWave1 * cWave2, 2.2) * 4.8 * exp(-depth * 0.85) * smoothstep(0.04, 0.40, depth);
@@ -611,7 +634,7 @@ export class RiverWater {
             // Effervescent micro-bubble flecks around edges (channel B):
             float microBubbles = (foam1.b * 0.5 + foam2.b * 0.5) * smoothstep(0.12, 0.80, rapidTrigger) * 0.40;
 
-            float totalFoam = clamp((rapidFroth * 0.85 + trailingStreamers * 0.55 + microBubbles * 0.35) * uFoamScale, 0.0, 1.0);
+            float totalFoam = clamp(((rapidFroth * 0.85 + trailingStreamers * 0.55 + microBubbles * 0.35) * uFoamScale + sweFoam * 0.65), 0.0, 1.0);
 
             if (totalFoam > 0.008) {
               // 3D micro-relief normal perturbation
@@ -653,6 +676,10 @@ export class RiverWater {
 
   setFoamEnabled(enabled: boolean) {
     this.material.uniforms.uFoamScale.value = enabled ? 1.0 : 0.0;
+  }
+
+  setSweEnabled(enabled: boolean) {
+    this.material.uniforms.uSweEnabled.value = enabled ? 1.0 : 0.0;
   }
 
   setRainIntensity(intensity: number) {
