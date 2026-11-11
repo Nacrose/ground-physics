@@ -40,6 +40,14 @@ export default function RiverLab() {
   const [bedloadFlux, setBedloadFlux] = useState(0);
   const [frontProgress, setFrontProgress] = useState(1.0);
 
+  // MOBIDICpy Catchment Hydrology & Soil Budget telemetry
+  const [soilSaturation, setSoilSaturation] = useState(0.32);
+  const [infilCap, setInfilCap] = useState(48.0);
+  const [aquiferStorage, setAquiferStorage] = useState(6800);
+  const [qSurface, setQSurface] = useState(0.0);
+  const [qInterflow, setQInterflow] = useState(0.0);
+  const [qBaseflow, setQBaseflow] = useState(15.0);
+
   const updateTelemetry = (lab: StandaloneRiverLab) => {
     const hyd = lab.hydraulics;
     setMinV(hyd.minVelocity);
@@ -60,6 +68,12 @@ export default function RiverLab() {
     setScourCount(hyd.scourCount);
     setBedloadFlux(hyd.bedloadFluxKgS);
     setFrontProgress(lab.runoff.frontProgress);
+    setSoilSaturation(lab.runoff.soilSaturation);
+    setInfilCap(lab.runoff.currentInfiltrationCap);
+    setAquiferStorage(lab.runoff.aquiferStorage);
+    setQSurface(lab.runoff.surfaceRunoffQ);
+    setQInterflow(lab.runoff.subsurfaceInterflowQ);
+    setQBaseflow(lab.runoff.baseflowQ);
   };
 
   useEffect(() => {
@@ -337,6 +351,46 @@ export default function RiverLab() {
                 <strong style={{ color: frontProgress < 0.98 && rainIntensity > 0 ? "#38bdf8" : "#94a3b8" }}>
                   {(frontProgress * 100).toFixed(0)}% {frontProgress < 0.98 && rainIntensity > 0 ? "(Surging Bore)" : "(At Confluence)"}
                 </strong>
+              </div>
+            </div>
+          </div>
+
+          {/* MOBIDICpy Catchment Hydrology & Soil Budget */}
+          <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px dashed rgba(56, 189, 248, 0.25)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+              <span style={{ fontWeight: 600, color: "#38bdf8", fontSize: 10.5, letterSpacing: "0.04em", textTransform: "uppercase" }}>
+                🌱 MOBIDIC // Catchment Water Budget
+              </span>
+              <span style={{ fontSize: 9.5, padding: "1px 6px", borderRadius: 3, background: soilSaturation > 0.75 ? "rgba(56, 189, 248, 0.25)" : "rgba(255, 255, 255, 0.1)", color: soilSaturation > 0.75 ? "#38bdf8" : "#94a3b8", fontWeight: 600 }}>
+                {soilSaturation > 0.85 ? "Saturated (Dunne Flow)" : soilSaturation > 0.42 ? "Moist (Percolating)" : "Dry Soil"}
+              </span>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 8px", fontSize: 10 }}>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Soil Saturation:</span>{" "}
+                <strong style={{ color: soilSaturation > 0.70 ? "#38bdf8" : "#f8fafc" }}>
+                  {(soilSaturation * 100).toFixed(1)}%
+                </strong>
+              </div>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Infiltration Cap:</span>{" "}
+                <strong style={{ color: "#f8fafc" }}>{infilCap.toFixed(1)} mm/h</strong>
+              </div>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Aquifer (V_gw):</span>{" "}
+                <strong style={{ color: "#38bdf8" }}>{aquiferStorage.toFixed(0)} m³ (gw)</strong>
+              </div>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Baseflow (Q_gw):</span>{" "}
+                <strong style={{ color: "#f8fafc" }}>{qBaseflow.toFixed(1)} m³/s</strong>
+              </div>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Surface Chutes:</span>{" "}
+                <strong style={{ color: qSurface > 0.5 ? "#38bdf8" : "#94a3b8" }}>{qSurface.toFixed(1)} m³/s</strong>
+              </div>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Bank Interflow:</span>{" "}
+                <strong style={{ color: qInterflow > 0.2 ? "#38bdf8" : "#94a3b8" }}>{qInterflow.toFixed(1)} m³/s</strong>
               </div>
             </div>
           </div>

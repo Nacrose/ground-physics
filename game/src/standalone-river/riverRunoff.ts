@@ -43,8 +43,26 @@ interface StreamPoint {
 
 export class RiverRunoff {
   rainIntensity = 0.0; // [0, 80] mm/h
-  currentRainQ = 0.0;  // [0, 30] m³/s added to river discharge
+  currentRainQ = 0.0;  // [0, 45] m³/s added to river discharge
   frontProgress = 1.0; // REEF3D advancing wetting front [0.0, 1.0]
+
+  // =========================================================================
+  // MOBIDICpy: DISTRIBUTED CATCHMENT WATER BALANCE & DUAL-PORE SOIL HYDROLOGY
+  // =========================================================================
+  soilSaturation = 0.32;       // S_soil ∈ [0.0, 1.0] (Dimensionless active soil moisture)
+  aquiferStorage = 6800.0;     // V_gw [m³] deep groundwater reservoir
+  readonly catchmentArea = 4800.0;  // 80m channel x 60m valley = 4,800 m²
+  readonly maxSoilStorage = 1200.0; // V_soil,max [m³] (capillary + macropore volume)
+  readonly fieldCapacity = 0.42;     // S_fc (capillary tension retention threshold)
+  readonly kSat = 14.0;              // mm/h saturated hydraulic conductivity
+  readonly f0 = 48.0;                // mm/h dry initial infiltration capacity
+  readonly kAquifer = 0.0022;        // s⁻¹ linear reservoir baseflow discharge constant
+
+  // Tripartite flow components [m³/s]:
+  surfaceRunoffQ = 0.0;       // Fast overland flow through 3D chutes
+  subsurfaceInterflowQ = 0.0; // Lateral seepage through saturated soil
+  baseflowQ = 15.0;           // Deep groundwater aquifer drainage into riverbed
+  currentInfiltrationCap = 48.0; // mm/h live infiltration capacity
 
   readonly group: THREE.Group;
   private terrain: RiverTerrain;
@@ -961,9 +979,61 @@ export class RiverRunoff {
       spMat.uniforms.uRainIntensity.value = this.rainIntensity;
     });
 
-    // 6. Catchment Runoff River Swell
-    const targetRainQ = (this.rainIntensity / 65.0) * 28.0;
-    this.currentRainQ += (targetRainQ - this.currentRainQ) * Math.min(clampedDt * 0.35, 0.08);
+    // =========================================================================
+    // 6. MOBIDICpy: CATCHMENT MASS BALANCE & TRIPARTITE FLOW INTEGRATION
+    // =========================================================================
+    const P = this.rainIntensity; // mm/h precipitation flux
+
+    // Dynamic infiltration capacity (Green-Ampt / Horton formulation from MOBIDIC):
+    // As soil saturates (S_soil -> 1.0), infiltration capacity decays from f0 to kSat:
+    this.currentInfiltrationCap = this.kSat + (this.f0 - this.kSat) * Math.pow(1.0 - this.soilSaturation, 2.0);
+    const fCap = this.currentInfiltrationCap;
+
+    // Precipitation partitioning:
+    // A. Infiltration-excess surface runoff (Hortonian):
+    const hortonRate = Math.max(0.0, P - fCap);
+    // B. Saturation-excess surface runoff (Dunne):
+    const dunneFraction = Math.max(0.0, (this.soilSaturation - 0.70) / 0.30);
+    const dunneRate = (P - hortonRate) * dunneFraction;
+
+    const totalOverlandRate = hortonRate + dunneRate; // mm/h
+    const targetSurfaceQ = (totalOverlandRate / 60.0) * 26.0;
+    this.surfaceRunoffQ += (targetSurfaceQ - this.surfaceRunoffQ) * Math.min(clampedDt * 0.45, 0.12);
+
+    // Infiltrated flux entering the active soil matrix:
+    const actualInfiltrationRate = P - totalOverlandRate; // mm/h
+    const infiltM3PerSec = (actualInfiltrationRate * 1e-3 / 3600.0) * this.catchmentArea;
+
+    // Soil percolation to deep aquifer (only occurs when moisture exceeds capillary field capacity):
+    let percolationM3PerSec = 0.0;
+    if (this.soilSaturation > this.fieldCapacity) {
+      const excessMoist = this.soilSaturation - this.fieldCapacity;
+      percolationM3PerSec = excessMoist * 0.16; // m³/s draining into groundwater
+    }
+
+    // Subsurface interflow (hypodermic flow seeping from banks during high saturation):
+    const targetInterflowQ = Math.max(0.0, (this.soilSaturation - 0.58) * 8.5);
+    this.subsurfaceInterflowQ += (targetInterflowQ - this.subsurfaceInterflowQ) * Math.min(clampedDt * 0.20, 0.06);
+
+    // Evapotranspiration / drying rate:
+    const etM3PerSec = (1.5 * 1e-3 / 3600.0) * this.catchmentArea * this.soilSaturation;
+
+    // Soil moisture balance integration: d(S * V_max)/dt = I - Perc - Interflow - ET
+    const dSoilVol = (infiltM3PerSec - percolationM3PerSec - this.subsurfaceInterflowQ * 0.35 - etM3PerSec) * clampedDt;
+    this.soilSaturation = Math.max(0.18, Math.min(1.0, this.soilSaturation + dSoilVol / this.maxSoilStorage));
+
+    // Deep Groundwater Aquifer Mass Balance: dV_gw/dt = Percolation - Baseflow
+    // Baseflow: Linear reservoir Q_base = k_gw * V_gw
+    this.baseflowQ = this.kAquifer * this.aquiferStorage;
+    const dAquiferVol = (percolationM3PerSec - this.baseflowQ) * clampedDt;
+    this.aquiferStorage = Math.max(2000.0, Math.min(15000.0, this.aquiferStorage + dAquiferVol));
+
+    // Dynamic wetness darkening in terrain shader driven by actual soil saturation:
+    this.terrain.material.uniforms.uRainIntensity.value = Math.max(this.rainIntensity, this.soilSaturation * 55.0);
+
+    // Total catchment runoff feeding Saint-Venant river discharge:
+    // Q_river = Baseflow(gw) + Surface Overland + Subsurface Interflow
+    this.currentRainQ = (this.baseflowQ - 15.0) + this.surfaceRunoffQ + this.subsurfaceInterflowQ;
   }
 
   // Exact stored puddle water volume in Liters across all 4 depression basins
