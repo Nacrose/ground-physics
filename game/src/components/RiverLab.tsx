@@ -31,6 +31,15 @@ export default function RiverLab() {
   const [puddleStorage, setPuddleStorage] = useState(1200);
   const [rainFlux, setRainFlux] = useState(0);
 
+  // REEF3D Sediment & Morphodynamics telemetry
+  const [minTau, setMinTau] = useState(25);
+  const [maxTau, setMaxTau] = useState(280);
+  const [minTheta, setMinTheta] = useState(0.024);
+  const [maxTheta, setMaxTheta] = useState(0.266);
+  const [scourCount, setScourCount] = useState(0);
+  const [bedloadFlux, setBedloadFlux] = useState(0);
+  const [frontProgress, setFrontProgress] = useState(1.0);
+
   const updateTelemetry = (lab: StandaloneRiverLab) => {
     const hyd = lab.hydraulics;
     setMinV(hyd.minVelocity);
@@ -44,6 +53,13 @@ export default function RiverLab() {
     setMassFlux(hyd.massFlowRate);
     setPuddleStorage(lab.runoff.getPuddleStorageVolume());
     setRainFlux(lab.runoff.getRainfallMassFlux());
+    setMinTau(hyd.minShearStress);
+    setMaxTau(hyd.maxShearStress);
+    setMinTheta(hyd.minShields);
+    setMaxTheta(hyd.maxShields);
+    setScourCount(hyd.scourCount);
+    setBedloadFlux(hyd.bedloadFluxKgS);
+    setFrontProgress(lab.runoff.frontProgress);
   };
 
   useEffect(() => {
@@ -285,6 +301,42 @@ export default function RiverLab() {
               <div>
                 <span style={{ color: "#94a3b8" }}>Rainfall Inflow:</span>{" "}
                 <strong style={{ color: rainFlux > 0 ? "#38bdf8" : "#94a3b8" }}>{rainFlux.toFixed(1)} kg/s</strong>
+              </div>
+            </div>
+          </div>
+
+          {/* REEF3D Sediment & Morphodynamics */}
+          <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px dashed rgba(56, 189, 248, 0.25)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+              <span style={{ fontWeight: 600, color: "#38bdf8", fontSize: 10.5, letterSpacing: "0.04em", textTransform: "uppercase" }}>
+                🧱 REEF3D // Sediment Scour & Bedload
+              </span>
+              <span style={{ fontSize: 9.5, padding: "1px 6px", borderRadius: 3, background: scourCount > 0 ? "rgba(239, 68, 68, 0.25)" : "rgba(34, 197, 94, 0.2)", color: scourCount > 0 ? "#f87171" : "#4ade80", fontWeight: 600 }}>
+                {scourCount > 0 ? `Scouring (${scourCount} stns)` : "Armored (Stable)"}
+              </span>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 8px", fontSize: 10 }}>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Shear Stress (τ_b):</span>{" "}
+                <strong style={{ color: "#f8fafc" }}>{minTau.toFixed(0)} – {maxTau.toFixed(0)} Pa</strong>
+              </div>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Shields (θ / θ_cr):</span>{" "}
+                <strong style={{ color: maxTheta > 0.047 ? "#f97316" : "#4ade80" }}>
+                  {maxTheta.toFixed(3)} {maxTheta > 0.047 ? "(Mobilized)" : "(Stable)"}
+                </strong>
+              </div>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Bedload Transport:</span>{" "}
+                <strong style={{ color: bedloadFlux > 0.1 ? "#f59e0b" : "#94a3b8" }}>
+                  {bedloadFlux.toFixed(1)} kg/s
+                </strong>
+              </div>
+              <div>
+                <span style={{ color: "#94a3b8" }}>Runoff Surge Front:</span>{" "}
+                <strong style={{ color: frontProgress < 0.98 && rainIntensity > 0 ? "#38bdf8" : "#94a3b8" }}>
+                  {(frontProgress * 100).toFixed(0)}% {frontProgress < 0.98 && rainIntensity > 0 ? "(Surging Bore)" : "(At Confluence)"}
+                </strong>
               </div>
             </div>
           </div>

@@ -157,6 +157,7 @@ export class StandaloneRiverLab {
       this.water.update(this.simTime);
       this.spray.update(delta);
       this.runoff.update(delta, this.camera.position, this.simTime);
+      this.rocks.update(delta, this.hydraulics, this.terrain);
 
       // Dynamic catchment runoff swelling river discharge:
       this.hydraulics.setDischarge(this.baseQ + this.runoff.currentRainQ);

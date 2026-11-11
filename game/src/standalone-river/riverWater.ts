@@ -273,6 +273,7 @@ export class RiverWater {
         uniform sampler2D uHydraulicsTex;
         uniform float uTime;
         uniform float uFlowSpeed;
+        uniform vec4 uBoulders[10];
 
         varying vec3 vWorldPos;
         varying vec3 vNormal;
@@ -338,7 +339,30 @@ export class RiverWater {
           // 4. Edge lapping swash pulsing against the shoreline gravel
           float wLap = sin(streamDist * 1.95 + crossDist * 1.35 - uTime * (uFlowSpeed * 1.10)) * 0.15;
 
-          float wave = (wDown + wChevron + wCross + wLap) * baseAmp;
+          // REEF3D Non-Hydrostatic Bow Wave & Stagnation Pressure Head over Boulders:
+          float bowRooster = 0.0;
+          for (int b = 0; b < 10; b++) {
+            vec4 bld = uBoulders[b];
+            if (bld.w > 0.1) {
+              float dx = wp.x - bld.x;
+              float dz = wp.z - bld.z;
+              float dist = sqrt(dx * dx + dz * dz);
+              float r = bld.w;
+              // Upstream stagnation rooster: dynamic velocity head converts into vertical crest
+              if (dist < r * 2.2 && dz < 0.2) {
+                float upstreamFrac = clamp(1.0 - dist / (r * 2.0), 0.0, 1.0);
+                float stagnationHead = hyd.a * 0.42;
+                bowRooster += stagnationHead * pow(upstreamFrac, 1.5) * max(0.0, -dz / dist);
+              }
+              // Downstream wake drawdown cavity:
+              if (dist < r * 2.0 && dz > 0.0) {
+                float wakeFrac = clamp(1.0 - dist / (r * 1.8), 0.0, 1.0);
+                bowRooster -= hyd.a * 0.22 * pow(wakeFrac, 2.0) * (dz / dist);
+              }
+            }
+          }
+
+          float wave = (wDown + wChevron + wCross + wLap) * baseAmp + bowRooster;
 
           // Instantaneous water surface elevation:
           float waterSurf = hyd.g + wave;

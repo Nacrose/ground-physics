@@ -12,6 +12,11 @@ export class RiverRocks {
   readonly group = new THREE.Group();
   readonly boulders: RiverBoulderData[] = [];
   pebblesMesh!: THREE.InstancedMesh;
+  readonly pebbleCount: number = 1200;
+  private pPos!: Float32Array;
+  private pRot!: Float32Array;
+  private pScale!: Float32Array;
+  private pVelZ!: Float32Array;
 
   constructor(
     terrain: RiverTerrain,
@@ -145,17 +150,23 @@ export class RiverRocks {
       });
     });
 
-    // 2. Instanced River Pebbles
+    // 2. Instanced River Pebbles (REEF3D Dynamic Bedload Scour & Mobilization)
     const pebbleCount = 1200;
+    this.pebbleCount = pebbleCount;
+    this.pPos = new Float32Array(pebbleCount * 3);
+    this.pRot = new Float32Array(pebbleCount * 3);
+    this.pScale = new Float32Array(pebbleCount * 3);
+    this.pVelZ = new Float32Array(pebbleCount);
+
     const pebbleBaseGeo = new THREE.IcosahedronGeometry(0.12, 1);
     const pebbleMat = mats[0];
 
     this.pebblesMesh = new THREE.InstancedMesh(pebbleBaseGeo, pebbleMat, pebbleCount);
     this.pebblesMesh.castShadow = true;
     this.pebblesMesh.receiveShadow = true;
+    this.pebblesMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 
     const dummy = new THREE.Object3D();
-    let placed = 0;
 
     for (let i = 0; i < pebbleCount; i++) {
       const z = (Math.random() - 0.5) * 76.0;
@@ -163,18 +174,104 @@ export class RiverRocks {
       const x = xc + (Math.random() - 0.5) * 7.5;
       const y = terrain.getBedHeight(x, z);
 
-      dummy.position.set(x, y + 0.05, z);
+      const i3 = i * 3;
+      this.pPos[i3] = x;
+      this.pPos[i3 + 1] = y + 0.04;
+      this.pPos[i3 + 2] = z;
+
+      const rx = Math.random() * 0.3;
+      const ry = Math.random() * Math.PI;
+      const rz = Math.random() * 0.3;
+      this.pRot[i3] = rx;
+      this.pRot[i3 + 1] = ry;
+      this.pRot[i3 + 2] = rz;
+
       const scale = 0.5 + Math.random() * 0.9;
-      dummy.scale.set(scale * (0.8 + Math.random() * 0.4), scale * 0.55, scale);
-      dummy.rotation.set(Math.random() * 0.3, Math.random() * Math.PI, Math.random() * 0.3);
+      const sx = scale * (0.8 + Math.random() * 0.4);
+      const sy = scale * 0.55;
+      const sz = scale;
+      this.pScale[i3] = sx;
+      this.pScale[i3 + 1] = sy;
+      this.pScale[i3 + 2] = sz;
+      this.pVelZ[i] = 0;
+
+      dummy.position.set(x, y + 0.04, z);
+      dummy.scale.set(sx, sy, sz);
+      dummy.rotation.set(rx, ry, rz);
       dummy.updateMatrix();
 
-      this.pebblesMesh.setMatrixAt(placed, dummy.matrix);
-      placed++;
+      this.pebblesMesh.setMatrixAt(i, dummy.matrix);
     }
 
     this.pebblesMesh.instanceMatrix.needsUpdate = true;
     this.group.add(this.pebblesMesh);
+  }
+
+  // REEF3D Sediment Transport: Pebbles mobilize, roll, saltate, and deposit based on Shields parameter θ
+  update(dt: number, hydraulics: RiverHydraulics, terrain: RiverTerrain) {
+    const clampedDt = Math.min(dt, 0.033);
+    const dummy = new THREE.Object3D();
+
+    for (let i = 0; i < this.pebbleCount; i++) {
+      const i3 = i * 3;
+      let x = this.pPos[i3];
+      let y = this.pPos[i3 + 1];
+      let z = this.pPos[i3 + 2];
+      let rx = this.pRot[i3];
+      const ry = this.pRot[i3 + 1];
+      const rz = this.pRot[i3 + 2];
+      const sx = this.pScale[i3];
+      const sy = this.pScale[i3 + 1];
+      const sz = this.pScale[i3 + 2];
+
+      const st = hydraulics.getStationAtZ(z);
+      const xc = terrain.getRiverCenter(z);
+      const distFromCenter = Math.abs(x - xc);
+
+      // Only mobilize pebbles inside the active channel where Shields parameter exceeds critical threshold:
+      if (st.isScouring && distFromCenter < 3.8) {
+        // Meyer-Peter & Müller active bedload transport:
+        const excess = Math.max(0, st.shieldsParam - 0.047);
+        const targetVz = st.velocity * Math.min(0.65, 0.08 + excess * 1.8);
+        this.pVelZ[i] += (targetVz - this.pVelZ[i]) * Math.min(clampedDt * 4.0, 1.0);
+
+        // Advance streamwise:
+        z += this.pVelZ[i] * clampedDt;
+
+        // Saltation & angular rolling tumble:
+        rx += this.pVelZ[i] * 6.0 * clampedDt;
+        const hop = Math.abs(Math.sin(rx * 2.5)) * Math.min(0.04, this.pVelZ[i] * 0.03);
+        const bedY = terrain.getBedHeight(x, z);
+        y = bedY + 0.04 + hop;
+
+        // Recycle if swept out of domain:
+        if (z > 38.5) {
+          z = -38.0 + (Math.random() - 0.5) * 4.0;
+          x = terrain.getRiverCenter(z) + (Math.random() - 0.5) * 5.0;
+          y = terrain.getBedHeight(x, z) + 0.04;
+          this.pVelZ[i] = 0;
+        }
+      } else {
+        // Settled into stable armored bed / quiet gravel bar:
+        this.pVelZ[i] *= Math.max(0.0, 1.0 - clampedDt * 5.0);
+        const bedY = terrain.getBedHeight(x, z);
+        y = bedY + 0.04;
+      }
+
+      this.pPos[i3] = x;
+      this.pPos[i3 + 1] = y;
+      this.pPos[i3 + 2] = z;
+      this.pRot[i3] = rx;
+
+      dummy.position.set(x, y, z);
+      dummy.rotation.set(rx, ry, rz);
+      dummy.scale.set(sx, sy, sz);
+      dummy.updateMatrix();
+
+      this.pebblesMesh.setMatrixAt(i, dummy.matrix);
+    }
+
+    this.pebblesMesh.instanceMatrix.needsUpdate = true;
   }
 }
 

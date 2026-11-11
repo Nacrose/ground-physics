@@ -44,6 +44,7 @@ interface StreamPoint {
 export class RiverRunoff {
   rainIntensity = 0.0; // [0, 80] mm/h
   currentRainQ = 0.0;  // [0, 30] m³/s added to river discharge
+  frontProgress = 1.0; // REEF3D advancing wetting front [0.0, 1.0]
 
   readonly group: THREE.Group;
   private terrain: RiverTerrain;
@@ -325,6 +326,7 @@ export class RiverRunoff {
           uSunColor: { value: sunColor },
           uTime: { value: 0.0 },
           uRainIntensity: { value: 0.0 },
+          uFrontProgress: { value: 1.0 },
         },
         side: THREE.DoubleSide,
         vertexShader: `
@@ -380,6 +382,7 @@ export class RiverRunoff {
           uniform vec3 uSunColor;
           uniform float uTime;
           uniform float uRainIntensity;
+          uniform float uFrontProgress;
 
           varying vec2 vUv;
           varying vec3 vWorldPos;
@@ -389,6 +392,14 @@ export class RiverRunoff {
           varying float vCrest;
 
           void main() {
+            // REEF3D Swash & Wetting Front Leading Edge:
+            if (vUv.y > uFrontProgress) {
+              discard; // Dry bedrock ahead of advancing surge
+            }
+
+            float distToFront = uFrontProgress - vUv.y;
+            float leadingBore = smoothstep(0.045, 0.0, distToFront);
+
             float rainNorm = clamp(uRainIntensity / 50.0, 0.0, 1.0);
             float streamIntensity = mix(0.40, 1.0, rainNorm);
 
@@ -426,11 +437,16 @@ export class RiverRunoff {
             float foamNoise = texture2D(uFoamTex, vec2(vUv.x * 2.0, vUv.y * 5.0 - uTime * localSpeed)).r;
             float steepDropFoam = smoothstep(0.18, 0.35, vSlope) * smoothstep(0.35, 0.75, foamNoise) * (0.45 + 0.55 * rainNorm);
             float riverPlunge = smoothstep(0.80, 0.98, vUv.y) * 0.85;
-            float totalFoam = clamp(steepDropFoam + riverPlunge, 0.0, 1.0);
-            waterColor = mix(waterColor, vec3(0.95, 0.98, 1.0) * (0.85 + 0.35 * NdotL), totalFoam * 0.90);
+            float totalFoam = clamp(steepDropFoam + riverPlunge + leadingBore * 1.4, 0.0, 1.0);
+            waterColor = mix(waterColor, vec3(0.98, 0.99, 1.0) * (0.85 + 0.35 * NdotL), totalFoam * 0.92);
 
             // Alpha transparency: solid 3D water core (92%), smooth translucent banks (72%)
             float alpha = mix(0.72, 0.94, vCrest) * streamIntensity;
+            if (distToFront < 0.020) {
+              alpha = 1.0; // Solid aerated foam at surge tip
+            }
+
+            gl_FragColor = vec4(waterColor, alpha);
 
             gl_FragColor = vec4(waterColor, alpha);
           }
@@ -793,7 +809,12 @@ export class RiverRunoff {
   }
 
   setRainIntensity(intensity: number) {
+    const wasDry = this.rainIntensity <= 0.5;
     this.rainIntensity = Math.max(0, Math.min(80, intensity));
+    if (wasDry && this.rainIntensity > 0.5) {
+      // Trigger REEF3D dynamic surge wave from mountain ridge:
+      this.frontProgress = 0.05;
+    }
     this.terrain.material.uniforms.uRainIntensity.value = this.rainIntensity;
 
     this.streamMats.forEach((mat) => {
@@ -900,10 +921,18 @@ export class RiverRunoff {
     }
     this.groundSplashMesh.instanceMatrix.needsUpdate = true;
 
-    // 4. Advance 3D Volumetric Runoff Flumes (vertex wave displacement + Manning flow)
+    // 4. Advance 3D Volumetric Runoff Flumes & REEF3D Wetting/Drying Front Dynamics
+    if (this.rainIntensity > 0.5) {
+      const surgeSpeed = 0.28 * (0.8 + (this.rainIntensity / 50.0) * 0.45);
+      this.frontProgress = Math.min(1.0, this.frontProgress + surgeSpeed * clampedDt);
+    } else {
+      this.frontProgress = Math.max(0.12, this.frontProgress - 0.20 * clampedDt);
+    }
+
     this.streamMats.forEach((mat) => {
       mat.uniforms.uTime.value = simTime;
       mat.uniforms.uRainIntensity.value = this.rainIntensity;
+      mat.uniforms.uFrontProgress.value = this.frontProgress;
     });
 
     // 5. Hydrological Infiltration & Puddle Elevation

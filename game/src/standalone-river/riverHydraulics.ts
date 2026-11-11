@@ -10,6 +10,9 @@ export interface HydraulicStation {
   froude: number;
   head: number; // velocity head v^2 / (2g)
   foamIntensity: number;
+  shearStress: number;  // REEF3D: Bed shear stress τ_b = ρ · g · R_h · S [Pa]
+  shieldsParam: number; // REEF3D: Dimensionless Shields parameter θ = τ_b / [(ρ_s - ρ) g d_50]
+  isScouring: boolean;  // θ > 0.047 (Meyer-Peter & Müller active bedload motion threshold)
 }
 
 export interface BoulderObstruction {
@@ -44,6 +47,14 @@ export class RiverHydraulics {
   totalVolume = 0;      // m³ (instantaneous reach water volume)
   totalMassTonnes = 0;  // metric tonnes (ρ = 1000 kg/m³)
   massFlowRate = 0;     // kg/s (longitudinal conserved flux ρ * Q)
+
+  // REEF3D Morphodynamics & Sediment Scour Metrics
+  minShearStress = 0;   // Pa (τ_b = ρ · g · R_h · S)
+  maxShearStress = 0;   // Pa
+  minShields = 0;       // Dimensionless Shields parameter θ
+  maxShields = 0;       // Dimensionless Shields parameter θ
+  scourCount = 0;       // Stations where θ > 0.047 (Meyer-Peter & Müller active transport)
+  bedloadFluxKgS = 0;   // Meyer-Peter & Müller total reach bedload sediment flux [kg/s]
 
   constructor() {
     this.texData = new Float32Array(this.numStations * 4);
@@ -198,6 +209,13 @@ export class RiverHydraulics {
       const waterY = bedLowest + h;
       const foamIntensity = Math.min(1.0, Math.max(0.0, (froude - 0.75) * 1.4 + head * 0.25));
 
+      // REEF3D Bed Shear Stress & Shields Parameter (d50 = 65mm gravel/cobble):
+      const wettedPerim = topWidth + (8.0 / 3.0) * ((h * h) / Math.max(topWidth, 1.0));
+      const rh = area / Math.max(wettedPerim, 1.0);
+      const tau = 1000.0 * this.gravity * rh * Math.max(0.002, slope);
+      const theta = tau / 1052.0;
+      const isScouring = theta > 0.047;
+
       this.stations.push({
         z,
         bedY: bedLowest,
@@ -208,6 +226,9 @@ export class RiverHydraulics {
         froude,
         head,
         foamIntensity,
+        shearStress: tau,
+        shieldsParam: theta,
+        isScouring,
       });
     }
 
@@ -223,6 +244,14 @@ export class RiverHydraulics {
         this.stations[i].velocity = this.dischargeQ / this.stations[i].area;
         this.stations[i].froude = this.stations[i].velocity / Math.sqrt(this.gravity * Math.max(this.stations[i].depth, 0.15));
         this.stations[i].head = (this.stations[i].velocity * this.stations[i].velocity) / (2.0 * this.gravity);
+
+        const twL = getTopWidth(this.stations[i].depth);
+        const wpL = twL + (8.0 / 3.0) * (Math.pow(this.stations[i].depth, 2) / Math.max(twL, 1.0));
+        const rhL = this.stations[i].area / Math.max(wpL, 1.0);
+        const sf = Math.max(0.001, Math.pow(this.manningN * this.stations[i].velocity, 2) / Math.pow(rhL, 4.0 / 3.0));
+        this.stations[i].shearStress = 1000.0 * this.gravity * rhL * sf;
+        this.stations[i].shieldsParam = this.stations[i].shearStress / 1052.0;
+        this.stations[i].isScouring = this.stations[i].shieldsParam > 0.047;
       }
     }
 
@@ -232,6 +261,12 @@ export class RiverHydraulics {
     let maxFr = 0;
     let totalD = 0;
     let reachVolume = 0;
+    let minTau = 999;
+    let maxTau = 0;
+    let minTheta = 999;
+    let maxTheta = 0;
+    let activeScour = 0;
+    let totalSedimentKgS = 0;
 
     for (let i = 0; i < this.numStations; i++) {
       const st = this.stations[i];
@@ -241,6 +276,18 @@ export class RiverHydraulics {
       maxFr = Math.max(maxFr, st.froude);
       totalD += st.depth;
       reachVolume += st.area * dz;
+
+      minTau = Math.min(minTau, st.shearStress);
+      maxTau = Math.max(maxTau, st.shearStress);
+      minTheta = Math.min(minTheta, st.shieldsParam);
+      maxTheta = Math.max(maxTheta, st.shieldsParam);
+
+      if (st.isScouring) {
+        activeScour++;
+        const excess = Math.max(0, st.shieldsParam - 0.047);
+        const qbUnit = 1413.4 * Math.pow(excess, 1.5);
+        totalSedimentKgS += qbUnit * getTopWidth(st.depth) * (dz / this.length);
+      }
 
       const idx = i * 4;
       this.texData[idx] = st.velocity;
@@ -257,6 +304,12 @@ export class RiverHydraulics {
     this.totalVolume = reachVolume;
     this.totalMassTonnes = reachVolume; // 1 m³ water = 1 tonne = 1000 kg
     this.massFlowRate = this.dischargeQ * 1000.0; // kg/s (continuous conservation along reach)
+    this.minShearStress = minTau;
+    this.maxShearStress = maxTau;
+    this.minShields = minTheta;
+    this.maxShields = maxTheta;
+    this.scourCount = activeScour;
+    this.bedloadFluxKgS = totalSedimentKgS;
 
     this.texture.needsUpdate = true;
   }
