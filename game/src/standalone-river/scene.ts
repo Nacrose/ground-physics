@@ -9,6 +9,8 @@ import { RiverSpray } from "./riverSpray";
 import { RiverRunoff } from "./riverRunoff";
 import { RiverSWE } from "./riverSWE";
 
+export type RiverInteractionMode = "dropper" | "sweeper" | "orbit";
+
 export class StandaloneRiverLab {
   readonly container: HTMLElement;
   renderer: THREE.WebGLRenderer;
@@ -36,11 +38,22 @@ export class StandaloneRiverLab {
   private cameraProgress = 0.15; // [0, 1] along river
 
   // Interactive 2D SWE Pointer Interaction
-  interactionMode: "dropper" | "orbit" = "dropper";
+  interactionMode: RiverInteractionMode = "dropper";
   private raycaster = new THREE.Raycaster();
   private pointer = new THREE.Vector2();
   private isPointerDown = false;
   private lastImpulseTime = 0;
+  private isHoveringWater = false;
+
+  // Dynamic 3D River Surface Targeting Reticle Gizmo
+  reticleGroup = new THREE.Group();
+  private reticleOuterRing: THREE.LineLoop;
+  private reticleInnerDot: THREE.Mesh;
+  private reticlePulseRing: THREE.LineLoop;
+  private reticleMat: THREE.LineBasicMaterial;
+  private reticleDotMat: THREE.MeshBasicMaterial;
+  private reticlePulseMat: THREE.LineBasicMaterial;
+  private pulseProgress = 1.0;
 
   private animId = 0;
   private lastTime = 0;
@@ -143,7 +156,36 @@ export class StandaloneRiverLab {
     );
     this.scene.add(this.runoff.group);
 
-    // 12. Setup Interactive Pointer Raycasting for Physical SWE Ripples
+    // 12. Dynamic 3D River Surface Targeting Reticle Gizmo
+    this.reticleMat = new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.85, linewidth: 2 });
+    this.reticleDotMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.95 });
+    this.reticlePulseMat = new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.0, linewidth: 2 });
+
+    const ringPts: number[] = [];
+    for (let i = 0; i < 40; i++) {
+      const a = (i / 40) * Math.PI * 2;
+      ringPts.push(Math.cos(a) * 0.95, 0.03, Math.sin(a) * 0.95);
+    }
+    const ringGeo = new THREE.BufferGeometry();
+    ringGeo.setAttribute("position", new THREE.Float32BufferAttribute(ringPts, 3));
+    this.reticleOuterRing = new THREE.LineLoop(ringGeo, this.reticleMat);
+    this.reticleGroup.add(this.reticleOuterRing);
+
+    const pulseGeo = new THREE.BufferGeometry();
+    pulseGeo.setAttribute("position", new THREE.Float32BufferAttribute(ringPts, 3));
+    this.reticlePulseRing = new THREE.LineLoop(pulseGeo, this.reticlePulseMat);
+    this.reticleGroup.add(this.reticlePulseRing);
+
+    const dotGeo = new THREE.CircleGeometry(0.12, 16);
+    dotGeo.rotateX(-Math.PI / 2);
+    this.reticleInnerDot = new THREE.Mesh(dotGeo, this.reticleDotMat);
+    this.reticleInnerDot.position.y = 0.035;
+    this.reticleGroup.add(this.reticleInnerDot);
+
+    this.reticleGroup.visible = false;
+    this.scene.add(this.reticleGroup);
+
+    // 13. Setup Interactive Pointer Raycasting for Physical SWE Ripples
     this.setupPointerEvents();
 
     window.addEventListener("resize", this.onResize);
@@ -173,34 +215,45 @@ export class StandaloneRiverLab {
     this.raycaster.setFromCamera(this.pointer, this.camera);
 
     const hits = this.raycaster.intersectObject(this.water.mesh);
-    if (hits.length > 0 && (this.interactionMode === "dropper" || e.shiftKey)) {
+    if (hits.length > 0 && (this.interactionMode !== "orbit" || e.shiftKey)) {
       this.isPointerDown = true;
       this.controls.enabled = false; // suspend orbit while interacting with water
       const p = hits[0].point;
-      this.swe.addImpulse(p.x, p.z, 0.95, 0.42, true);
+      const strength = this.interactionMode === "sweeper" ? 0.28 : 0.45;
+      this.swe.addImpulse(p.x, p.z, 0.95, strength, true);
       this.lastImpulseTime = performance.now();
+
+      // Trigger visual reticle impulse expansion
+      this.pulseProgress = 0.0;
     }
   };
 
   private onPointerMove = (e: PointerEvent) => {
     this.updatePointerCoord(e);
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const hits = this.raycaster.intersectObject(this.water.mesh);
 
-    if (this.isPointerDown && (this.interactionMode === "dropper" || e.shiftKey)) {
-      this.raycaster.setFromCamera(this.pointer, this.camera);
-      const hits = this.raycaster.intersectObject(this.water.mesh);
-      if (hits.length > 0) {
+    if (hits.length > 0) {
+      this.isHoveringWater = true;
+      const p = hits[0].point;
+      this.reticleGroup.position.set(p.x, p.y + 0.02, p.z);
+
+      if (this.interactionMode !== "orbit") {
+        this.renderer.domElement.style.cursor = "crosshair";
+      }
+
+      if (this.isPointerDown && (this.interactionMode !== "orbit" || e.shiftKey)) {
         const now = performance.now();
-        if (now - this.lastImpulseTime > 45) { // throttle continuous fluid drag
-          const p = hits[0].point;
-          this.swe.addImpulse(p.x, p.z, 0.65, 0.22, false);
+        const throttleMs = this.interactionMode === "sweeper" ? 30 : 45;
+        if (now - this.lastImpulseTime > throttleMs) {
+          const strength = this.interactionMode === "sweeper" ? 0.32 : 0.20;
+          const radius = this.interactionMode === "sweeper" ? 0.85 : 0.65;
+          this.swe.addImpulse(p.x, p.z, radius, strength, false);
           this.lastImpulseTime = now;
         }
       }
-    } else if (this.interactionMode === "dropper") {
-      this.raycaster.setFromCamera(this.pointer, this.camera);
-      const hits = this.raycaster.intersectObject(this.water.mesh);
-      this.renderer.domElement.style.cursor = hits.length > 0 ? "crosshair" : "default";
     } else {
+      this.isHoveringWater = false;
       this.renderer.domElement.style.cursor = "default";
     }
   };
@@ -210,17 +263,32 @@ export class StandaloneRiverLab {
     this.controls.enabled = true;
   };
 
-  setInteractionMode(mode: "dropper" | "orbit") {
+  setInteractionMode(mode: RiverInteractionMode) {
     this.interactionMode = mode;
     this.controls.enabled = true;
-    this.renderer.domElement.style.cursor = mode === "dropper" ? "crosshair" : "default";
+
+    if (mode === "dropper") {
+      this.reticleMat.color.setHex(0x38bdf8); // Electric Cyan
+      this.reticleDotMat.color.setHex(0x38bdf8);
+      this.reticlePulseMat.color.setHex(0x38bdf8);
+      this.reticleOuterRing.scale.set(1.0, 1.0, 1.0);
+      this.renderer.domElement.style.cursor = "crosshair";
+    } else if (mode === "sweeper") {
+      this.reticleMat.color.setHex(0x34d399); // Emerald Green
+      this.reticleDotMat.color.setHex(0x34d399);
+      this.reticlePulseMat.color.setHex(0x34d399);
+      this.reticleOuterRing.scale.set(1.35, 1.0, 1.35);
+      this.renderer.domElement.style.cursor = "crosshair";
+    } else {
+      this.renderer.domElement.style.cursor = "default";
+    }
   }
 
   dropPebbleAtCenter() {
-    // Drop impulse near the camera target
     const z = this.controls.target.z;
     const xc = this.terrain.getRiverCenter(z);
     this.swe.addImpulse(xc, z, 1.1, 0.50, true);
+    this.pulseProgress = 0.0;
   }
 
   triggerSurgeWave() {
@@ -259,6 +327,21 @@ export class StandaloneRiverLab {
       this.runoff.update(delta, this.camera.position, this.simTime);
       this.rocks.update(delta, this.hydraulics, this.terrain);
 
+      // Animate 3D Reticle
+      if (this.interactionMode !== "orbit") {
+        this.reticleOuterRing.rotation.y = this.simTime * 1.5;
+        this.reticleMat.opacity = 0.75 + Math.sin(this.simTime * 5.0) * 0.20;
+
+        if (this.pulseProgress < 1.0) {
+          this.pulseProgress += delta * 2.2;
+          const pScale = 1.0 + this.pulseProgress * 1.8;
+          this.reticlePulseRing.scale.set(pScale, 1.0, pScale);
+          this.reticlePulseMat.opacity = Math.max(0.0, (1.0 - this.pulseProgress) * 0.9);
+        } else {
+          this.reticlePulseMat.opacity = 0.0;
+        }
+      }
+
       // Dynamic catchment runoff swelling river discharge:
       this.hydraulics.setDischarge(this.baseQ + this.runoff.currentRainQ);
 
@@ -276,13 +359,15 @@ export class StandaloneRiverLab {
     this.controls.update();
 
     // Two-pass rendering for screen refraction:
-    // Pass 1: Render terrain, rocks, and spray into screenTarget
+    // Pass 1: Render terrain, rocks, and spray into screenTarget (hide water and reticle)
     this.water.mesh.visible = false;
+    this.reticleGroup.visible = false;
     this.renderer.setRenderTarget(this.screenTarget);
     this.renderer.render(this.scene, this.camera);
 
-    // Pass 2: Show water mesh with organic aerated froth, render complete scene to canvas
+    // Pass 2: Show water mesh and 3D reticle, render complete scene to canvas
     this.water.mesh.visible = true;
+    this.reticleGroup.visible = this.isHoveringWater && this.interactionMode !== "orbit";
     this.renderer.setRenderTarget(null);
     this.renderer.render(this.scene, this.camera);
   };
@@ -341,7 +426,6 @@ export class StandaloneRiverLab {
       this.controls.target.set(0, 2.0, 0);
       this.camera.position.set(24.0, 28.0, -15.0);
     } else if (preset === "runoff") {
-      // Focus directly onto the West Terrace Puddle Basin and Hillslope Runoff Rivulets
       const z = -16.0;
       const xc = this.terrain.getRiverCenter(z);
       this.controls.target.set(xc - 5.6, 5.0, z);

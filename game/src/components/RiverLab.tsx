@@ -53,7 +53,7 @@ export default function RiverLab() {
   const [sweMaxWave, setSweMaxWave] = useState(0.0);
   const [sweImpulseCount, setSweImpulseCount] = useState(0);
   const [sweWaveSpeed, setSweWaveSpeed] = useState(2.8);
-  const [interactionMode, setInteractionMode] = useState<"dropper" | "orbit">("dropper");
+  const [interactionMode, setInteractionMode] = useState<"dropper" | "sweeper" | "orbit">("dropper");
 
   const updateTelemetry = (lab: StandaloneRiverLab) => {
     const hyd = lab.hydraulics;
@@ -163,7 +163,7 @@ export default function RiverLab() {
     if (labRef.current) labRef.current.isPaused = next;
   };
 
-  const handleInteractionMode = (mode: "dropper" | "orbit") => {
+  const handleInteractionMode = (mode: "dropper" | "sweeper" | "orbit") => {
     setInteractionMode(mode);
     if (labRef.current) labRef.current.setInteractionMode(mode);
   };
@@ -481,41 +481,105 @@ export default function RiverLab() {
             </div>
 
             {/* Interactive Tool Mode Switcher */}
-            <div style={{ marginBottom: 6 }}>
-              <div style={{ fontSize: 9.5, color: "#94a3b8", marginBottom: 3, fontWeight: 500 }}>
-                Interaction Mode:
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 9.5, color: "#38bdf8", marginBottom: 5, fontWeight: 700, textTransform: "uppercase" }}>
+                Interactive Tool Mode:
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 6 }}>
                 <button
                   onClick={() => handleInteractionMode("dropper")}
                   style={{
-                    padding: "5px 4px",
-                    borderRadius: 5,
-                    border: interactionMode === "dropper" ? "1px solid #38bdf8" : "1px solid rgba(255,255,255,0.12)",
-                    background: interactionMode === "dropper" ? "rgba(2, 132, 199, 0.45)" : "rgba(255,255,255,0.06)",
+                    padding: "7px 6px",
+                    borderRadius: 6,
+                    border: interactionMode === "dropper" ? "1.5px solid #38bdf8" : "1px solid rgba(255,255,255,0.12)",
+                    background: interactionMode === "dropper" ? "rgba(2, 132, 199, 0.40)" : "rgba(255,255,255,0.06)",
+                    boxShadow: interactionMode === "dropper" ? "0 0 12px rgba(56, 189, 248, 0.45)" : "none",
                     color: interactionMode === "dropper" ? "#38bdf8" : "#fff",
                     fontSize: 10,
                     cursor: "pointer",
-                    fontWeight: 600,
+                    fontWeight: 700,
+                    textAlign: "left",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 1.5,
                   }}
                 >
-                  💧 Ripple Dropper
+                  <span>💧 Ripple Dropper</span>
+                  <span style={{ fontSize: 8, color: "#94a3b8", fontWeight: 400 }}>Single drops & splashes</span>
                 </button>
+
+                <button
+                  onClick={() => handleInteractionMode("sweeper")}
+                  style={{
+                    padding: "7px 6px",
+                    borderRadius: 6,
+                    border: interactionMode === "sweeper" ? "1.5px solid #34d399" : "1px solid rgba(255,255,255,0.12)",
+                    background: interactionMode === "sweeper" ? "rgba(16, 185, 129, 0.35)" : "rgba(255,255,255,0.06)",
+                    boxShadow: interactionMode === "sweeper" ? "0 0 12px rgba(52, 211, 153, 0.45)" : "none",
+                    color: interactionMode === "sweeper" ? "#34d399" : "#fff",
+                    fontSize: 10,
+                    cursor: "pointer",
+                    fontWeight: 700,
+                    textAlign: "left",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 1.5,
+                  }}
+                >
+                  <span>🌊 Wave Sweeper</span>
+                  <span style={{ fontSize: 8, color: "#94a3b8", fontWeight: 400 }}>Drag continuous wake</span>
+                </button>
+
                 <button
                   onClick={() => handleInteractionMode("orbit")}
                   style={{
-                    padding: "5px 4px",
-                    borderRadius: 5,
-                    border: interactionMode === "orbit" ? "1px solid #38bdf8" : "1px solid rgba(255,255,255,0.12)",
-                    background: interactionMode === "orbit" ? "rgba(2, 132, 199, 0.45)" : "rgba(255,255,255,0.06)",
-                    color: interactionMode === "orbit" ? "#38bdf8" : "#fff",
+                    gridColumn: "span 2",
+                    padding: "6px 8px",
+                    borderRadius: 6,
+                    border: interactionMode === "orbit" ? "1.5px solid #fbbf24" : "1px solid rgba(255,255,255,0.12)",
+                    background: interactionMode === "orbit" ? "rgba(251, 191, 36, 0.25)" : "rgba(255,255,255,0.06)",
+                    boxShadow: interactionMode === "orbit" ? "0 0 10px rgba(251, 191, 36, 0.35)" : "none",
+                    color: interactionMode === "orbit" ? "#fcd34d" : "#fff",
                     fontSize: 10,
                     cursor: "pointer",
-                    fontWeight: 600,
+                    fontWeight: 700,
+                    textAlign: "center",
                   }}
                 >
-                  🎥 Orbit Camera
+                  🎥 Orbit Camera (Free Rotation • Shift-Click to Drop Waves)
                 </button>
+              </div>
+
+              {/* Dynamic Tool Mode Status Pill */}
+              <div
+                style={{
+                  fontSize: 8.5,
+                  padding: "4px 8px",
+                  borderRadius: 4,
+                  background:
+                    interactionMode === "dropper"
+                      ? "rgba(56, 189, 248, 0.15)"
+                      : interactionMode === "sweeper"
+                      ? "rgba(52, 211, 153, 0.15)"
+                      : "rgba(251, 191, 36, 0.12)",
+                  border:
+                    interactionMode === "dropper"
+                      ? "1px solid rgba(56, 189, 248, 0.3)"
+                      : interactionMode === "sweeper"
+                      ? "1px solid rgba(52, 211, 153, 0.3)"
+                      : "1px solid rgba(251, 191, 36, 0.25)",
+                  color:
+                    interactionMode === "dropper"
+                      ? "#7dd3fc"
+                      : interactionMode === "sweeper"
+                      ? "#6ee7b7"
+                      : "#fde047",
+                  lineHeight: 1.3,
+                }}
+              >
+                {interactionMode === "dropper" && "💧 Cyan 3D Reticle on river: Click anywhere on the water to inject expanding SWE ripples & 3D ballistic splash droplets!"}
+                {interactionMode === "sweeper" && "🌊 Emerald 3D Wake Brush: Drag pointer across the river to sweep continuous trailing wake disturbances!"}
+                {interactionMode === "orbit" && "🎥 Camera Mode: Drag to rotate view. Shift-click directly on the water to drop waves anytime."}
               </div>
             </div>
 

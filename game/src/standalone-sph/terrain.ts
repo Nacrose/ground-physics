@@ -5,8 +5,24 @@ export interface TerrainCollisionResult {
   terrainY: number;
   normal: THREE.Vector3;
   isInHole: boolean;
+  isBoulder?: boolean;
+  penetration?: number;
 }
 
+export interface SphBoulder {
+  center: THREE.Vector3;
+  radius: number;
+  mesh?: THREE.Mesh;
+}
+
+/**
+ * SphTerrain: Crater Basin with 3D Signed Distance Field (SDF) Boulder Obstacles
+ *
+ * Implements continuous 3D SDF collision inspired by deni10000/Godot-3D-SPH-Fluid-Simulation:
+ * - Distance field: phi(x) <= 0 indicates solid penetration
+ * - 3D continuous normal: n = grad(phi) / |grad(phi)|
+ * - Full 3D lateral and vertical rebound against spherical boulder overhangs
+ */
 export class SphTerrain {
   readonly size: number;
   readonly halfSize: number;
@@ -19,6 +35,13 @@ export class SphTerrain {
 
   mesh: THREE.Mesh;
   material: THREE.MeshStandardMaterial;
+
+  // 3D Analytical SDF Boulders in Crater Basin
+  readonly boulders: SphBoulder[] = [
+    { center: new THREE.Vector3(2.6, -2.4, 1.4), radius: 1.85 },
+    { center: new THREE.Vector3(-3.2, -1.8, -1.6), radius: 1.50 },
+  ];
+  readonly boulderMeshes: THREE.Mesh[] = [];
 
   constructor(size = 28.0, craterRadius = 9.0, craterDepth = 5.0) {
     this.size = size;
@@ -39,7 +62,7 @@ export class SphTerrain {
     geo.computeVertexNormals();
 
     this.material = new THREE.MeshStandardMaterial({
-      color: 0x475569,
+      color: 0x334155,
       roughness: 0.85,
       metalness: 0.15,
       flatShading: false,
@@ -48,6 +71,23 @@ export class SphTerrain {
     this.mesh = new THREE.Mesh(geo, this.material);
     this.mesh.receiveShadow = true;
     this.mesh.castShadow = true;
+
+    // Create 3D Visual Meshes matching the analytical SDF boulders
+    const rockMat = new THREE.MeshStandardMaterial({
+      color: 0x64748b,
+      roughness: 0.70,
+      metalness: 0.20,
+    });
+
+    for (const b of this.boulders) {
+      const bGeo = new THREE.IcosahedronGeometry(b.radius, 16);
+      const bMesh = new THREE.Mesh(bGeo, rockMat);
+      bMesh.position.copy(b.center);
+      bMesh.castShadow = true;
+      bMesh.receiveShadow = true;
+      b.mesh = bMesh;
+      this.boulderMeshes.push(bMesh);
+    }
   }
 
   // Analytical crater height field
@@ -90,8 +130,12 @@ export class SphTerrain {
     return out;
   }
 
+  /**
+   * 3D Signed Distance Field (SDF) Collision Check
+   * Evaluates terrain bowl and analytical 3D boulders
+   */
   checkCollision(x: number, y: number, z: number, radius = 0.25): TerrainCollisionResult {
-    // Check drain hole
+    // 1. Check drain hole
     const distToHole = Math.hypot(x - this.holePos.x, z - this.holePos.y);
     const inHole = this.holeEnabled && distToHole < this.holeRadius;
 
@@ -104,6 +148,29 @@ export class SphTerrain {
       };
     }
 
+    // 2. 3D SDF check against mid-basin boulders
+    for (const b of this.boulders) {
+      const dx = x - b.center.x;
+      const dy = y - b.center.y;
+      const dz = z - b.center.z;
+      const dist = Math.hypot(dx, dy, dz);
+      const minDist = b.radius + radius;
+
+      if (dist < minDist) {
+        const invDist = dist > 1e-4 ? 1.0 / dist : 1.0;
+        const normal = new THREE.Vector3(dx * invDist, dy * invDist, dz * invDist);
+        return {
+          isColliding: true,
+          terrainY: y,
+          normal,
+          isInHole: false,
+          isBoulder: true,
+          penetration: minDist - dist,
+        };
+      }
+    }
+
+    // 3. Terrain bedrock collision
     const tY = this.getHeight(x, z);
     const isColliding = y - radius <= tY;
     const normal = this.getNormal(x, z);
@@ -113,6 +180,8 @@ export class SphTerrain {
       terrainY: tY,
       normal,
       isInHole: false,
+      isBoulder: false,
+      penetration: isColliding ? (tY + radius - y) : 0,
     };
   }
 }

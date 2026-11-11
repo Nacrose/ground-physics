@@ -1,8 +1,9 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { StandaloneSphLab } from "@/standalone-sph/scene";
-import { SimPreset } from "@/standalone-sph/sphPhysics";
+import { SimPreset, InteractionMode } from "@/standalone-sph/sphPhysics";
 import { RenderMode } from "@/standalone-sph/sphRenderer";
 
 export default function SphLab() {
@@ -11,18 +12,37 @@ export default function SphLab() {
 
   const [preset, setPreset] = useState<SimPreset>("wave");
   const [renderMode, setRenderMode] = useState<RenderMode>("fluid");
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>("vortex");
   const [holeOpen, setHoleOpen] = useState(false);
   const [particleCount, setParticleCount] = useState(4500);
   const [viscosity, setViscosity] = useState(0.18);
   const [stiffness, setStiffness] = useState(85.0);
+  const [xsphTension, setXsphTension] = useState(0.28);
+  const [forceStrength, setForceStrength] = useState(55.0);
   const [isPaused, setIsPaused] = useState(false);
+
+  // Live Telemetry
+  const [activeCount, setActiveCount] = useState(4500);
+  const [avgDensity, setAvgDensity] = useState(12.0);
+  const [maxSpeed, setMaxSpeed] = useState(0.0);
+  const [kineticEnergy, setKineticEnergy] = useState(0.0);
 
   useEffect(() => {
     if (!containerRef.current) return;
     const lab = new StandaloneSphLab(containerRef.current);
     labRef.current = lab;
 
+    const interval = setInterval(() => {
+      if (labRef.current) {
+        setActiveCount(labRef.current.physics.activeParticles);
+        setAvgDensity(labRef.current.physics.avgDensity);
+        setMaxSpeed(labRef.current.physics.maxSpeed);
+        setKineticEnergy(labRef.current.physics.kineticEnergy);
+      }
+    }, 150);
+
     return () => {
+      clearInterval(interval);
       lab.dispose();
       labRef.current = null;
     };
@@ -40,6 +60,13 @@ export default function SphLab() {
     setRenderMode(m);
     if (labRef.current) {
       labRef.current.setRenderMode(m);
+    }
+  };
+
+  const handleInteractionMode = (m: InteractionMode) => {
+    setInteractionMode(m);
+    if (labRef.current) {
+      labRef.current.setInteractionMode(m);
     }
   };
 
@@ -73,6 +100,20 @@ export default function SphLab() {
     }
   };
 
+  const handleXsphTension = (val: number) => {
+    setXsphTension(val);
+    if (labRef.current) {
+      labRef.current.physics.params.xsphFactor = val;
+    }
+  };
+
+  const handleForceStrength = (val: number) => {
+    setForceStrength(val);
+    if (labRef.current) {
+      labRef.current.setInteractionStrength(val);
+    }
+  };
+
   const togglePause = () => {
     setIsPaused(!isPaused);
     if (labRef.current) labRef.current.isPaused = !isPaused;
@@ -83,9 +124,70 @@ export default function SphLab() {
   };
 
   return (
-    <div style={{ position: "relative", width: "100vw", height: "100vh", overflow: "hidden", background: "#111827" }}>
+    <div style={{ position: "relative", width: "100vw", height: "100vh", overflow: "hidden", background: "#0b0f19" }}>
       {/* 3D WebGL Canvas */}
       <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
+
+      {/* Navigation Bar */}
+      <div
+        style={{
+          position: "absolute",
+          top: 18,
+          right: 18,
+          display: "flex",
+          gap: 8,
+          zIndex: 10,
+        }}
+      >
+        <Link
+          href="/river"
+          style={{
+            background: "rgba(17, 24, 39, 0.85)",
+            backdropFilter: "blur(10px)",
+            border: "1px solid rgba(56, 189, 248, 0.25)",
+            color: "#38bdf8",
+            padding: "8px 14px",
+            borderRadius: 8,
+            fontSize: 12,
+            textDecoration: "none",
+            fontWeight: 600,
+          }}
+        >
+          🌊 River Lab (SWE + Hydraulics) &rarr;
+        </Link>
+        <Link
+          href="/stream"
+          style={{
+            background: "rgba(17, 24, 39, 0.85)",
+            backdropFilter: "blur(10px)",
+            border: "1px solid rgba(255, 230, 200, 0.15)",
+            color: "#e2d9ce",
+            padding: "8px 14px",
+            borderRadius: 8,
+            fontSize: 12,
+            textDecoration: "none",
+            fontWeight: 600,
+          }}
+        >
+          💧 Stream
+        </Link>
+        <Link
+          href="/"
+          style={{
+            background: "rgba(17, 24, 39, 0.85)",
+            backdropFilter: "blur(10px)",
+            border: "1px solid rgba(255, 230, 200, 0.15)",
+            color: "#e2d9ce",
+            padding: "8px 14px",
+            borderRadius: 8,
+            fontSize: 12,
+            textDecoration: "none",
+            fontWeight: 600,
+          }}
+        >
+          🎮 Main Game
+        </Link>
+      </div>
 
       {/* Floating Control HUD */}
       <div
@@ -93,36 +195,188 @@ export default function SphLab() {
           position: "absolute",
           top: 18,
           left: 18,
-          background: "rgba(17, 24, 39, 0.90)",
-          backdropFilter: "blur(14px)",
-          border: "1px solid rgba(56, 189, 248, 0.25)",
+          background: "rgba(15, 23, 42, 0.92)",
+          backdropFilter: "blur(16px)",
+          border: "1px solid rgba(56, 189, 248, 0.3)",
           borderRadius: 12,
           padding: "16px 20px",
-          color: "#f1f5f9",
+          color: "#f8fafc",
           fontFamily: "system-ui, -apple-system, sans-serif",
           fontSize: 13,
-          minWidth: 330,
-          boxShadow: "0 14px 40px rgba(0,0,0,0.6)",
+          minWidth: 350,
+          maxWidth: 400,
+          maxHeight: "calc(100vh - 36px)",
+          overflowY: "auto",
+          boxShadow: "0 16px 45px rgba(0,0,0,0.7)",
           userSelect: "none",
         }}
       >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
           <div style={{ fontWeight: 700, fontSize: 15, letterSpacing: "0.06em", color: "#38bdf8" }}>
-            MOD1 // 3D SPH FLUID LAB
+            3D SPH // FLUID SIMULATION
           </div>
-          <span style={{ fontSize: 10, background: "#0284c7", color: "#fff", padding: "2px 6px", borderRadius: 4, fontWeight: 600 }}>
-            3D PARTICLES
+          <span style={{ fontSize: 9.5, background: "#0284c7", color: "#fff", padding: "2px 6px", borderRadius: 4, fontWeight: 700 }}>
+            GPGPU SPH
           </span>
         </div>
 
-        <p style={{ margin: "0 0 12px 0", fontSize: 11, color: "#94a3b8", lineHeight: 1.4 }}>
-          Recreation of <em>agtdbx/mod1</em>: 3D Smoothed Particle Hydrodynamics (SPH), crater terrain interaction, breaking waves, and drain hole physics.
+        <p style={{ margin: "0 0 10px 0", fontSize: 11, color: "#94a3b8", lineHeight: 1.4 }}>
+          Inspired by <em>deni10000/Godot-3D-SPH</em>: 3D Smoothed Particle Hydrodynamics, XSPH surface tension, 3D SDF boulder collisions, and interactive force fields.
         </p>
 
-        {/* Presets */}
+        {/* Live Telemetry Card */}
+        <div style={{ background: "rgba(30, 41, 59, 0.55)", padding: "8px 10px", borderRadius: 8, border: "1px solid rgba(255, 255, 255, 0.08)", marginBottom: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+            <span style={{ fontSize: 10, fontWeight: 700, color: "#38bdf8", textTransform: "uppercase" }}>
+              📊 SPH Telemetry & 3D SDF
+            </span>
+            <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 3, background: "rgba(56, 189, 248, 0.2)", color: "#38bdf8", fontWeight: 600 }}>
+              {activeCount} Active
+            </span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 8px", fontSize: 10.5 }}>
+            <div>
+              <span style={{ color: "#94a3b8" }}>Fluid Density (ρ):</span>{" "}
+              <strong style={{ color: "#f8fafc" }}>{avgDensity.toFixed(1)} kg/m³</strong>
+            </div>
+            <div>
+              <span style={{ color: "#94a3b8" }}>Peak Velocity:</span>{" "}
+              <strong style={{ color: maxSpeed > 10 ? "#f97316" : "#38bdf8" }}>{maxSpeed.toFixed(1)} m/s</strong>
+            </div>
+            <div>
+              <span style={{ color: "#94a3b8" }}>Kinetic Energy:</span>{" "}
+              <strong style={{ color: "#f8fafc" }}>{kineticEnergy.toFixed(0)} J</strong>
+            </div>
+            <div>
+              <span style={{ color: "#94a3b8" }}>Obstacles:</span>{" "}
+              <strong style={{ color: "#4ade80" }}>3D SDF Boulders</strong>
+            </div>
+          </div>
+        </div>
+
+        {/* Interactive Cursor Force Tools (Distinct Visual Identity) */}
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 10.5, fontWeight: 700, color: "#38bdf8", textTransform: "uppercase", marginBottom: 6 }}>
+            Interactive Cursor Tools (deni10000)
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+            <button
+              onClick={() => handleInteractionMode("vortex")}
+              style={{
+                padding: "8px 8px",
+                fontSize: 11,
+                background: interactionMode === "vortex" ? "rgba(16, 185, 129, 0.28)" : "rgba(255,255,255,0.06)",
+                border: interactionMode === "vortex" ? "1.5px solid #10b981" : "1px solid rgba(255,255,255,0.12)",
+                boxShadow: interactionMode === "vortex" ? "0 0 12px rgba(16, 185, 129, 0.4)" : "none",
+                borderRadius: 7,
+                color: interactionMode === "vortex" ? "#34d399" : "#fff",
+                fontWeight: interactionMode === "vortex" ? 700 : 500,
+                cursor: "pointer",
+                textAlign: "left",
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+              }}
+            >
+              <span>🌀 Vortex Swirl</span>
+              <span style={{ fontSize: 8.5, color: "#94a3b8", fontWeight: 400 }}>Stirs whirlpools</span>
+            </button>
+
+            <button
+              onClick={() => handleInteractionMode("attract")}
+              style={{
+                padding: "8px 8px",
+                fontSize: 11,
+                background: interactionMode === "attract" ? "rgba(6, 182, 212, 0.28)" : "rgba(255,255,255,0.06)",
+                border: interactionMode === "attract" ? "1.5px solid #06b6d4" : "1px solid rgba(255,255,255,0.12)",
+                boxShadow: interactionMode === "attract" ? "0 0 12px rgba(6, 182, 212, 0.4)" : "none",
+                borderRadius: 7,
+                color: interactionMode === "attract" ? "#22d3ee" : "#fff",
+                fontWeight: interactionMode === "attract" ? 700 : 500,
+                cursor: "pointer",
+                textAlign: "left",
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+              }}
+            >
+              <span>🧲 Attractor Funnel</span>
+              <span style={{ fontSize: 8.5, color: "#94a3b8", fontWeight: 400 }}>Pulls fluid inward</span>
+            </button>
+
+            <button
+              onClick={() => handleInteractionMode("repel")}
+              style={{
+                padding: "8px 8px",
+                fontSize: 11,
+                background: interactionMode === "repel" ? "rgba(249, 115, 22, 0.28)" : "rgba(255,255,255,0.06)",
+                border: interactionMode === "repel" ? "1.5px solid #f97316" : "1px solid rgba(255,255,255,0.12)",
+                boxShadow: interactionMode === "repel" ? "0 0 12px rgba(249, 115, 22, 0.4)" : "none",
+                borderRadius: 7,
+                color: interactionMode === "repel" ? "#fb923c" : "#fff",
+                fontWeight: interactionMode === "repel" ? 700 : 500,
+                cursor: "pointer",
+                textAlign: "left",
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+              }}
+            >
+              <span>💥 Repulsor Blast</span>
+              <span style={{ fontSize: 8.5, color: "#94a3b8", fontWeight: 400 }}>Pushes fluid outward</span>
+            </button>
+
+            <button
+              onClick={() => handleInteractionMode("emit")}
+              style={{
+                padding: "8px 8px",
+                fontSize: 11,
+                background: interactionMode === "emit" ? "rgba(59, 130, 246, 0.28)" : "rgba(255,255,255,0.06)",
+                border: interactionMode === "emit" ? "1.5px solid #3b82f6" : "1px solid rgba(255,255,255,0.12)",
+                boxShadow: interactionMode === "emit" ? "0 0 12px rgba(59, 130, 246, 0.4)" : "none",
+                borderRadius: 7,
+                color: interactionMode === "emit" ? "#60a5fa" : "#fff",
+                fontWeight: interactionMode === "emit" ? 700 : 500,
+                cursor: "pointer",
+                textAlign: "left",
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+              }}
+            >
+              <span>💧 Fluid Emitter</span>
+              <span style={{ fontSize: 8.5, color: "#94a3b8", fontWeight: 400 }}>Spawns fluid stream</span>
+            </button>
+
+            <button
+              onClick={() => handleInteractionMode("orbit")}
+              style={{
+                gridColumn: "span 2",
+                padding: "7px 8px",
+                fontSize: 11,
+                background: interactionMode === "orbit" ? "rgba(251, 191, 36, 0.25)" : "rgba(255,255,255,0.06)",
+                border: interactionMode === "orbit" ? "1.5px solid #fbbf24" : "1px solid rgba(255,255,255,0.12)",
+                boxShadow: interactionMode === "orbit" ? "0 0 10px rgba(251, 191, 36, 0.35)" : "none",
+                borderRadius: 7,
+                color: interactionMode === "orbit" ? "#fcd34d" : "#fff",
+                fontWeight: interactionMode === "orbit" ? 700 : 500,
+                cursor: "pointer",
+                textAlign: "center",
+              }}
+            >
+              🎥 Orbit Camera (Free Rotation • Shift-Click to interact)
+            </button>
+          </div>
+
+          <div style={{ fontSize: 9, color: "#94a3b8", marginTop: 5, fontStyle: "italic" }}>
+            *Click or drag anywhere in the 3D crater to apply real-time forces!
+          </div>
+        </div>
+
+        {/* Simulation Presets */}
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", marginBottom: 6 }}>
-            Simulation Presets (mod1)
+            Simulation Presets
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
             <button
@@ -138,22 +392,7 @@ export default function SphLab() {
                 cursor: "pointer",
               }}
             >
-              🌊 Breaking Wave
-            </button>
-            <button
-              onClick={() => handlePreset("rain")}
-              style={{
-                padding: "7px 8px",
-                fontSize: 11,
-                background: preset === "rain" ? "#0284c7" : "rgba(255,255,255,0.06)",
-                border: "1px solid rgba(255,255,255,0.1)",
-                borderRadius: 6,
-                color: "#fff",
-                fontWeight: preset === "rain" ? 600 : 400,
-                cursor: "pointer",
-              }}
-            >
-              🌧️ Rain Accumulation
+              🌊 Dam-Break Wave
             </button>
             <button
               onClick={() => handlePreset("crater")}
@@ -168,7 +407,22 @@ export default function SphLab() {
                 cursor: "pointer",
               }}
             >
-              🥣 Crater Basin
+              🥣 Crater Pool
+            </button>
+            <button
+              onClick={() => handlePreset("rain")}
+              style={{
+                padding: "7px 8px",
+                fontSize: 11,
+                background: preset === "rain" ? "#0284c7" : "rgba(255,255,255,0.06)",
+                border: "1px solid rgba(255,255,255,0.1)",
+                borderRadius: 6,
+                color: "#fff",
+                fontWeight: preset === "rain" ? 600 : 400,
+                cursor: "pointer",
+              }}
+            >
+              🌧️ Inflow Rain
             </button>
             <button
               onClick={() => handlePreset("jet")}
@@ -183,7 +437,7 @@ export default function SphLab() {
                 cursor: "pointer",
               }}
             >
-              🚀 Water Jet
+              ⚡ High-Speed Jet
             </button>
           </div>
         </div>
@@ -195,16 +449,16 @@ export default function SphLab() {
             style={{
               width: "100%",
               padding: "7px 10px",
-              background: holeOpen ? "#dc2626" : "rgba(239, 68, 68, 0.15)",
-              border: "1px solid #ef4444",
+              background: holeOpen ? "rgba(239, 68, 68, 0.25)" : "rgba(255,255,255,0.06)",
+              border: holeOpen ? "1px solid #ef4444" : "1px solid rgba(255,255,255,0.1)",
               borderRadius: 6,
-              color: "#fff",
+              color: holeOpen ? "#fca5a5" : "#e2e8f0",
               fontWeight: 600,
               fontSize: 11,
               cursor: "pointer",
             }}
           >
-            {holeOpen ? "🕳️ Drain Hole OPEN (Draining...)" : "⭕ Open Crater Drain Hole"}
+            {holeOpen ? "🕳️ Drain Hole: OPEN (Draining)" : "🕳️ Drain Hole: CLOSED"}
           </button>
         </div>
 
@@ -225,6 +479,7 @@ export default function SphLab() {
                 borderRadius: 6,
                 color: "#fff",
                 cursor: "pointer",
+                fontWeight: renderMode === "fluid" ? 600 : 400,
               }}
             >
               Physical Fluid
@@ -240,6 +495,7 @@ export default function SphLab() {
                 borderRadius: 6,
                 color: "#fff",
                 cursor: "pointer",
+                fontWeight: renderMode === "particles" ? 600 : 400,
               }}
             >
               SPH Particles
@@ -249,8 +505,8 @@ export default function SphLab() {
 
         {/* Sliders */}
         <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-          <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span>Particles:</span>
+          <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5 }}>
+            <span style={{ color: "#cbd5e1" }}>Particles ($N$):</span>
             <span style={{ color: "#38bdf8", fontWeight: 600 }}>{particleCount}</span>
           </label>
           <input
@@ -263,8 +519,36 @@ export default function SphLab() {
             style={{ width: "100%", accentColor: "#38bdf8" }}
           />
 
-          <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span>Viscosity (Friction):</span>
+          <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5 }}>
+            <span style={{ color: "#cbd5e1" }}>Cursor Force Strength:</span>
+            <span style={{ color: "#38bdf8", fontWeight: 600 }}>{forceStrength.toFixed(0)} N</span>
+          </label>
+          <input
+            type="range"
+            min="15"
+            max="120"
+            step="5"
+            value={forceStrength}
+            onChange={(e) => handleForceStrength(parseFloat(e.target.value))}
+            style={{ width: "100%", accentColor: "#38bdf8" }}
+          />
+
+          <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5 }}>
+            <span style={{ color: "#cbd5e1" }}>XSPH Surface Tension:</span>
+            <span style={{ color: "#38bdf8", fontWeight: 600 }}>{xsphTension.toFixed(2)}</span>
+          </label>
+          <input
+            type="range"
+            min="0.00"
+            max="0.55"
+            step="0.02"
+            value={xsphTension}
+            onChange={(e) => handleXsphTension(parseFloat(e.target.value))}
+            style={{ width: "100%", accentColor: "#38bdf8" }}
+          />
+
+          <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5 }}>
+            <span style={{ color: "#cbd5e1" }}>Viscosity (μ):</span>
             <span style={{ color: "#38bdf8", fontWeight: 600 }}>{viscosity.toFixed(2)}</span>
           </label>
           <input
@@ -277,8 +561,8 @@ export default function SphLab() {
             style={{ width: "100%", accentColor: "#38bdf8" }}
           />
 
-          <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span>Pressure Stiffness:</span>
+          <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5 }}>
+            <span style={{ color: "#cbd5e1" }}>Pressure Stiffness ($k$):</span>
             <span style={{ color: "#38bdf8", fontWeight: 600 }}>{stiffness.toFixed(0)}</span>
           </label>
           <input
@@ -299,8 +583,8 @@ export default function SphLab() {
             style={{
               flex: 1,
               padding: "7px 10px",
-              background: isPaused ? "#16a34a" : "#475569",
-              border: "none",
+              background: isPaused ? "#16a34a" : "#334155",
+              border: "1px solid rgba(255,255,255,0.15)",
               borderRadius: 6,
               color: "#fff",
               fontWeight: 600,
@@ -314,8 +598,8 @@ export default function SphLab() {
             onClick={reset}
             style={{
               padding: "7px 12px",
-              background: "rgba(255,255,255,0.12)",
-              border: "none",
+              background: "rgba(255,255,255,0.08)",
+              border: "1px solid rgba(255,255,255,0.15)",
               borderRadius: 6,
               color: "#e2e8f0",
               fontSize: 11,
@@ -324,26 +608,10 @@ export default function SphLab() {
           >
             Reset
           </button>
-          <a
-            href="/stream"
-            style={{
-              padding: "7px 10px",
-              background: "rgba(255,255,255,0.08)",
-              border: "1px solid rgba(255,255,255,0.15)",
-              borderRadius: 6,
-              color: "#ffd080",
-              fontSize: 11,
-              textDecoration: "none",
-              display: "flex",
-              alignItems: "center",
-            }}
-          >
-            Stream &rarr;
-          </a>
         </div>
 
         <div style={{ marginTop: 10, fontSize: 10, color: "#64748b", borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 8 }}>
-          Rotate: Left click drag • Zoom: Scroll • Pan: Right click drag
+          Rotate: Left click drag in Orbit mode • Zoom: Scroll • Pan: Right click drag
         </div>
       </div>
     </div>

@@ -10,9 +10,11 @@ export interface SphParams {
   viscosity: number;       // mu
   gravity: number;         // g = 9.81
   restitution: number;     // collision energy keep (0.3)
+  xsphFactor: number;      // Monaghan 1992 XSPH artificial viscosity (0.25)
 }
 
 export type SimPreset = "wave" | "rain" | "crater" | "jet";
+export type InteractionMode = "orbit" | "vortex" | "attract" | "repel" | "emit";
 
 export class SphPhysics {
   readonly maxParticles: number;
@@ -49,8 +51,21 @@ export class SphPhysics {
 
   terrain: SphTerrain;
 
+  // Interactive Cursor Forces (deni10000/Godot-3D-SPH-Fluid-Simulation)
+  interactionMode: InteractionMode = "vortex";
+  interactionPos = new THREE.Vector3(0, -1.0, 0);
+  interactionRadius = 4.2;
+  interactionStrength = 55.0;
+  isInteracting = false;
+
+  // Live Telemetry
+  avgDensity = 12.0;
+  maxSpeed = 0.0;
+  kineticEnergy = 0.0;
+
   private rainTimer = 0;
   private jetTimer = 0;
+  private emitTimer = 0;
   currentPreset: SimPreset = "wave";
 
   constructor(terrain: SphTerrain, maxParticles = 16000, options: Partial<SphParams> = {}) {
@@ -65,7 +80,8 @@ export class SphPhysics {
       stiffness: 85.0,
       viscosity: 0.18,
       gravity: 9.81,
-      restitution: 0.30,
+      restitution: 0.32,
+      xsphFactor: 0.28, // XSPH surface tension parameter
       ...options,
     };
 
@@ -95,6 +111,20 @@ export class SphPhysics {
     this.spikyGradFactor = -45.0 / (Math.PI * Math.pow(h, 6));
     // Viscosity Laplacian: 45 / (pi * h^6)
     this.viscLapFactor = 45.0 / (Math.PI * Math.pow(h, 6));
+  }
+
+  setInteraction(
+    active: boolean,
+    mode: InteractionMode,
+    pos: THREE.Vector3,
+    radius = 4.2,
+    strength = 55.0
+  ) {
+    this.isInteracting = active;
+    this.interactionMode = mode;
+    this.interactionPos.copy(pos);
+    this.interactionRadius = radius;
+    this.interactionStrength = strength;
   }
 
   applyPreset(preset: SimPreset) {
@@ -130,7 +160,6 @@ export class SphPhysics {
 
       case "rain": {
         this.terrain.holeEnabled = false;
-        // Start with empty or small pool and let rain accumulate
         this.activeParticles = 0;
         break;
       }
@@ -203,12 +232,13 @@ export class SphPhysics {
   }
 
   private computeDensityAndPressure() {
-    const h = this.params.smoothingRadius;
     const h2 = this.h2;
     const poly6 = this.poly6Factor;
     const rho0 = this.params.restDensity;
     const k = this.params.stiffness;
     const mass = this.mass;
+
+    let rhoSum = 0;
 
     for (let i = 0; i < this.activeParticles; i++) {
       const i3 = i * 3;
@@ -253,8 +283,13 @@ export class SphPhysics {
       }
 
       this.density[i] = Math.max(rho, rho0 * 0.5);
+      rhoSum += this.density[i];
       // Tait / linear equation of state
       this.pressure[i] = Math.max(k * (this.density[i] - rho0), 0.0);
+    }
+
+    if (this.activeParticles > 0) {
+      this.avgDensity = rhoSum / this.activeParticles;
     }
   }
 
@@ -265,6 +300,13 @@ export class SphPhysics {
     const mu = this.params.viscosity;
     const mass = this.mass;
     const g = this.params.gravity;
+
+    // Interactive Force params
+    const hasForce = this.isInteracting && this.interactionMode !== "orbit" && this.interactionMode !== "emit";
+    const iPos = this.interactionPos;
+    const iRad = this.interactionRadius;
+    const iStr = this.interactionStrength;
+    const iMode = this.interactionMode;
 
     for (let i = 0; i < this.activeParticles; i++) {
       const i3 = i * 3;
@@ -315,7 +357,7 @@ export class SphPhysics {
                   const rho_j = this.density[j];
                   const P_j = this.pressure[j];
 
-                  // Symmetric Pressure Force
+                  // Symmetric Pressure Force (Müller / SPH)
                   const pKernel = spiky * Math.pow(h - dist, 2);
                   const pTerm = mass * (P_i / (rho_i * rho_i) + P_j / (rho_j * rho_j)) * pKernel;
                   fpx -= pTerm * dirX;
@@ -336,10 +378,43 @@ export class SphPhysics {
         }
       }
 
-      // External Force: Gravity downwards along Y
-      this.acc[i3] = fpx + fvx;
-      this.acc[i3 + 1] = fpy + fvy - g;
-      this.acc[i3 + 2] = fpz + fvz;
+      // External Interactive Forces (deni10000 GPGPU SPH interaction)
+      let uFx = 0, uFy = 0, uFz = 0;
+      if (hasForce) {
+        const dx = px - iPos.x;
+        const dy = py - iPos.y;
+        const dz = pz - iPos.z;
+        const dist = Math.hypot(dx, dy, dz);
+
+        if (dist < iRad) {
+          const invD = dist > 1e-3 ? 1.0 / dist : 1.0;
+          const falloff = 1.0 - dist / iRad;
+
+          if (iMode === "attract") {
+            // Inward gravitational suction toward cursor
+            uFx = -dx * invD * iStr * falloff;
+            uFy = -dy * invD * (iStr * 0.7) * falloff;
+            uFz = -dz * invD * iStr * falloff;
+          } else if (iMode === "repel") {
+            // Outward blast wave pushing particles away
+            uFx = dx * invD * iStr * 1.3 * falloff;
+            uFy = Math.max(0.0, dy * invD) * iStr * 0.8 * falloff;
+            uFz = dz * invD * iStr * 1.3 * falloff;
+          } else if (iMode === "vortex") {
+            // Rotational swirl around vertical Y axis
+            const swirlX = -dz * invD;
+            const swirlZ = dx * invD;
+            uFx = swirlX * iStr * falloff - dx * invD * (iStr * 0.35) * falloff; // slight inward funnel
+            uFz = swirlZ * iStr * falloff - dz * invD * (iStr * 0.35) * falloff;
+            uFy = (Math.random() - 0.5) * iStr * 0.2 * falloff;
+          }
+        }
+      }
+
+      // Acceleration summation
+      this.acc[i3] = fpx + fvx + uFx;
+      this.acc[i3 + 1] = fpy + fvy + uFy - g;
+      this.acc[i3 + 2] = fpz + fvz + uFz;
     }
   }
 
@@ -347,6 +422,9 @@ export class SphPhysics {
     const bound = 13.5;
     const r = this.params.particleRadius;
     const cr = this.params.restitution;
+
+    let maxV = 0;
+    let sumKE = 0;
 
     for (let i = 0; i < this.activeParticles; i++) {
       const i3 = i * 3;
@@ -364,13 +442,12 @@ export class SphPhysics {
       let py = this.pos[i3 + 1];
       let pz = this.pos[i3 + 2];
 
-      // Terrain Collision Check
+      // 3D SDF Terrain & Boulder Collision Check
       const col = this.terrain.checkCollision(px, py, pz, r);
 
       if (col.isInHole) {
-        // Particle entered drain hole: accelerate downwards and recycle if fell below -10
+        // Particle entered drain hole: accelerate downwards and recycle if fell below -9.5
         if (py < -9.5) {
-          // Recycle to top or remove
           this.pos[i3] = (Math.random() - 0.5) * 8.0;
           this.pos[i3 + 1] = 7.0 + Math.random() * 2.0;
           this.pos[i3 + 2] = (Math.random() - 0.5) * 8.0;
@@ -379,8 +456,15 @@ export class SphPhysics {
           this.vel[i3 + 2] = 0;
         }
       } else if (col.isColliding) {
-        // Project above terrain surface
-        this.pos[i3 + 1] = col.terrainY + r;
+        if (col.isBoulder && col.penetration) {
+          // True 3D SDF Boulder Overhang Rebound: push out along 3D normal vector
+          this.pos[i3] += col.normal.x * col.penetration;
+          this.pos[i3 + 1] += col.normal.y * col.penetration;
+          this.pos[i3 + 2] += col.normal.z * col.penetration;
+        } else {
+          // Terrain surface projection
+          this.pos[i3 + 1] = col.terrainY + r;
+        }
 
         // Normal and tangential velocity decomposition
         const nx = col.normal.x;
@@ -406,10 +490,87 @@ export class SphPhysics {
       if (this.pos[i3] > bound)  { this.pos[i3] = bound;  this.vel[i3] *= -cr; }
       if (this.pos[i3 + 2] < -bound) { this.pos[i3 + 2] = -bound; this.vel[i3 + 2] *= -cr; }
       if (this.pos[i3 + 2] > bound)  { this.pos[i3 + 2] = bound;  this.vel[i3 + 2] *= -cr; }
+
+      const spd = Math.hypot(this.vel[i3], this.vel[i3 + 1], this.vel[i3 + 2]);
+      if (spd > maxV) maxV = spd;
+      sumKE += 0.5 * this.mass * spd * spd;
+    }
+
+    this.maxSpeed = maxV;
+    this.kineticEnergy = sumKE;
+  }
+
+  /**
+   * XSPH Artificial Viscosity (Monaghan 1992)
+   * Enforces cohesive surface tension and smooth velocity alignment,
+   * eliminating particle clumping and chaotic micro-scattering.
+   */
+  private computeXSPH() {
+    const eps = this.params.xsphFactor;
+    if (eps <= 0.001) return;
+
+    const h2 = this.h2;
+    const poly6 = this.poly6Factor;
+    const mass = this.mass;
+
+    for (let i = 0; i < this.activeParticles; i++) {
+      const i3 = i * 3;
+      const px = this.pos[i3];
+      const py = this.pos[i3 + 1];
+      const pz = this.pos[i3 + 2];
+      const vx = this.vel[i3];
+      const vy = this.vel[i3 + 1];
+      const vz = this.vel[i3 + 2];
+
+      let dvx = 0, dvy = 0, dvz = 0;
+      const [cgx, cgy, cgz] = this.getCellCoord(px, py, pz);
+
+      for (let dx = -1; dx <= 1; dx++) {
+        const gx = cgx + dx;
+        if (gx < 0 || gx >= this.gridW) continue;
+
+        for (let dy = -1; dy <= 1; dy++) {
+          const gy = cgy + dy;
+          if (gy < 0 || gy >= this.gridH) continue;
+
+          for (let dz = -1; dz <= 1; dz++) {
+            const gz = cgz + dz;
+            if (gz < 0 || gz >= this.gridD) continue;
+
+            const cellIdx = this.getCellIndex(gx, gy, gz);
+            let j = this.gridHead[cellIdx];
+
+            while (j !== -1) {
+              if (i !== j) {
+                const j3 = j * 3;
+                const rx = px - this.pos[j3];
+                const ry = py - this.pos[j3 + 1];
+                const rz = pz - this.pos[j3 + 2];
+                const dist2 = rx * rx + ry * ry + rz * rz;
+
+                if (dist2 < h2) {
+                  const diff = h2 - dist2;
+                  const w = poly6 * diff * diff * diff;
+                  const rhoAvg = 0.5 * (this.density[i] + this.density[j]);
+                  const factor = (mass / rhoAvg) * w;
+                  dvx += (this.vel[j3] - vx) * factor;
+                  dvy += (this.vel[j3 + 1] - vy) * factor;
+                  dvz += (this.vel[j3 + 2] - vz) * factor;
+                }
+              }
+              j = this.gridNext[j];
+            }
+          }
+        }
+      }
+
+      this.vel[i3] += dvx * eps;
+      this.vel[i3 + 1] += dvy * eps;
+      this.vel[i3 + 2] += dvz * eps;
     }
   }
 
-  // Dynamic emitters for Rain and Jet modes
+  // Dynamic emitters for Rain, Jet, and User Cursor Emitter modes
   private updateEmitters(dt: number) {
     if (this.currentPreset === "rain") {
       this.rainTimer += dt;
@@ -431,18 +592,37 @@ export class SphPhysics {
       }
     } else if (this.currentPreset === "jet") {
       this.jetTimer += dt;
-      if (this.jetTimer >= 0.02 && this.activeParticles < this.params.particleCount) {
+      if (this.jetTimer >= 0.025 && this.activeParticles < this.params.particleCount) {
         this.jetTimer = 0;
-        const jetCount = 8;
-        for (let k = 0; k < jetCount && this.activeParticles < this.params.particleCount; k++) {
+        const perTick = 8;
+        for (let k = 0; k < perTick && this.activeParticles < this.params.particleCount; k++) {
           const idx = this.activeParticles++;
           const i3 = idx * 3;
-          this.pos[i3] = -9.0 + (Math.random() - 0.5) * 0.3;
-          this.pos[i3 + 1] = 5.5 + (Math.random() - 0.5) * 0.3;
-          this.pos[i3 + 2] = (Math.random() - 0.5) * 0.3;
-          this.vel[i3] = 18.0 + Math.random() * 4.0;
-          this.vel[i3 + 1] = 4.0 + (Math.random() - 0.5) * 2.0;
+          this.pos[i3] = -11.5 + (Math.random() - 0.5) * 0.4;
+          this.pos[i3 + 1] = 7.0 + (Math.random() - 0.5) * 0.4;
+          this.pos[i3 + 2] = (Math.random() - 0.5) * 0.4;
+          this.vel[i3] = 16.0 + Math.random() * 3.0;
+          this.vel[i3 + 1] = 1.0 + Math.random() * 1.5;
           this.vel[i3 + 2] = (Math.random() - 0.5) * 3.0;
+        }
+      }
+    }
+
+    // User Cursor Fluid Emitter Mode
+    if (this.isInteracting && this.interactionMode === "emit") {
+      this.emitTimer += dt;
+      if (this.emitTimer >= 0.035 && this.activeParticles < this.params.particleCount) {
+        this.emitTimer = 0;
+        const count = 10;
+        for (let k = 0; k < count && this.activeParticles < this.params.particleCount; k++) {
+          const idx = this.activeParticles++;
+          const i3 = idx * 3;
+          this.pos[i3] = this.interactionPos.x + (Math.random() - 0.5) * 0.6;
+          this.pos[i3 + 1] = this.interactionPos.y + 0.6 + Math.random() * 0.4;
+          this.pos[i3 + 2] = this.interactionPos.z + (Math.random() - 0.5) * 0.6;
+          this.vel[i3] = (Math.random() - 0.5) * 2.0;
+          this.vel[i3 + 1] = -4.0 - Math.random() * 3.0;
+          this.vel[i3 + 2] = (Math.random() - 0.5) * 2.0;
         }
       }
     }
@@ -461,6 +641,7 @@ export class SphPhysics {
       this.computeDensityAndPressure();
       this.computeForces();
       this.integrateAndCollide(subDt);
+      this.computeXSPH(); // Monaghan XSPH surface tension smoothing
     }
   }
 }
