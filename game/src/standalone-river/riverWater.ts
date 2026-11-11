@@ -504,67 +504,35 @@ export class RiverWater {
             }
           }
 
-          // 2D BOULDER DEFLECTED STREAMWISE VELOCITY FIELD:
-          // Water speeds up along center, deflects tangentially around boulders, and slows in stagnation zones
-          vec2 baseVel = vFlowDir * uFlowSpeed;
-          vec2 localVel = baseVel;
+          // Curvilinear downstream coordinate (0.0 at upstream summit z=-40 -> 80.0 at valley base z=+40):
+          float streamDist = (1.0 - vRiverUv.y) * 80.0;
+          float xc = getRiverCenter(vWorldPos.z);
+          float crossDist = vWorldPos.x - xc;
 
-          for (int b = 0; b < 10; b++) {
-            vec4 bld = uBoulders[b];
-            if (bld.w <= 0.05) continue;
-            vec2 dXZ = vWorldPos.xz - bld.xz;
-            float dist = length(dXZ);
-            float bR = bld.w;
+          // UNIFORM TIME ADVECTION (Guarantees zero spatial shear, zero Nyquist aliasing, locked mipmap 0):
+          float flowDist1 = streamDist - uTime * uFlowSpeed;
+          float flowDist2 = streamDist - uTime * (uFlowSpeed * 1.35);
+          float flowDist3 = streamDist - uTime * (uFlowSpeed * 1.70);
 
-            if (dist < bR * 3.2 && dist > 0.04) {
-              vec2 dNorm = dXZ / dist;
-              // Inviscid tangential deflection
-              vec2 tangent = vec2(-dNorm.y, dNorm.x) * sign(baseVel.x * dNorm.y - baseVel.y * dNorm.x + 0.001);
-              float influence = pow(clamp(1.0 - dist / (bR * 3.0), 0.0, 1.0), 1.8);
-              
-              // Upstream stagnation: slow down on upstream face
-              float upstreamDot = dot(dNorm, -normalize(baseVel));
-              if (upstreamDot > 0.0) {
-                localVel *= max(0.25, 1.0 - upstreamDot * influence * 0.75);
-              }
-              // Flank acceleration: speed up around sides (+35%)
-              localVel = mix(localVel, tangent * length(baseVel) * 1.35, influence * 0.75);
-            }
-          }
+          // Dynamic widthwise drift & lateral expansion:
+          // Ripples actively drift and expand diagonally outward toward the banks as water rushes downstream
+          float latDrift1 = crossDist - sign(crossDist) * (uTime * (uFlowSpeed * 0.16));
+          float latDrift2 = crossDist + sin(streamDist * 0.45 - uTime * 2.2) * 0.35;
+          float latDrift3 = crossDist - sign(crossDist) * (uTime * (uFlowSpeed * 0.26));
 
-          // DUAL-PHASE FLOW MAPPING (Stream-grade smooth ripple advection with zero stretching)
-          float tau = 0.95;
-          float t0 = mod(uTime, tau);
-          float t1 = mod(uTime + tau * 0.5, tau);
-          float w0 = sin((t0 / tau) * 3.14159265);
-          float w1 = sin((t1 / tau) * 3.14159265);
+          // Three-tier multi-scale waves (moving downstream AND widthwise):
+          vec2 uvSwell = vec2(latDrift1, flowDist1) * 0.30;
+          vec3 nSwell = texture2D(uWaterNormalMap, uvSwell).rgb * 2.0 - 1.0;
 
-          // Phase 0 & Phase 1 UVs following the deflected local velocity
-          vec2 flowUv0_a = vWorldPos.xz * 1.40 - localVel * t0 * 0.45;
-          vec2 flowUv1_a = vWorldPos.xz * 1.40 - localVel * t1 * 0.45;
-          vec3 n0_a = texture2D(uWaterNormalMap, flowUv0_a).rgb * 2.0 - 1.0;
-          vec3 n1_a = texture2D(uWaterNormalMap, flowUv1_a).rgb * 2.0 - 1.0;
-          vec3 flowSwell = n0_a * w0 + n1_a * w1;
+          vec2 uvRipple = mat2(0.978, -0.208, 0.208, 0.978) * (vec2(latDrift2, flowDist2) * 0.72);
+          vec3 nRipple = texture2D(uWaterNormalMap, uvRipple).rgb * 2.0 - 1.0;
 
-          // Secondary high-frequency capillary ripples
-          vec2 flowUv0_b = vWorldPos.xz * 3.80 - localVel * t0 * 0.75;
-          vec2 flowUv1_b = vWorldPos.xz * 3.80 - localVel * t1 * 0.75;
-          vec3 n0_b = texture2D(uWaterNormalMap, flowUv0_b).rgb * 2.0 - 1.0;
-          vec3 n1_b = texture2D(uWaterNormalMap, flowUv1_b).rgb * 2.0 - 1.0;
-          vec3 flowCapillary = n0_b * w0 + n1_b * w1;
-
-          // Micro-chop octave
-          vec2 flowUv0_c = vWorldPos.xz * 8.50 - localVel * t0 * 1.10;
-          vec2 flowUv1_c = vWorldPos.xz * 8.50 - localVel * t1 * 1.10;
-          vec3 n0_c = texture2D(uWaterNormalMap, flowUv0_c).rgb * 2.0 - 1.0;
-          vec3 n1_c = texture2D(uWaterNormalMap, flowUv1_c).rgb * 2.0 - 1.0;
-          vec3 flowChop = n0_c * w0 + n1_c * w1;
-
-          vec3 combinedWave = flowSwell * 0.48 + flowCapillary * 0.36 + flowChop * 0.16;
+          vec2 uvChop = mat2(0.927, 0.375, -0.375, 0.927) * (vec2(latDrift3, flowDist3) * 1.50);
+          vec3 nChop = texture2D(uWaterNormalMap, uvChop).rgb * 2.0 - 1.0;
 
           // Ripples stay alive right up to the water edge (calming only in final 2.5 mm):
           float rippleDamping = smoothstep(0.001, 0.025, depth);
-          vec3 normalPerturb = combinedWave.xzy * rippleDamping;
+          vec3 normalPerturb = (nSwell.xzy * 0.48 + nRipple.xzy * 0.36 + nChop.xzy * 0.16) * rippleDamping;
 
           // Chentanez & Müller 2D SWE Physical Wave Surface Gradient Normal:
           vec2 sweUv = vec2(vRiverUv.x, vRiverUv.y);
@@ -593,18 +561,13 @@ export class RiverWater {
           vec3 H = normalize(L + V);
           vec3 R = reflect(-V, N);
 
-          // SNELL RAYTRACED CAUSTICS (Jacobian convergence through free-surface curvature)
-          vec3 lightRay = -normalize(uSunDir);
-          vec3 refrRay = refract(lightRay, N, 0.75); // water IOR = 1.333
-          vec2 bedOffset = (refrRay.xz / max(-refrRay.y, 0.08)) * depth;
-
-          // Multi-scale surface divergence for bright caustic web
-          vec2 caustUv1 = (vWorldPos.xz + bedOffset) * 2.6 - localVel * uTime * 0.28;
-          vec2 caustUv2 = (vWorldPos.xz + bedOffset) * 5.2 - localVel * uTime * 0.42;
-          float cMap1 = texture2D(uWaterNormalMap, caustUv1).r;
-          float cMap2 = texture2D(uWaterNormalMap, caustUv2).g;
-          float causticWeb = pow(cMap1 * cMap2, 2.5) * 6.5;
-          float caustics = causticWeb * exp(-depth * 0.75) * smoothstep(0.015, 0.15, depth);
+          // VISIBLE DANCING SUNLIGHT CAUSTICS ON RIVERBED:
+          // Sunlight focused by racing surface waves and SWE physical ripples onto pebbles
+          vec2 cUv1 = vec2(crossDist * 0.90 + swe.g * 1.2 * uSweEnabled, (streamDist - uTime * uFlowSpeed * 1.08) * 0.90 + swe.b * 1.2 * uSweEnabled);
+          vec2 cUv2 = vec2(crossDist * 1.35 + 0.35 + swe.g * 1.8 * uSweEnabled, (streamDist - uTime * uFlowSpeed * 1.32) * 1.35 + swe.b * 1.8 * uSweEnabled);
+          float cWave1 = texture2D(uWaterNormalMap, cUv1).r;
+          float cWave2 = texture2D(uWaterNormalMap, cUv2).g;
+          float caustics = pow(cWave1 * cWave2, 2.2) * 4.8 * exp(-depth * 0.85) * smoothstep(0.04, 0.40, depth);
 
           // Screen-space refraction with visible pebble shimmer:
           vec2 screenUv = (vScreenPos.xy / vScreenPos.w) * 0.5 + 0.5;
@@ -618,17 +581,13 @@ export class RiverWater {
           bedCol.b = texture2D(uScreenTex, clamp(refrUv - normalPerturb.xz * 0.003, 0.001, 0.999)).b;
 
           // Add racing golden caustics to riverbed:
-          bedCol += caustics * uSunColor * 0.85;
+          bedCol += caustics * uSunColor * 0.75;
 
-          // Spectral Beer-Lambert Absorption with Stream-tuned optical depth:
-          // In shallows (0 - 30cm), high transmittance lets pebbles & caustics shine through
-          float optDepth = min(depth, 0.35) * 0.80 + max(0.0, depth - 0.35) * 0.35;
-          vec3 alpha = vec3(1.35, 0.48, 0.20) * uAbsorbScale;
-          vec3 transmittance = exp(-alpha * (optDepth + 0.006));
-
-          // Subsurface scattering tint (luminous alpine turquoise glow in deeper pools)
-          vec3 sssColor = vec3(0.025, 0.14, 0.20);
-          vec3 waterBody = bedCol * transmittance + sssColor * (vec3(1.0) - transmittance);
+          // Spectral Beer-Lambert Absorption
+          vec3 alpha = vec3(1.40, 0.55, 0.28) * uAbsorbScale;
+          vec3 transmittance = exp(-alpha * (depth + 0.005));
+          vec3 scatterColor = vec3(0.015, 0.11, 0.16);
+          vec3 waterBody = bedCol * transmittance + scatterColor * (vec3(1.0) - transmittance);
 
           // HDRI Sky Reflection
           vec3 skyRefl;
@@ -662,9 +621,11 @@ export class RiverWater {
             float hydFoam = max(froudeFoam, max(speedFoam, cascadeFoam));
             float rapidTrigger = clamp(hydFoam + wakeFoam * 1.5, 0.0, 2.0);
 
-            // Streamwise anisotropic foam UVs following the 2D deflected flow field:
-            vec2 fUv1 = vWorldPos.xz * 1.5 - localVel * uTime * 0.38;
-            vec2 fUv2 = vWorldPos.xz * 3.2 - localVel * uTime * 0.62;
+            // Streamwise anisotropic foam UVs:
+            // Cross-stream coordinates are scaled higher (0.85 and 1.60) than downstream coordinates (0.28 and 0.48)
+            // This naturally stretches foam features along river streamlines into elegant, flowing streamers!
+            vec2 fUv1 = vec2(latDrift1 * 0.85, flowDist1 * 0.28);
+            vec2 fUv2 = vec2(latDrift2 * 1.60, flowDist2 * 0.48);
 
             vec4 foam1 = texture2D(uFoamTex, fUv1);
             vec4 foam2 = texture2D(uFoamTex, fUv2);

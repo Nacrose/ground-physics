@@ -122,59 +122,48 @@ export class RiverTerrain {
           // Riverbed vs Bank blending (gravel bar extends across wide flood corridor)
           float channelMask = smoothstep(7.2, 4.2, distToCenter);
 
-          // Multi-scale pebble UV mapping (realistic 3-6 cm stones + fine gravel)
-          vec2 pebbleUv1 = vWorldPos.xz * 3.6;
-          vec2 pebbleUv2 = vWorldPos.xz * 7.2;
+          // UV mapping
+          vec2 pebbleUv = vWorldPos.xz * 1.5;
+          vec2 bankUv = vWorldPos.xz * 0.6;
 
-          vec3 pebbleCol1 = texture2D(uPebbleMap, pebbleUv1).rgb;
-          vec3 pebbleCol2 = texture2D(uPebbleMap, pebbleUv2).rgb;
-          vec3 pebbleCol = mix(pebbleCol1, pebbleCol2, 0.35);
+          vec3 pebbleCol = texture2D(uPebbleMap, pebbleUv).rgb;
+          vec3 pebbleArm = texture2D(uPebbleArm, pebbleUv).rgb;
 
-          vec3 pebbleArm1 = texture2D(uPebbleArm, pebbleUv1).rgb;
-          vec3 pebbleArm2 = texture2D(uPebbleArm, pebbleUv2).rgb;
-          vec3 pebbleArm = mix(pebbleArm1, pebbleArm2, 0.35);
-
-          vec3 bankCol = texture2D(uBankMap, vWorldPos.xz * 0.85).rgb;
-          vec3 bankArm = texture2D(uBankArm, vWorldPos.xz * 0.85).rgb;
+          vec3 bankCol = texture2D(uBankMap, bankUv).rgb;
+          vec3 bankArm = texture2D(uBankArm, bankUv).rgb;
 
           vec3 albedo = mix(bankCol, pebbleCol, channelMask);
           vec3 arm = mix(bankArm, pebbleArm, channelMask);
 
-          // Dynamic wetness darkening (water drops albedo by 52% and makes surface glossy like the stream)
-          float submerged = smoothstep(waterY + 0.18, waterY - 0.05, vWorldPos.y);
+          // Dynamic wetness darkening where under water or near surging swash shoreline
+          float submerged = smoothstep(waterY + 0.16, waterY - 0.04, vWorldPos.y);
+          albedo *= mix(1.0, 0.45, submerged);
+          float roughness = mix(arm.g, 0.08, submerged);
+
+          // Dynamic Rain Wetness (terrain absorbs water, turns dark & glossy)
           float rainWetness = clamp(uRainIntensity / 50.0, 0.0, 1.0);
-          float isWet = clamp(submerged + rainWetness * 0.85, 0.0, 1.0);
-          albedo *= mix(1.0, 0.48, isWet);
-          float roughness = mix(arm.g, 0.08, isWet);
+          if (rainWetness > 0.005) {
+            albedo *= mix(1.0, 0.64, rainWetness * 0.85);
+            roughness = mix(roughness, 0.06, rainWetness * 0.72);
+          }
 
           // Lighting
           vec3 L = normalize(uSunDir);
           vec3 N = normalize(vNormal);
-          vec3 V = normalize(cameraPosition - vWorldPos);
-          vec3 H = normalize(L + V);
           float NdotL = max(dot(N, L), 0.0);
-          float NdotH = max(dot(N, H), 0.0);
 
           // Ambient & direct
           vec3 ambient = vec3(0.18, 0.22, 0.26) * arm.r;
           vec3 direct = uSunColor * NdotL;
 
-          // Dynamic Snell refracted sunlight caustics dancing across the pebble bed
-          if (submerged > 0.05 && channelMask > 0.15) {
-            float depth = max(0.0, waterY - vWorldPos.y);
-            vec2 cUv1 = vWorldPos.xz * 2.8 - vec2(0.0, uTime * 2.2);
-            vec2 cUv2 = vWorldPos.xz * 5.6 + vec2(uTime * 0.45, -uTime * 3.2);
-            vec3 norSample1 = texture2D(uPebbleNor, cUv1).rgb * 2.0 - 1.0;
-            vec3 norSample2 = texture2D(uPebbleNor, cUv2).rgb * 2.0 - 1.0;
-            float c1 = norSample1.r * 0.5 + 0.5;
-            float c2 = norSample2.g * 0.5 + 0.5;
-            float caust = pow(c1 * c2, 2.8) * 5.8 * exp(-depth * 0.80) * smoothstep(0.015, 0.12, depth);
+          // Dynamic sunlight caustics dancing on submerged riverbed (moving downstream +z)
+          if (submerged > 0.1 && channelMask > 0.2) {
+            float sDist = (vWorldPos.z + 40.0);
+            float c1 = sin(vWorldPos.x * 5.0 + sin(sDist * 0.4) * 1.5) * cos(sDist * 4.5 - uTime * 4.2);
+            float c2 = sin(vWorldPos.x * 9.0 - sin(sDist * 0.8) * 1.2) * cos(sDist * 8.5 - uTime * 5.8);
+            float caust = pow(max(c1 + c2, 0.0), 2.5) * 1.5;
             direct += uSunColor * caust * submerged;
           }
-
-          // Wet specular sheen on glistening submerged and rain-slicked stones
-          float wetSpec = pow(NdotH, 64.0) * 1.8 * isWet * NdotL;
-          direct += uSunColor * wetSpec;
 
           vec3 finalColor = albedo * (ambient + direct);
 

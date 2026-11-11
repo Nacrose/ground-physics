@@ -200,7 +200,6 @@ export class StandaloneRiverLab {
     // 14. 3D SPH Navier-Stokes Fluid Particles & SSFR Continuous Surface Pipeline
     this.sph = new RiverSph(this.scene, this.renderer, this.terrain, this.rocks, this.hydraulics);
     this.setWaterModel("surface");
-    this.setViewPreset("macro");
 
     window.addEventListener("resize", this.onResize);
 
@@ -387,7 +386,7 @@ export class StandaloneRiverLab {
       this.water.update(this.simTime);
       this.spray.update(delta);
       this.runoff.update(delta, this.camera.position, this.simTime);
-      this.rocks.update(delta, this.hydraulics, this.terrain, this.simTime);
+      this.rocks.update(delta, this.hydraulics, this.terrain);
 
       if (this.waterModel === "sph") {
         this.sph.step(delta);
@@ -491,21 +490,8 @@ export class StandaloneRiverLab {
     }
   }
 
-  setViewPreset(preset: "macro" | "rapids" | "island" | "canyon" | "overview" | "runoff") {
+  setViewPreset(preset: "rapids" | "island" | "canyon" | "overview" | "runoff") {
     this.cameraFollowRiver = false;
-    if (preset === "macro") {
-      // 💎 Stream-Grade Macro View: camera placed 1.8m from the centerpiece boulder
-      const z = -18.0;
-      const xc = this.terrain.getRiverCenter(z);
-      const wy = this.hydraulics.getWaterHeightAt(z);
-      this.camera.fov = 38;
-      this.camera.updateProjectionMatrix();
-      this.controls.target.set(xc + 0.2, wy + 0.15, z);
-      this.camera.position.set(xc + 1.85, wy + 1.15, z - 1.95);
-    } else {
-      this.camera.fov = 42;
-      this.camera.updateProjectionMatrix();
-    }
     if (preset === "rapids") {
       this.controls.target.set(1.2, 4.8, -18.0);
       this.camera.position.set(5.5, 6.8, -24.0);
