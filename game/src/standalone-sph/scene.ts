@@ -318,6 +318,7 @@ export class StandaloneSphLab {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
+    this.fluidRenderer.resize(w, h);
   };
 
   private animate = (now: number) => {
@@ -377,7 +378,10 @@ export class StandaloneSphLab {
     }
 
     this.controls.update();
-    this.renderer.render(this.scene, this.camera);
+
+    // High-Fidelity Screen Space Fluid Rendering Pass
+    const sunDir = this.sunLight ? this.sunLight.position.clone().normalize() : undefined;
+    this.fluidRenderer.render(this.camera, sunDir);
   };
 
   setPreset(preset: SimPreset) {
@@ -420,6 +424,7 @@ export class StandaloneSphLab {
     window.removeEventListener("pointerup", this.onPointerUp);
     window.removeEventListener("pointercancel", this.onPointerUp);
 
+    this.fluidRenderer.dispose();
     this.renderer.dispose();
     this.container.innerHTML = "";
   }
