@@ -28,19 +28,18 @@ function generateRaindropTexture(size = 64): THREE.DataTexture {
   return tex;
 }
 
-const RUNOFF_STREAMS = [
-  // West Valley Wall (xTop < 0, flows from mountain ridge into west river bank)
-  { zStart: -34.0, zEnd: -28.0, xTop: -14.2, side: -1, width: 1.1 },
-  { zStart: -22.0, zEnd: -16.0, xTop: -13.8, side: -1, width: 1.3 }, // Cascades into West Terrace Basin!
-  { zStart: -6.0,  zEnd: 0.0,   xTop: -14.0, side: -1, width: 1.2 },
-  { zStart: 12.0,  zEnd: 18.0,  xTop: -13.6, side: -1, width: 1.4 }, // Cascades into West Floodplain Hollow!
-  { zStart: 26.0,  zEnd: 32.0,  xTop: -14.2, side: -1, width: 1.2 },
-  // East Valley Wall (xTop > 0, flows from mountain ridge into east river bank)
-  { zStart: -30.0, zEnd: -24.0, xTop: 14.0,  side: 1,  width: 1.1 },
-  { zStart: -14.0, zEnd: -8.0,  xTop: 13.6,  side: 1,  width: 1.3 }, // Cascades into East Gravel Bar Pool!
-  { zStart: 4.0,   zEnd: 10.0,  xTop: 14.0,  side: 1,  width: 1.2 },
-  { zStart: 20.0,  zEnd: 26.0,  xTop: 13.8,  side: 1,  width: 1.3 }, // Cascades into East Lower Gravel Bar!
-];
+// 12 Ridge release stations for numerical gradient-descent runoff tracing:
+const RIDGE_RELEASE_Z = [-32.0, -20.0, -8.0, 4.0, 16.0, 28.0];
+
+interface StreamPoint {
+  x: number;
+  y: number;
+  z: number;
+  slope: number;
+  velocity: number; // Manning speed [m/s]
+  width: number;    // Channel width [m]
+  dist: number;     // Cumulative downhill distance [m]
+}
 
 export class RiverRunoff {
   rainIntensity = 0.0; // [0, 80] mm/h
@@ -60,18 +59,18 @@ export class RiverRunoff {
   private rainPos: Float32Array;
   private rainVel: Float32Array;
 
-  // 2. Physical 3D Hillslope Runoff Stream Ribbons
+  // 2. Physical Gradient-Traced Runoff Streams (Manning Hydrodynamics)
   private streamMeshes: THREE.Mesh[] = [];
   private streamMats: THREE.ShaderMaterial[] = [];
 
   // 3. Permanent Puddles (Depression Basins on Gravel Bars)
-  puddleFills: number[] = [0.35, 0.40, 0.35, 0.40]; // 0.35 = calm base pool, 1.0 = brim-full & overflowing
+  puddleFills: number[] = [0.35, 0.40, 0.35, 0.40];
   private puddleMeshes: THREE.Mesh[] = [];
   private puddleMats: THREE.ShaderMaterial[] = [];
   private puddleBaseY: number[] = [];
   private puddleRimY: number[] = [];
 
-  // 4. Spillway Runoff Rivulets
+  // 4. Overflow Spillway Chutes
   private spillwayMeshes: THREE.Mesh[] = [];
   private spillwayMats: THREE.ShaderMaterial[] = [];
 
@@ -91,7 +90,6 @@ export class RiverRunoff {
     this.group = new THREE.Group();
     this.group.name = "RiverRunoff";
 
-    // Fallback normal/foam if not provided
     const dummyNorm = waterNormalMap || new THREE.DataTexture(new Uint8Array([128, 128, 255, 255]), 1, 1, THREE.RGBAFormat);
     const dummyFoam = foamTex || new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, THREE.RGBAFormat);
 
@@ -152,50 +150,62 @@ export class RiverRunoff {
     this.group.add(this.rainMesh);
 
     // =========================================================================
-    // PART 2: 9 PHYSICAL 3D HILLSLOPE RUNOFF STREAMS (CASCADING WATER RIBBONS)
+    // PART 2: 12 PHYSICAL GRADIENT-TRACED RUNOFF STREAMS (MANNING EQUATION)
     // =========================================================================
-    RUNOFF_STREAMS.forEach((cfg) => {
-      const segs = 24;
+    const releaseConfigs: { startX: number; startZ: number; side: number }[] = [];
+    RIDGE_RELEASE_Z.forEach((z) => {
+      const xc = this.terrain.getRiverCenter(z);
+      // West Ridge Release Point (mountain summit)
+      releaseConfigs.push({ startX: xc - 14.2, startZ: z, side: -1 });
+      // East Ridge Release Point (mountain summit)
+      releaseConfigs.push({ startX: xc + 14.2, startZ: z, side: 1 });
+    });
+
+    releaseConfigs.forEach((cfg) => {
+      // 1. Numerically trace the physical steepest descent path down the terrain:
+      const path = this.traceStreamline(cfg.startX, cfg.startZ);
+      if (path.length < 4) return;
+
+      // 2. Build 3D continuous fluid ribbon from traced physical points:
+      const segs = path.length - 1;
       const ptsLeft: number[] = [];
       const ptsRight: number[] = [];
       const uvs: number[] = [];
+      const vels: number[] = [];
+      const slopes: number[] = [];
       const indices: number[] = [];
 
+      const totalDist = path[segs].dist || 1.0;
+
       for (let s = 0; s <= segs; s++) {
-        const t = s / segs;
-        const curZ = cfg.zStart + (cfg.zEnd - cfg.zStart) * t;
-        const xc = this.terrain.getRiverCenter(curZ);
+        const pt = path[s];
+        const vNorm = pt.dist / totalDist;
 
-        // Meandering path from mountain top to river bank:
-        const meanderX = Math.sin(t * Math.PI * 2.5) * 0.45;
-        const meanderZ = Math.cos(t * Math.PI * 2.0) * 0.35;
-
-        const curXCenter = (xc + cfg.xTop) * (1.0 - t) + (xc + cfg.side * 3.85) * t + meanderX;
-        const curZCenter = curZ + meanderZ;
-
-        // Stream width expands as rivulets merge:
-        const curWidth = cfg.width * (0.65 + 0.55 * t);
-
-        // Tangent & cross-vector:
-        const nextT = Math.min(1.0, t + 0.05);
-        const nextZ = cfg.zStart + (cfg.zEnd - cfg.zStart) * nextT;
-        const nextXc = this.terrain.getRiverCenter(nextZ);
-        const nextXCenter = (nextXc + cfg.xTop) * (1.0 - nextT) + (nextXc + cfg.side * 3.85) * nextT;
-        const dir = new THREE.Vector2(nextXCenter - curXCenter, nextZ - curZCenter).normalize();
+        // Tangent & cross-normal vector in XZ plane:
+        let dir: THREE.Vector2;
+        if (s < segs) {
+          dir = new THREE.Vector2(path[s + 1].x - pt.x, path[s + 1].z - pt.z).normalize();
+        } else {
+          dir = new THREE.Vector2(pt.x - path[s - 1].x, pt.z - path[s - 1].z).normalize();
+        }
         const cross = new THREE.Vector2(-dir.y, dir.x);
 
-        const xL = curXCenter - cross.x * (curWidth * 0.5);
-        const zL = curZCenter - cross.y * (curWidth * 0.5);
-        const yL = this.terrain.getBedHeight(xL, zL) + 0.038; // Raised 3.8 cm: GUARANTEED ZERO CLIPPING!
+        const halfW = pt.width * 0.5;
+        const xL = pt.x - cross.x * halfW;
+        const zL = pt.z - cross.y * halfW;
+        const xR = pt.x + cross.x * halfW;
+        const zR = pt.z + cross.y * halfW;
 
-        const xR = curXCenter + cross.x * (curWidth * 0.5);
-        const zR = curZCenter + cross.y * (curWidth * 0.5);
+        // Elevation strictly conforms to bed height + physical depth layer
+        const yL = this.terrain.getBedHeight(xL, zL) + 0.038;
         const yR = this.terrain.getBedHeight(xR, zR) + 0.038;
 
         const baseIdx = s * 2;
         ptsLeft.push(xL, yL, zL);
         ptsRight.push(xR, yR, zR);
-        uvs.push(0.0, t, 1.0, t);
+        uvs.push(0.0, vNorm, 1.0, vNorm);
+        vels.push(pt.velocity, pt.velocity);
+        slopes.push(pt.slope, pt.slope);
 
         if (s < segs) {
           indices.push(baseIdx, baseIdx + 1, baseIdx + 2);
@@ -215,6 +225,8 @@ export class RiverRunoff {
       }
       streamGeo.setAttribute("position", new THREE.BufferAttribute(allVerts, 3));
       streamGeo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+      streamGeo.setAttribute("aVelocity", new THREE.Float32BufferAttribute(vels, 1));
+      streamGeo.setAttribute("aSlope", new THREE.Float32BufferAttribute(slopes, 1));
       streamGeo.setIndex(indices);
       streamGeo.computeVertexNormals();
 
@@ -228,12 +240,20 @@ export class RiverRunoff {
           uRainIntensity: { value: 0.0 },
         },
         vertexShader: `
+          attribute float aVelocity;
+          attribute float aSlope;
+
           varying vec2 vUv;
           varying vec3 vWorldPos;
           varying vec3 vNormal;
+          varying float vVelocity;
+          varying float vSlope;
 
           void main() {
             vUv = uv;
+            vVelocity = aVelocity;
+            vSlope = aSlope;
+
             vec4 wp = modelMatrix * vec4(position, 1.0);
             vWorldPos = wp.xyz;
             vNormal = normalize(mat3(modelMatrix) * normal);
@@ -252,16 +272,18 @@ export class RiverRunoff {
           varying vec2 vUv;
           varying vec3 vWorldPos;
           varying vec3 vNormal;
+          varying float vVelocity;
+          varying float vSlope;
 
           void main() {
             float rainNorm = clamp(uRainIntensity / 50.0, 0.0, 1.0);
-            // In dry weather, a faint crystal mountain brook (0.35); in rain, a roaring torrent (1.0)!
-            float streamIntensity = mix(0.35, 1.0, rainNorm);
+            // In dry weather, a clear mountain brook; in rain, a roaring torrent!
+            float streamIntensity = mix(0.40, 1.0, rainNorm);
 
-            // Fast downhill liquid flow advection (vUv.y -> 1.0 towards river)
-            float flowSpeed = 3.8 + rainNorm * 2.2;
-            vec2 uvFlow1 = vec2(vUv.x * 1.6, vUv.y * 4.0 - uTime * flowSpeed);
-            vec2 uvFlow2 = vec2(vUv.x * 2.4 + 0.35, vUv.y * 7.5 - uTime * (flowSpeed * 1.35));
+            // Flow advection is DRIVEN DIRECTLY by the physical Manning velocity vVelocity:
+            float localSpeed = vVelocity * (0.85 + rainNorm * 0.45);
+            vec2 uvFlow1 = vec2(vUv.x * 1.6, vUv.y * 4.2 - uTime * localSpeed);
+            vec2 uvFlow2 = vec2(vUv.x * 2.4 + 0.35, vUv.y * 7.5 - uTime * (localSpeed * 1.35));
 
             vec3 n1 = texture2D(uWaterNormal, uvFlow1).rgb * 2.0 - 1.0;
             vec3 n2 = texture2D(uWaterNormal, uvFlow2).rgb * 2.0 - 1.0;
@@ -288,16 +310,17 @@ export class RiverRunoff {
             float spec = pow(NdotH, 36.0) * 3.5 * fresnel * NdotL;
             waterColor += uSunColor * spec;
 
-            // Cascading whitewater froth along steps & steep drops
-            float foamNoise = texture2D(uFoamTex, vec2(vUv.x * 2.0, vUv.y * 5.0 - uTime * flowSpeed)).r;
-            float cascadeFoam = smoothstep(0.42, 0.85, foamNoise) * (0.35 + 0.50 * rainNorm);
+            // Physical Supercritical Froth:
+            // Where bed slope is steep (vSlope > 0.22), Froude number Fr > 1.0, generating whitecaps!
+            float foamNoise = texture2D(uFoamTex, vec2(vUv.x * 2.0, vUv.y * 5.0 - uTime * localSpeed)).r;
+            float steepDropFoam = smoothstep(0.18, 0.35, vSlope) * smoothstep(0.35, 0.75, foamNoise) * (0.45 + 0.55 * rainNorm);
 
-            // Intense white water splash plume at river entry confluence (vUv.y > 0.82)
+            // Boiling white water splash plume at river entry confluence (vUv.y > 0.82)
             float riverPlunge = smoothstep(0.80, 0.98, vUv.y) * 0.85;
-            float totalFoam = clamp(cascadeFoam + riverPlunge, 0.0, 1.0);
+            float totalFoam = clamp(steepDropFoam + riverPlunge, 0.0, 1.0);
             waterColor = mix(waterColor, vec3(0.95, 0.98, 1.0) * (0.85 + 0.35 * NdotL), totalFoam * 0.90);
 
-            // Cross-stream curved natural edge falloff (thick center, soft shore)
+            // Cross-stream natural parabolic profile (thick at center, soft shore)
             float crossProfile = sin(vUv.x * 3.14159);
             float alpha = pow(crossProfile, 0.55) * streamIntensity * 0.92;
 
@@ -336,7 +359,7 @@ export class RiverRunoff {
           uTime: { value: 0.0 },
           uSunDir: { value: sunDir },
           uSunColor: { value: sunColor },
-          uFill: { value: 0.35 }, // Always visible liquid pool!
+          uFill: { value: 0.35 },
           uRainIntensity: { value: 0.0 },
         },
         vertexShader: `
@@ -389,7 +412,7 @@ export class RiverRunoff {
             vec3 H = normalize(L + V);
             vec3 R = reflect(-V, N);
 
-            // High-contrast mirror sky reflection (pure liquid look)
+            // High-contrast mirror sky reflection
             float NdotV = clamp(dot(N, V), 0.0, 1.0);
             float fresnel = 0.05 + 0.95 * pow(1.0 - NdotV, 3.5);
             vec3 skyRefl = mix(vec3(0.28, 0.42, 0.56), vec3(0.82, 0.92, 1.0), max(R.y, 0.0));
@@ -403,7 +426,6 @@ export class RiverRunoff {
             float glint = pow(NdotH, 64.0) * 3.5 * fresnel;
             finalColor += uSunColor * glint;
 
-            // Soft shoreline edge blending
             float edgeAlpha = smoothstep(1.0, 0.75, rDist) * 0.92;
             gl_FragColor = vec4(finalColor, edgeAlpha);
           }
@@ -483,7 +505,6 @@ export class RiverRunoff {
             float rainNorm = clamp(uRainIntensity / 50.0, 0.0, 1.0);
             float active = mix(0.25, 0.95, rainNorm);
 
-            // Fast streaming runoff waves rushing down gravel bar into river
             float flow = sin(vUv.y * 28.0 - uTime * 6.5) * 0.5 + 0.5;
             float crossShape = sin(vUv.x * 3.14159);
             float rillAlpha = pow(crossShape, 0.6) * active * (0.60 + 0.35 * flow);
@@ -507,6 +528,71 @@ export class RiverRunoff {
       this.spillwayMats.push(spMat);
       this.group.add(spMesh);
     });
+  }
+
+  /**
+   * Numerically integrates the steepest descent streamline along -∇z_bed(x, z).
+   * Computes physical Manning velocity, slope, and drainage accumulation width.
+   */
+  private traceStreamline(startX: number, startZ: number, dtStep = 0.35, maxSteps = 55): StreamPoint[] {
+    let curX = startX;
+    let curZ = startZ;
+    const path: StreamPoint[] = [];
+
+    const g0 = this.terrain.getBedGradient(curX, curZ);
+    let cumDist = 0.0;
+
+    path.push({
+      x: curX,
+      y: this.terrain.getBedHeight(curX, curZ),
+      z: curZ,
+      slope: g0.slope,
+      velocity: 2.0,
+      width: 0.65,
+      dist: 0.0,
+    });
+
+    for (let s = 0; s < maxSteps; s++) {
+      const g = this.terrain.getBedGradient(curX, curZ);
+      if (g.slope < 0.005) break;
+
+      // Follow the negative gradient of the terrain: -∇z / |∇z|
+      const dirX = -g.dx / g.slope;
+      const dirZ = -g.dz / g.slope;
+
+      const nextX = curX + dirX * dtStep;
+      const nextZ = curZ + dirZ * dtStep;
+      const stepDist = Math.hypot(nextX - curX, nextZ - curZ);
+      cumDist += stepDist;
+
+      curX = nextX;
+      curZ = nextZ;
+      const curY = this.terrain.getBedHeight(curX, curZ);
+
+      // Manning-Strickler equation for open sheet/rill flow:
+      // v = (1 / n) * R^(2/3) * sqrt(S)
+      // with roughness n = 0.038, hydraulic radius R ≈ 0.045m
+      const manningV = Math.min(6.5, Math.max(0.7, (1.0 / 0.038) * 0.126 * Math.sqrt(g.slope)));
+
+      // Continuity equation: stream widens as it drains downslope accumulation area:
+      const streamWidth = Math.min(1.55, 0.65 + (cumDist / 12.0) * 0.75);
+
+      path.push({
+        x: curX,
+        y: curY,
+        z: curZ,
+        slope: g.slope,
+        velocity: manningV,
+        width: streamWidth,
+        dist: cumDist,
+      });
+
+      // Stop when entering main river channel edge
+      const xc = this.terrain.getRiverCenter(curZ);
+      if (Math.abs(curX - xc) <= 3.85) break;
+    }
+
+    return path;
   }
 
   setRainIntensity(intensity: number) {
@@ -553,7 +639,7 @@ export class RiverRunoff {
       this.rainMesh.visible = false;
     }
 
-    // 2. Advance 3D Runoff Streams
+    // 2. Advance 3D Runoff Streams (physical Manning velocity driven)
     this.streamMats.forEach((mat) => {
       mat.uniforms.uTime.value = simTime;
       mat.uniforms.uRainIntensity.value = this.rainIntensity;

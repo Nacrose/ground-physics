@@ -260,6 +260,18 @@ export class RiverTerrain {
     return slope + bedDepth + rockNoise;
   }
 
+  // Physical 2D terrain gradient vector ∇z = (∂z/∂x, ∂z/∂z) and bed slope S = |∇z|
+  getBedGradient(x: number, z: number, eps = 0.05): { dx: number; dz: number; slope: number } {
+    const hL = this.getBedHeight(x - eps, z);
+    const hR = this.getBedHeight(x + eps, z);
+    const hD = this.getBedHeight(x, z - eps);
+    const hU = this.getBedHeight(x, z + eps);
+    const dhdx = (hR - hL) / (2.0 * eps);
+    const dhdz = (hU - hD) / (2.0 * eps);
+    const slope = Math.hypot(dhdx, dhdz);
+    return { dx: dhdx, dz: dhdz, slope };
+  }
+
   // Water surface elevation at (x, z)
   getWaterHeight(x: number, z: number): number {
     const slope = (1.0 - (z + 40.0) / this.length) * this.baseDrop;
