@@ -17,6 +17,7 @@ export class RiverRocks {
   private pRot!: Float32Array;
   private pScale!: Float32Array;
   private pVelZ!: Float32Array;
+  private rockMats: THREE.ShaderMaterial[] = [];
 
   constructor(
     terrain: RiverTerrain,
@@ -36,7 +37,7 @@ export class RiverRocks {
     rock08Diffuse.wrapS = rock08Diffuse.wrapT = THREE.RepeatWrapping;
 
     const createRockMat = (map: THREE.Texture, nor: THREE.Texture, arm: THREE.Texture) => {
-      return new THREE.ShaderMaterial({
+      const mat = new THREE.ShaderMaterial({
         uniforms: {
           uHydraulicsTex: { value: hydraulics.texture },
           uMap: { value: map },
@@ -44,6 +45,7 @@ export class RiverRocks {
           uArm: { value: arm },
           uSunDir: { value: sunDir },
           uSunColor: { value: sunColor },
+          uTime: { value: 0.0 },
         },
         vertexShader: `
           varying vec3 vWorldPos;
@@ -63,6 +65,7 @@ export class RiverRocks {
           uniform sampler2D uArm;
           uniform vec3 uSunDir;
           uniform vec3 uSunColor;
+          uniform float uTime;
           varying vec3 vWorldPos;
           varying vec3 vNormal;
 
@@ -84,18 +87,38 @@ export class RiverRocks {
             float uStation = clamp((vWorldPos.z + 40.0) / 80.0, 0.0, 1.0);
             vec4 hyd = texture2D(uHydraulicsTex, vec2(uStation, 0.5));
             float waterY = hyd.g;
-            float submerged = smoothstep(waterY + 0.15, waterY - 0.05, vWorldPos.y);
-            col *= mix(1.0, 0.32, submerged);
+            float submerged = smoothstep(waterY + 0.18, waterY - 0.05, vWorldPos.y);
+            col *= mix(1.0, 0.42, submerged);
 
             vec3 L = normalize(uSunDir);
             float NdotL = max(dot(N, L), 0.0);
             vec3 direct = uSunColor * NdotL;
-            vec3 ambient = vec3(0.20, 0.22, 0.25) * arm.r;
 
+            // Dancing light caustics on submerged boulder flanks
+            if (submerged > 0.05) {
+              float depth = max(0.0, waterY - vWorldPos.y);
+              vec2 cUv1 = vWorldPos.xz * 2.8 - vec2(0.0, uTime * 2.2);
+              vec2 cUv2 = vWorldPos.xz * 5.6 + vec2(uTime * 0.45, -uTime * 3.2);
+              float c1 = texture2D(uNor, cUv1).r * 0.5 + 0.5;
+              float c2 = texture2D(uNor, cUv2).g * 0.5 + 0.5;
+              float caust = pow(c1 * c2, 2.6) * 5.5 * exp(-depth * 0.85);
+              direct += uSunColor * caust * submerged;
+            }
+
+            // Glistening wetness specular on rock surface
+            vec3 V = normalize(cameraPosition - vWorldPos);
+            vec3 H = normalize(L + V);
+            float NdotH = max(dot(N, H), 0.0);
+            float wetGlint = pow(NdotH, 64.0) * 1.6 * submerged * NdotL;
+            direct += uSunColor * wetGlint;
+
+            vec3 ambient = vec3(0.20, 0.22, 0.25) * arm.r;
             gl_FragColor = vec4(col * (ambient + direct), 1.0);
           }
         `,
       });
+      this.rockMats.push(mat);
+      return mat;
     };
 
     const mats = [
@@ -208,9 +231,15 @@ export class RiverRocks {
   }
 
   // REEF3D Sediment Transport: Pebbles mobilize, roll, saltate, and deposit based on Shields parameter θ
-  update(dt: number, hydraulics: RiverHydraulics, terrain: RiverTerrain) {
+  update(dt: number, hydraulics: RiverHydraulics, terrain: RiverTerrain, time = 0) {
     const clampedDt = Math.min(dt, 0.033);
     const dummy = new THREE.Object3D();
+
+    for (const mat of this.rockMats) {
+      if (mat.uniforms.uTime) {
+        mat.uniforms.uTime.value = time;
+      }
+    }
 
     for (let i = 0; i < this.pebbleCount; i++) {
       const i3 = i * 3;

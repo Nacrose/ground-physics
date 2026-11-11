@@ -15,7 +15,7 @@ export default function RiverLab() {
   const [pebblesEnabled, setPebblesEnabled] = useState(true);
   const [followRiver, setFollowRiver] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
-  const [activePreset, setActivePreset] = useState<string>("rapids");
+  const [activePreset, setActivePreset] = useState<string>("macro");
   const [rainIntensity, setRainIntensity] = useState(0.0); // 0 to 80 mm/h
   const [catchmentRunoffQ, setCatchmentRunoffQ] = useState(0.0);
 
@@ -168,7 +168,7 @@ export default function RiverLab() {
     if (labRef.current) labRef.current.setFollowRiver(val);
   };
 
-  const handlePreset = (preset: "rapids" | "island" | "canyon" | "overview" | "runoff") => {
+  const handlePreset = (preset: "macro" | "rapids" | "island" | "canyon" | "overview" | "runoff") => {
     setActivePreset(preset);
     setFollowRiver(false);
     if (labRef.current) labRef.current.setViewPreset(preset);
@@ -959,6 +959,23 @@ export default function RiverLab() {
             Camera Viewpoints
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+            <button
+              onClick={() => handlePreset("macro")}
+              style={{
+                gridColumn: "span 2",
+                padding: "8px 8px",
+                borderRadius: 6,
+                border: !followRiver && activePreset === "macro" ? "1.5px solid #38bdf8" : "1px solid rgba(56, 189, 248, 0.4)",
+                background: !followRiver && activePreset === "macro" ? "rgba(2, 132, 199, 0.55)" : "rgba(56, 189, 248, 0.15)",
+                color: !followRiver && activePreset === "macro" ? "#38bdf8" : "#7dd3fc",
+                fontSize: 11,
+                cursor: "pointer",
+                fontWeight: 700,
+                boxShadow: !followRiver && activePreset === "macro" ? "0 0 14px rgba(56, 189, 248, 0.45)" : "none",
+              }}
+            >
+              💎 Stream-Grade Macro (1.8m Boulder & Pebble Close-Up)
+            </button>
             <button
               onClick={() => handlePreset("rapids")}
               style={{
