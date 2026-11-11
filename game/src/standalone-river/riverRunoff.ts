@@ -503,11 +503,11 @@ export class RiverRunoff {
 
           void main() {
             float rainNorm = clamp(uRainIntensity / 50.0, 0.0, 1.0);
-            float active = mix(0.25, 0.95, rainNorm);
+            float spillActive = mix(0.25, 0.95, rainNorm);
 
             float flow = sin(vUv.y * 28.0 - uTime * 6.5) * 0.5 + 0.5;
             float crossShape = sin(vUv.x * 3.14159);
-            float rillAlpha = pow(crossShape, 0.6) * active * (0.60 + 0.35 * flow);
+            float rillAlpha = pow(crossShape, 0.6) * spillActive * (0.60 + 0.35 * flow);
 
             vec3 V = normalize(cameraPosition - vWorldPos);
             vec3 L = normalize(uSunDir);
